@@ -5,7 +5,7 @@ from app.storage import init_db,authenticate,create_session,get_session,delete_s
 from app.discovery import fetch_public
 from app.intelligence import analyze
 
-app=FastAPI(title='Gulf Logistics AI',version='7.1.0-shared-db')
+app=FastAPI(title='Gulf Logistics AI',version='7.2.0-sales-copilot')
 ADMIN_EMAIL=os.getenv('ADMIN_EMAIL','admin@afaaqtuwaiq.local'); ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD','ChangeMe-Now-2026!')
 init_db(ADMIN_EMAIL,ADMIN_PASSWORD)
 STYLE='''<style>body{font-family:Arial;background:#07131f;color:#eef6fb;margin:0}*{box-sizing:border-box}.wrap{max-width:1250px;margin:auto;padding:24px}.card{background:#102536;border:1px solid #28475d;border-radius:16px;padding:20px;margin:14px 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.nav{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.nav a,.btn{display:inline-block;padding:10px 14px;border:0;border-radius:10px;background:#18384d;color:white;font-weight:700;text-decoration:none;cursor:pointer}.btn{background:#22c55e;color:#04130a}.muted{color:#9fb4c4}.good{color:#54e28b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.kpi{background:#0b1d2b;padding:18px;border-radius:12px}.kpi b{font-size:26px;display:block;margin-top:8px}input,select,textarea{padding:12px;border:1px solid #36586e;border-radius:9px;margin:6px 0;background:#081925;color:white;width:100%}textarea{min-height:85px}.formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}table{width:100%;border-collapse:collapse}th,td{text-align:right;padding:11px;border-bottom:1px solid #28475d;vertical-align:top}.scroll{overflow:auto}.pill{padding:4px 8px;border-radius:999px;background:#18384d}.notice{border-right:4px solid #22c55e}.warn{border-right:4px solid #f59e0b}</style>'''
@@ -18,12 +18,12 @@ def current(r):
 def require(r):
  try:return current(r)
  except:return None
-def nav(): return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/discovery">الاكتشاف</a><a href="/intelligence">الذكاء</a><a href="/accounts">العملاء</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">Pipeline</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a href="/logout">خروج</a></div>'
+def nav(): return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/discovery">الاكتشاف</a><a href="/intelligence-v2">الذكاء</a><a href="/sales-copilot">Sales Copilot</a><a href="/accounts">العملاء</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">Pipeline</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a href="/logout">خروج</a></div>'
 def head(s,t): return '<div class="top"><div><h1>'+esc(t)+'</h1><div class="muted">Gulf Logistics AI · آفاق طويق</div></div><div><span class="good">● PostgreSQL مشترك</span><br><span class="muted">'+esc(s['email'])+'</span></div></div>'+nav()
 def parse(raw): return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def rl(): return RedirectResponse('/login',303)
 @app.get('/api/v50/health')
-def health(): return {'ok':True,'version':'7.1.0-shared-db','database':'postgresql','shared_storage':True,'external_actions':False}
+def health(): return {'ok':True,'version':'7.2.0-sales-copilot','database':'postgresql','shared_storage':True,'sales_copilot':True,'external_actions':False}
 @app.get('/')
 def root(): return RedirectResponse('/dashboard')
 @app.get('/login',response_class=HTMLResponse)
@@ -44,7 +44,7 @@ def dashboard(r:Request):
  s=require(r)
  if not s:return rl()
  a=one('SELECT COUNT(*) n FROM accounts')['n'];o=one('SELECT COUNT(*) n FROM opportunities')['n'];sig=one('SELECT COUNT(*) n FROM discovered_signals')['n'];src=one('SELECT COUNT(*) n FROM source_watches WHERE enabled=1')['n'];pipe=one("SELECT COALESCE(SUM(estimated_value),0) v FROM opportunities WHERE stage NOT IN ('lost','won')")['v']
- b=head(s,'لوحة التشغيل')+f'<div class="grid"><div class="kpi">العملاء<b>{a}</b></div><div class="kpi">الفرص<b>{o}</b></div><div class="kpi">إشارات مكتشفة<b>{sig}</b></div><div class="kpi">مصادر مراقبة<b>{src}</b></div><div class="kpi">Pipeline<b>{pipe:,.0f} SAR</b></div></div><div class="card notice"><b>قاعدة PostgreSQL مركزية مشتركة.</b> الويب والـDiscovery Worker يستخدمان نفس مخزن البيانات.</div><div class="card warn">التواصل الخارجي متوقف ويحتاج موافقة بشرية.</div>'
+ b=head(s,'لوحة التشغيل')+f'<div class="grid"><div class="kpi">العملاء<b>{a}</b></div><div class="kpi">الفرص<b>{o}</b></div><div class="kpi">إشارات مكتشفة<b>{sig}</b></div><div class="kpi">مصادر مراقبة<b>{src}</b></div><div class="kpi">Pipeline<b>{pipe:,.0f} SAR</b></div></div><div class="card notice"><b>قاعدة PostgreSQL مركزية مشتركة.</b> الويب والـDiscovery Worker يستخدمان نفس مخزن البيانات.</div><div class="card notice"><b>Sales Copilot مفعل.</b> يحول الفرص إلى ملف بيع ومسودة عرض وخطة متابعة داخلية.</div><div class="card warn">التواصل الخارجي متوقف ويحتاج موافقة بشرية.</div>'
  return HTMLResponse(page('لوحة التشغيل',b))
 @app.get('/discovery',response_class=HTMLResponse)
 def discovery(r:Request):
@@ -80,39 +80,48 @@ def accounts(r:Request):
 async def add_account(r:Request):
  s=require(r)
  if not s:return rl()
- d=parse(await r.body());n=utcnow();iid=execute('INSERT INTO accounts(name,country,domain,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',(d.get('name',''),d.get('country',''),d.get('domain',''),'lead',d.get('notes',''),n,n));log(s['user_id'],'create','account',iid,d.get('name',''));return RedirectResponse('/accounts',303)
+ d=parse(await r.body());now=utcnow();iid=execute('INSERT INTO accounts(name,country,domain,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',(d['name'],d.get('country'),d.get('domain'),'lead',d.get('notes'),now,now));log(s['user_id'],'create','account',iid,d['name']);return RedirectResponse('/accounts',303)
 @app.get('/opportunities',response_class=HTMLResponse)
-def opps(r:Request):
+def opportunities(r:Request):
  s=require(r)
  if not s:return rl()
- data=rows('SELECT * FROM opportunities ORDER BY score DESC,id DESC');f='<div class="card"><form method="post" action="/opportunities"><div class="formgrid"><input name="company_name" placeholder="الشركة" required><input name="source_url" placeholder="رابط الدليل"><input name="score" type="number" min="0" max="100" value="50"><input name="estimated_value" type="number" placeholder="القيمة SAR"></div><textarea name="signal" placeholder="إشارة الشراء"></textarea><button class="btn">حفظ الفرصة</button></form></div>';trs=''.join(f'<tr><td>{x["score"]}</td><td>{esc(x["company_name"])}</td><td>{esc(x["signal"])}</td><td>{esc(x["stage"])}</td><td>{x["estimated_value"]:,.0f}</td></tr>' for x in data);return HTMLResponse(page('الفرص',head(s,'الفرص')+f+'<div class="card scroll"><table>'+trs+'</table></div>'))
+ data=rows('SELECT * FROM opportunities ORDER BY id DESC');f='<div class="card"><form method="post" action="/opportunities"><div class="formgrid"><input name="company_name" placeholder="الشركة" required><input name="source_url" placeholder="رابط المصدر"><input name="score" type="number" min="0" max="100" value="50"><input name="estimated_value" type="number" min="0" value="0"></div><textarea name="signal" placeholder="إشارة الشراء"></textarea><button class="btn">إضافة فرصة</button></form></div>';trs=''.join(f'<tr><td>{x["id"]}</td><td>{esc(x["company_name"])}</td><td>{x["score"]}</td><td>{esc(x["stage"])}</td><td>{x["estimated_value"]:,.0f} {esc(x["currency"])}</td><td><a class="btn" href="/sales-copilot/{x["id"]}">Sales Copilot</a></td></tr>' for x in data);return HTMLResponse(page('الفرص',head(s,'الفرص')+f+'<div class="card scroll"><table><tr><th>ID</th><th>الشركة</th><th>Score</th><th>المرحلة</th><th>القيمة</th><th>مساعد البيع</th></tr>'+trs+'</table></div>'))
 @app.post('/opportunities')
-async def add_opp(r:Request):
+async def add_opportunity(r:Request):
  s=require(r)
  if not s:return rl()
- d=parse(await r.body());n=utcnow();iid=execute('INSERT INTO opportunities(company_name,source_url,signal,score,stage,estimated_value,currency,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(d.get('company_name',''),d.get('source_url',''),d.get('signal',''),max(0,min(100,int(d.get('score') or 0))),'new',float(d.get('estimated_value') or 0),'SAR',s['email'],n,n));log(s['user_id'],'create','opportunity',iid,d.get('company_name',''));return RedirectResponse('/opportunities',303)
+ d=parse(await r.body());now=utcnow();iid=execute('INSERT INTO opportunities(company_name,source_url,signal,score,stage,estimated_value,currency,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(d['company_name'],d.get('source_url'),d.get('signal'),int(d.get('score',50)),'new',float(d.get('estimated_value',0)),'SAR',s['email'],now,now));log(s['user_id'],'create','opportunity',iid,d['company_name']);return RedirectResponse('/opportunities',303)
 @app.get('/shipments',response_class=HTMLResponse)
 def shipments(r:Request):
  s=require(r)
  if not s:return rl()
- data=rows('SELECT * FROM shipments ORDER BY id DESC');return HTMLResponse(page('الشحنات',head(s,'الشحنات')+'<div class="card scroll"><table>'+''.join(f'<tr><td>{esc(x["reference"])}</td><td>{esc(x["service_type"])}</td><td>{esc(x["status"])}</td><td>{x["revenue"]:,.0f}</td></tr>' for x in data)+'</table></div>'))
+ data=rows('SELECT * FROM shipments ORDER BY id DESC');f='<div class="card"><form method="post" action="/shipments"><div class="formgrid"><input name="reference" placeholder="المرجع" required><select name="service_type"><option>Customs Clearance</option><option>Transport</option><option>Shipping</option><option>Warehousing</option><option>Door to Door</option></select><input name="origin" placeholder="المنشأ"><input name="destination" placeholder="الوجهة"><input name="revenue" type="number" value="0"><input name="cost" type="number" value="0"></div><button class="btn">إضافة شحنة</button></form></div>';trs=''.join(f'<tr><td>{esc(x["reference"])}</td><td>{esc(x["service_type"])}</td><td>{esc(x["origin"])}</td><td>{esc(x["destination"])}</td><td>{esc(x["status"])}</td></tr>' for x in data);return HTMLResponse(page('الشحنات',head(s,'الشحنات')+f+'<div class="card scroll"><table>'+trs+'</table></div>'))
+@app.post('/shipments')
+async def add_shipment(r:Request):
+ s=require(r)
+ if not s:return rl()
+ d=parse(await r.body());now=utcnow();iid=execute('INSERT INTO shipments(reference,service_type,origin,destination,status,revenue,cost,currency,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(d['reference'],d['service_type'],d.get('origin'),d.get('destination'),'new',float(d.get('revenue',0)),float(d.get('cost',0)),'SAR',now,now));log(s['user_id'],'create','shipment',iid,d['reference']);return RedirectResponse('/shipments',303)
 @app.get('/pipeline',response_class=HTMLResponse)
 def pipeline(r:Request):
  s=require(r)
  if not s:return rl()
- data=rows('SELECT stage,COUNT(*) n,COALESCE(SUM(estimated_value),0) value FROM opportunities GROUP BY stage ORDER BY value DESC');return HTMLResponse(page('Pipeline',head(s,'Pipeline')+'<div class="card scroll"><table>'+''.join(f'<tr><td>{esc(x["stage"])}</td><td>{x["n"]}</td><td>{x["value"]:,.0f} SAR</td></tr>' for x in data)+'</table></div>'))
+ data=rows('SELECT stage,COUNT(*) n,COALESCE(SUM(estimated_value),0) value FROM opportunities GROUP BY stage ORDER BY stage');cards=''.join(f'<div class="kpi">{esc(x["stage"])}<b>{x["n"]}</b><span>{x["value"]:,.0f} SAR</span></div>' for x in data);return HTMLResponse(page('Pipeline',head(s,'Pipeline')+'<div class="grid">'+cards+'</div>'))
 @app.get('/approvals',response_class=HTMLResponse)
 def approvals(r:Request):
  s=require(r)
  if not s:return rl()
- return HTMLResponse(page('الموافقات',head(s,'الموافقات البشرية')+'<div class="card warn">الإرسال الخارجي غير مفعّل. الموافقة البشرية إلزامية قبل أي تكامل تواصل.</div>'))
+ data=rows('SELECT * FROM approvals ORDER BY id DESC');trs=''.join(f'<tr><td>{x["id"]}</td><td>{esc(x["kind"])}</td><td>{esc(x["entity_type"])} #{x["entity_id"]}</td><td>{esc(x["status"])}</td><td>{esc(x["notes"])}</td></tr>' for x in data);return HTMLResponse(page('الموافقات',head(s,'الموافقات البشرية')+'<div class="card warn">لا توجد إجراءات خارجية تلقائية.</div><div class="card scroll"><table>'+trs+'</table></div>'))
 @app.get('/activity',response_class=HTMLResponse)
 def activity(r:Request):
  s=require(r)
  if not s:return rl()
- data=rows('SELECT * FROM activity ORDER BY id DESC LIMIT 200');return HTMLResponse(page('السجل',head(s,'سجل النشاط')+'<div class="card scroll"><table>'+''.join(f'<tr><td>{esc(x["created_at"])}</td><td>{esc(x["action"])}</td><td>{esc(x["summary"])}</td></tr>' for x in data)+'</table></div>'))
-@app.get('/api/v6/me')
+ data=rows('SELECT * FROM activity ORDER BY id DESC LIMIT 300');trs=''.join(f'<tr><td>{esc(x["created_at"])}</td><td>{esc(x["action"])}</td><td>{esc(x["entity_type"])}</td><td>{esc(x["entity_id"])}</td><td>{esc(x["summary"])}</td></tr>' for x in data);return HTMLResponse(page('السجل',head(s,'سجل النشاط')+'<div class="card scroll"><table>'+trs+'</table></div>'))
+@app.get('/api/v7/me')
 def me(r:Request):
- s=current(r);return {'email':s['email'],'role':s['role']}
-@app.get('/api/v6/opportunities')
-def api_opps(r:Request):current(r);return rows('SELECT * FROM opportunities ORDER BY score DESC,id DESC')
+ s=current(r);return {'email':s['email'],'name':s['name'],'role':s['role']}
+@app.get('/api/v7/accounts')
+def api_accounts(r:Request): current(r);return rows('SELECT * FROM accounts ORDER BY id DESC')
+@app.get('/api/v7/opportunities')
+def api_opps(r:Request): current(r);return rows('SELECT * FROM opportunities ORDER BY id DESC')
+@app.get('/api/v7/shipments')
+def api_shipments(r:Request): current(r);return rows('SELECT * FROM shipments ORDER BY id DESC')
