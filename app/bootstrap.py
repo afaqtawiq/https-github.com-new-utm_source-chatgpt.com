@@ -11,6 +11,7 @@ from app.inbound_sales import router as inbound_sales_router
 from app.inbound_actions import router as inbound_actions_router
 from app.quote_builder import router as quote_builder_router
 from app.quote_pricing import router as quote_pricing_router
+from app.quote_workflow import router as quote_workflow_router
 
 app.include_router(verification_router)
 app.include_router(intelligence_router)
@@ -24,3 +25,4 @@ app.include_router(inbound_sales_router)
 app.include_router(inbound_actions_router)
 app.include_router(quote_builder_router)
 app.include_router(quote_pricing_router)
+app.include_router(quote_workflow_router)
