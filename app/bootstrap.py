@@ -8,6 +8,7 @@ from app.revenue_sales import router as revenue_sales_router
 from app.sales_workspace import router as sales_workspace_router
 from app.followup_automation import router as followup_automation_router
 from app.inbound_sales import router as inbound_sales_router
+from app.inbound_actions import router as inbound_actions_router
 
 app.include_router(verification_router)
 app.include_router(intelligence_router)
@@ -18,3 +19,4 @@ app.include_router(revenue_sales_router)
 app.include_router(sales_workspace_router)
 app.include_router(followup_automation_router)
 app.include_router(inbound_sales_router)
+app.include_router(inbound_actions_router)
