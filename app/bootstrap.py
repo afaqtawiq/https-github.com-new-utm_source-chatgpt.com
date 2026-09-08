@@ -21,12 +21,33 @@ from app.customer_success import router as customer_success_router
 from app.revenue_growth import router as revenue_growth_router
 from app.management_autopilot import router as management_autopilot_router
 from app.security_governance import router as security_governance_router,csrf_guard
+from app.team_rbac import router as team_rbac_router
+from app.storage import get_session
+
+ROLE_PREFIX={
+ 'admin':None,
+ 'sales':('/operations','/control-tower','/security','/team'),
+ 'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),
+ 'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),
+ 'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/team'),
+ 'viewer':(),
+}
+def role_allowed(request):
+ s=get_session(request.cookies.get('gla_session'))
+ if not s:return True
+ role=s.get('role','viewer');path=request.url.path
+ if role=='admin':return True
+ if role=='viewer':return request.method in ('GET','HEAD','OPTIONS') and path not in ('/security','/team') and not path.startswith('/auth/google')
+ blocked=ROLE_PREFIX.get(role,())
+ return not any(path==p or path.startswith(p+'/') for p in blocked)
 
 @app.middleware('http')
 async def enterprise_security_guard(request,call_next):
     if not csrf_guard(request):
         code=429 if request.url.path=='/login' else 403
         return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
+    if not role_allowed(request):
+        return JSONResponse({'detail':'Role does not permit this action'},status_code=403)
     response=await call_next(request)
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['X-Frame-Options']='DENY'
@@ -55,3 +76,4 @@ app.include_router(customer_success_router)
 app.include_router(revenue_growth_router)
 app.include_router(management_autopilot_router)
 app.include_router(security_governance_router)
+app.include_router(team_rbac_router)
