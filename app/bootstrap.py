@@ -24,6 +24,7 @@ from app.security_governance import router as security_governance_router,csrf_gu
 from app.team_rbac import router as team_rbac_router
 from app.identity_hardening import router as identity_hardening_router
 from app.fine_permissions import router as fine_permissions_router,has_permission
+from app import mfa_schema_compat
 from app.mfa_stepup import router as mfa_stepup_router,mfa_state,recent_stepup
 from app.mfa_recovery import router as mfa_recovery_router
 from app.storage import get_session,one,execute,utcnow
