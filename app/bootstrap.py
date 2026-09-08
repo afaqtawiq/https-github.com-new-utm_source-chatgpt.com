@@ -1,3 +1,4 @@
+from fastapi.responses import JSONResponse
 from app.main import app
 from app.verification import router as verification_router
 from app.intelligence_ui import router as intelligence_router
@@ -19,6 +20,19 @@ from app.customer360 import router as customer360_router
 from app.customer_success import router as customer_success_router
 from app.revenue_growth import router as revenue_growth_router
 from app.management_autopilot import router as management_autopilot_router
+from app.security_governance import router as security_governance_router,csrf_guard
+
+@app.middleware('http')
+async def enterprise_security_guard(request,call_next):
+    if not csrf_guard(request):
+        code=429 if request.url.path=='/login' else 403
+        return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
+    response=await call_next(request)
+    response.headers['X-Content-Type-Options']='nosniff'
+    response.headers['X-Frame-Options']='DENY'
+    response.headers['Referrer-Policy']='same-origin'
+    response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
+    return response
 
 app.include_router(verification_router)
 app.include_router(intelligence_router)
@@ -40,3 +54,4 @@ app.include_router(customer360_router)
 app.include_router(customer_success_router)
 app.include_router(revenue_growth_router)
 app.include_router(management_autopilot_router)
+app.include_router(security_governance_router)
