@@ -18,6 +18,7 @@ from app.ceo_command import router as ceo_command_router
 from app.customer360 import router as customer360_router
 from app.customer_success import router as customer_success_router
 from app.revenue_growth import router as revenue_growth_router
+from app.management_autopilot import router as management_autopilot_router
 
 app.include_router(verification_router)
 app.include_router(intelligence_router)
@@ -38,3 +39,4 @@ app.include_router(ceo_command_router)
 app.include_router(customer360_router)
 app.include_router(customer_success_router)
 app.include_router(revenue_growth_router)
+app.include_router(management_autopilot_router)
