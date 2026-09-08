@@ -1,5 +1,5 @@
 import os, json, re, time, hmac, hashlib
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from app.storage import db, utcnow, log
 
@@ -64,7 +64,7 @@ async def retell_webhook(request:Request):
             if outcome in ('interested-transferred','quote-requested') or _b(custom.get('quote_requested')):
                 c.execute("UPDATE opportunities SET stage=CASE WHEN stage IN ('new','qualified','contacted') THEN 'negotiation' ELSE stage END,updated_at=%s WHERE id=%s",(now,opp))
     if event=='call_analyzed' and opp:log(None,'retell_call_analyzed','opportunity',opp,'Retell call analyzed: '+(outcome or 'completed'))
-    return JSONResponse({},status_code=204)
+    return Response(status_code=204)
 
 @router.get('/api/v7/retell/status')
 def retell_status():
