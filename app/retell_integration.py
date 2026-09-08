@@ -5,6 +5,7 @@ from app.storage import db, utcnow, log
 
 router=APIRouter()
 RETELL_API_KEY=os.getenv('RETELL_API_KEY','')
+RETELL_WEBHOOK_KEY=os.getenv('RETELL_WEBHOOK_KEY','')
 
 def _init():
     ddl=[
@@ -16,14 +17,14 @@ def _init():
 _init()
 
 def _verify(raw:bytes,sig:str)->bool:
-    if not RETELL_API_KEY or not sig:return False
+    if not RETELL_WEBHOOK_KEY or not sig:return False
     m=re.fullmatch(r'v=(\d+),d=(.+)',sig.strip())
     if not m:return False
     ts,digest=m.groups()
     try:
         if abs(int(time.time()*1000)-int(ts))>300000:return False
     except Exception:return False
-    expected=hmac.new(RETELL_API_KEY.encode(),raw+ts.encode(),hashlib.sha256).hexdigest()
+    expected=hmac.new(RETELL_WEBHOOK_KEY.encode(),raw+ts.encode(),hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected,digest)
 
 def _b(v):
@@ -67,4 +68,10 @@ async def retell_webhook(request:Request):
 
 @router.get('/api/v7/retell/status')
 def retell_status():
-    return {'configured':bool(RETELL_API_KEY),'webhook':'/webhooks/retell','signature_verification':True,'external_calls_automatic':False}
+    return {
+        'api_configured':bool(RETELL_API_KEY),
+        'webhook_configured':bool(RETELL_WEBHOOK_KEY),
+        'webhook':'/webhooks/retell',
+        'signature_verification':True,
+        'external_calls_automatic':False,
+    }
