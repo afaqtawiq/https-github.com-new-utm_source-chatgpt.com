@@ -108,7 +108,7 @@ def send(mid:int,request:Request):
     try:
         provider_id=send_gmail(s['user_id'],m['recipient'],m['subject'],m['body']+'\n\n'+(m.get('proposal_text') or ''));now=utcnow();execute('UPDATE outbound_messages SET status=?,provider=?,provider_message_id=?,sent_at=?,updated_at=?,last_error=NULL WHERE id=?',('sent','gmail',provider_id,now,now,mid));log(s['user_id'],'send_approved_message','outbound_message',mid,'Approved message sent via Gmail API')
     except Exception as e:
-        execute('UPDATE outbound_messages SET last_error=?,updated_at=? WHERE id=?',(str(e)[:500],utcnow(),mid));raise HTTPException(503,'تعذر الإرسال عبر Gmail')
+        safe=str(e)[:500];execute('UPDATE outbound_messages SET last_error=?,updated_at=? WHERE id=?',(safe,utcnow(),mid));raise HTTPException(503,safe)
     return RedirectResponse('/outbound/'+str(mid),303)
 
 @router.get('/api/v7/outbound')
