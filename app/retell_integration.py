@@ -1,7 +1,7 @@
 import os, json, re, time, hmac, hashlib
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
-from app.storage import db, utcnow, log
+from fastapi.responses import JSONResponse, HTMLResponse
+from app.storage import db, utcnow, log, get_session
 
 router=APIRouter()
 RETELL_API_KEY=os.getenv('RETELL_API_KEY','')
@@ -37,6 +37,21 @@ def _dt(ms):
     try:return datetime.datetime.fromtimestamp(int(ms)/1000,datetime.timezone.utc)
     except Exception:return None
 
+def _esc(v):
+    import html
+    return html.escape(str(v or ''))
+
+def _sync_crm(c,opp,event,outcome,interested,quote_requested,callback_requested,service,summary,now):
+    if event!='call_analyzed' or not opp:return
+    # Only actual analyzed customer outcomes can move the opportunity forward.
+    positive=interested.lower() in ('interested','yes','true','نعم')
+    quote=bool(quote_requested) or outcome in ('interested-transferred','quote-requested','quote_requested')
+    if positive:
+        c.execute("UPDATE opportunities SET stage=CASE WHEN stage IN ('new','qualified') THEN 'contacted' ELSE stage END,updated_at=%s WHERE id=%s",(now,opp))
+    if quote:
+        c.execute("UPDATE opportunities SET stage=CASE WHEN stage IN ('new','qualified','contacted') THEN 'negotiation' ELSE stage END,updated_at=%s WHERE id=%s",(now,opp))
+    # Never auto-mark won/lost from a phone webhook.
+
 @router.post('/webhooks/retell')
 async def retell_webhook(request:Request):
     raw=await request.body();sig=request.headers.get('x-retell-signature','')
@@ -54,24 +69,36 @@ async def retell_webhook(request:Request):
     interested=str(custom.get('interested') or '')[:50]
     service=str(custom.get('requested_service') or '')[:300]
     follow=str(custom.get('preferred_follow_up') or '')[:50]
+    quote_requested=_b(custom.get('quote_requested'));callback_requested=_b(custom.get('callback_requested'))
     now=utcnow()
     with db() as c:
         c.execute('INSERT INTO retell_webhook_events(call_id,event_type,payload_json,received_at) VALUES(%s,%s,%s,%s)',(cid,event,json.dumps(data,ensure_ascii=False),now))
-        c.execute('''INSERT INTO retell_calls(call_id,agent_id,opportunity_id,event_type,status,direction,from_number,to_number,disconnection_reason,transcript,analysis_json,summary,outcome,interested,requested_service,preferred_follow_up,quote_requested,callback_requested,started_at,ended_at,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(call_id) DO UPDATE SET event_type=EXCLUDED.event_type,status=EXCLUDED.status,disconnection_reason=EXCLUDED.disconnection_reason,transcript=COALESCE(NULLIF(EXCLUDED.transcript,''),retell_calls.transcript),analysis_json=COALESCE(NULLIF(EXCLUDED.analysis_json,''),retell_calls.analysis_json),summary=COALESCE(NULLIF(EXCLUDED.summary,''),retell_calls.summary),outcome=COALESCE(NULLIF(EXCLUDED.outcome,''),retell_calls.outcome),interested=COALESCE(NULLIF(EXCLUDED.interested,''),retell_calls.interested),requested_service=COALESCE(NULLIF(EXCLUDED.requested_service,''),retell_calls.requested_service),preferred_follow_up=COALESCE(NULLIF(EXCLUDED.preferred_follow_up,''),retell_calls.preferred_follow_up),quote_requested=GREATEST(retell_calls.quote_requested,EXCLUDED.quote_requested),callback_requested=GREATEST(retell_calls.callback_requested,EXCLUDED.callback_requested),ended_at=COALESCE(EXCLUDED.ended_at,retell_calls.ended_at),updated_at=EXCLUDED.updated_at''',(cid,call.get('agent_id'),opp,event,call.get('call_status'),call.get('direction'),call.get('from_number'),call.get('to_number'),call.get('disconnection_reason'),call.get('transcript') or '',json.dumps(analysis,ensure_ascii=False) if analysis else '',summary,outcome,interested,service,follow,_b(custom.get('quote_requested')),_b(custom.get('callback_requested')),_dt(call.get('start_timestamp')),_dt(call.get('end_timestamp')),now,now))
-        if event=='call_analyzed' and opp:
-            if interested.lower() in ('interested','yes','true'):
-                c.execute("UPDATE opportunities SET stage=CASE WHEN stage IN ('new','qualified','contacted') THEN 'contacted' ELSE stage END,updated_at=%s WHERE id=%s",(now,opp))
-            if outcome in ('interested-transferred','quote-requested') or _b(custom.get('quote_requested')):
-                c.execute("UPDATE opportunities SET stage=CASE WHEN stage IN ('new','qualified','contacted') THEN 'negotiation' ELSE stage END,updated_at=%s WHERE id=%s",(now,opp))
+        c.execute('''INSERT INTO retell_calls(call_id,agent_id,opportunity_id,event_type,status,direction,from_number,to_number,disconnection_reason,transcript,analysis_json,summary,outcome,interested,requested_service,preferred_follow_up,quote_requested,callback_requested,started_at,ended_at,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(call_id) DO UPDATE SET opportunity_id=COALESCE(EXCLUDED.opportunity_id,retell_calls.opportunity_id),event_type=EXCLUDED.event_type,status=EXCLUDED.status,disconnection_reason=EXCLUDED.disconnection_reason,transcript=COALESCE(NULLIF(EXCLUDED.transcript,''),retell_calls.transcript),analysis_json=COALESCE(NULLIF(EXCLUDED.analysis_json,''),retell_calls.analysis_json),summary=COALESCE(NULLIF(EXCLUDED.summary,''),retell_calls.summary),outcome=COALESCE(NULLIF(EXCLUDED.outcome,''),retell_calls.outcome),interested=COALESCE(NULLIF(EXCLUDED.interested,''),retell_calls.interested),requested_service=COALESCE(NULLIF(EXCLUDED.requested_service,''),retell_calls.requested_service),preferred_follow_up=COALESCE(NULLIF(EXCLUDED.preferred_follow_up,''),retell_calls.preferred_follow_up),quote_requested=GREATEST(retell_calls.quote_requested,EXCLUDED.quote_requested),callback_requested=GREATEST(retell_calls.callback_requested,EXCLUDED.callback_requested),ended_at=COALESCE(EXCLUDED.ended_at,retell_calls.ended_at),updated_at=EXCLUDED.updated_at''',(cid,call.get('agent_id'),opp,event,call.get('call_status'),call.get('direction'),call.get('from_number'),call.get('to_number'),call.get('disconnection_reason'),call.get('transcript') or '',json.dumps(analysis,ensure_ascii=False) if analysis else '',summary,outcome,interested,service,follow,quote_requested,callback_requested,_dt(call.get('start_timestamp')),_dt(call.get('end_timestamp')),now,now))
+        _sync_crm(c,opp,event,outcome,interested,quote_requested,callback_requested,service,summary,now)
     if event=='call_analyzed' and opp:log(None,'retell_call_analyzed','opportunity',opp,'Retell call analyzed: '+(outcome or 'completed'))
     return Response(status_code=204)
 
+@router.get('/communications',response_class=HTMLResponse)
+def communications(request:Request):
+    sess=get_session(request.cookies.get('gla_session'))
+    if not sess:return HTMLResponse('<meta http-equiv="refresh" content="0;url=/login">',status_code=401)
+    with db() as c:
+        c.execute('''SELECT r.*,o.title AS opportunity_title FROM retell_calls r LEFT JOIN opportunities o ON o.id=r.opportunity_id ORDER BY r.updated_at DESC LIMIT 100''')
+        rows=c.fetchall();cols=[d.name for d in c.description] if c.description else []
+    items=[dict(zip(cols,row)) for row in rows]
+    cards=''.join(f'''<tr><td>{_esc(x.get('updated_at'))}</td><td>{_esc(x.get('opportunity_title') or ('#'+str(x.get('opportunity_id'))) if x.get('opportunity_id') else 'غير مرتبط')}</td><td>{_esc(x.get('status') or x.get('event_type'))}</td><td>{_esc(x.get('outcome'))}</td><td>{_esc(x.get('requested_service'))}</td><td>{'نعم' if x.get('quote_requested') else '—'}</td><td>{'نعم' if x.get('callback_requested') else '—'}</td><td>{_esc(x.get('preferred_follow_up'))}</td><td>{_esc(x.get('summary'))}</td></tr>''' for x in items)
+    body=f'''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>مركز الاتصالات</title><style>body{{font-family:Arial;margin:32px;background:#f6f7f9;color:#17202a}}.box{{background:white;padding:24px;border-radius:14px;box-shadow:0 2px 12px #0001}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{padding:10px;border-bottom:1px solid #eee;vertical-align:top}}th{{text-align:right;background:#fafafa}}.note{{background:#eef7ff;padding:12px;border-radius:10px;margin:12px 0}}</style><body><div class="box"><h1>مركز اتصالات المبيعات</h1><div class="note">Retell → Gulf Logistics AI → CRM. لا توجد مكالمات خارجية تلقائية؛ هذه الصفحة تعرض النتائج المستلمة فقط.</div><table><thead><tr><th>آخر تحديث</th><th>الفرصة</th><th>الحالة</th><th>النتيجة</th><th>الخدمة</th><th>طلب عرض</th><th>طلب اتصال</th><th>المتابعة</th><th>الملخص</th></tr></thead><tbody>{cards or '<tr><td colspan="9">لا توجد مكالمات مسجلة بعد.</td></tr>'}</tbody></table></div></body></html>'''
+    return HTMLResponse(body)
+
+@router.get('/api/v7/communications')
+def communications_api(request:Request):
+    sess=get_session(request.cookies.get('gla_session'))
+    if not sess:return JSONResponse({'detail':'authentication required'},status_code=401)
+    with db() as c:
+        c.execute('''SELECT id,call_id,agent_id,opportunity_id,event_type,status,direction,summary,outcome,interested,requested_service,preferred_follow_up,quote_requested,callback_requested,started_at,ended_at,updated_at FROM retell_calls ORDER BY updated_at DESC LIMIT 100''')
+        rows=c.fetchall();cols=[d.name for d in c.description] if c.description else []
+    return {'items':[dict(zip(cols,r)) for r in rows]}
+
 @router.get('/api/v7/retell/status')
 def retell_status():
-    return {
-        'api_configured':bool(RETELL_API_KEY),
-        'webhook_configured':bool(RETELL_WEBHOOK_KEY),
-        'webhook':'/webhooks/retell',
-        'signature_verification':True,
-        'external_calls_automatic':False,
-    }
+    return {'api_configured':bool(RETELL_API_KEY),'webhook_configured':bool(RETELL_WEBHOOK_KEY),'webhook':'/webhooks/retell','signature_verification':True,'external_calls_automatic':False,'crm_sync':True,'communications_center':'/communications'}
