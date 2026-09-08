@@ -18,6 +18,16 @@ def cfg():
 def enc(v,key):return Fernet(key.encode()).encrypt(v.encode()).decode()
 def dec(v,key):return Fernet(key.encode()).decrypt(v.encode()).decode()
 def connection(uid):return one('SELECT * FROM email_connections WHERE user_id=?',(uid,))
+def safe_google_error(resp):
+ try:
+  data=resp.json();err=data.get('error',{})
+  if isinstance(err,dict):
+   msg=err.get('message') or err.get('status') or 'Google API error'
+   code=err.get('code') or resp.status_code
+   return f'Google API {code}: {msg}'[:400]
+  if isinstance(err,str):return f'Google OAuth {resp.status_code}: {err}'[:400]
+ except Exception:pass
+ return f'Google API HTTP {resp.status_code}'
 @router.get('/settings/email',response_class=HTMLResponse)
 def settings(request:Request):
  s=auth(request);c=connection(s['user_id']);configured=all(os.getenv(k) for k in ('GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REDIRECT_URI','TOKEN_ENCRYPTION_KEY'))
@@ -37,9 +47,13 @@ def callback(request:Request,code:str='',state:str='',error:str=''):
  if not state or not secrets.compare_digest(state,s.get('csrf') or ''):raise HTTPException(400,'Invalid OAuth state')
  cid,sec,redir,key,scope=cfg()
  with httpx.Client(timeout=20) as client:
-  tr=client.post(TOKEN,data={'code':code,'client_id':cid,'client_secret':sec,'redirect_uri':redir,'grant_type':'authorization_code'});tr.raise_for_status();tok=tr.json();refresh=tok.get('refresh_token')
+  tr=client.post(TOKEN,data={'code':code,'client_id':cid,'client_secret':sec,'redirect_uri':redir,'grant_type':'authorization_code'})
+  if tr.status_code>=400:raise HTTPException(400,safe_google_error(tr))
+  tok=tr.json();refresh=tok.get('refresh_token')
   if not refresh:raise HTTPException(400,'Google did not return an offline refresh token')
-  ui=client.get(USERINFO,headers={'Authorization':'Bearer '+tok['access_token']});ui.raise_for_status();sender=ui.json().get('email','')
+  ui=client.get(USERINFO,headers={'Authorization':'Bearer '+tok['access_token']})
+  if ui.status_code>=400:raise HTTPException(400,safe_google_error(ui))
+  sender=ui.json().get('email','')
  now=utcnow();existing=connection(s['user_id']);cipher=enc(refresh,key)
  if existing:execute('UPDATE email_connections SET sender_email=?,refresh_token_enc=?,scope=?,status=?,updated_at=? WHERE user_id=?',(sender,cipher,scope,'connected',now,s['user_id']))
  else:execute('INSERT INTO email_connections(user_id,provider,sender_email,refresh_token_enc,scope,status,connected_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',(s['user_id'],'gmail',sender,cipher,scope,'connected',now,now))
@@ -53,6 +67,11 @@ def send_gmail(user_id,recipient,subject,body):
  if not c or c.get('status')!='connected':raise RuntimeError('Gmail is not connected')
  cid,sec,redir,key,scope=cfg();refresh=dec(c['refresh_token_enc'],key)
  with httpx.Client(timeout=25) as client:
-  tr=client.post(TOKEN,data={'client_id':cid,'client_secret':sec,'refresh_token':refresh,'grant_type':'refresh_token'});tr.raise_for_status();access=tr.json()['access_token']
+  tr=client.post(TOKEN,data={'client_id':cid,'client_secret':sec,'refresh_token':refresh,'grant_type':'refresh_token'})
+  if tr.status_code>=400:raise RuntimeError(safe_google_error(tr))
+  access=tr.json().get('access_token')
+  if not access:raise RuntimeError('Google OAuth did not return an access token')
   msg=EmailMessage();msg['To']=recipient;msg['From']=c.get('sender_email') or 'me';msg['Subject']=subject;msg.set_content(body);raw=base64.urlsafe_b64encode(msg.as_bytes()).decode().rstrip('=')
-  sr=client.post(SEND,headers={'Authorization':'Bearer '+access},json={'raw':raw});sr.raise_for_status();return sr.json().get('id','')
+  sr=client.post(SEND,headers={'Authorization':'Bearer '+access},json={'raw':raw})
+  if sr.status_code>=400:raise RuntimeError(safe_google_error(sr))
+  return sr.json().get('id','')
