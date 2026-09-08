@@ -1,4 +1,4 @@
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,RedirectResponse
 from app.main import app
 from app.verification import router as verification_router
 from app.intelligence_ui import router as intelligence_router
@@ -22,58 +22,31 @@ from app.revenue_growth import router as revenue_growth_router
 from app.management_autopilot import router as management_autopilot_router
 from app.security_governance import router as security_governance_router,csrf_guard
 from app.team_rbac import router as team_rbac_router
-from app.storage import get_session
+from app.identity_hardening import router as identity_hardening_router
+from app.storage import get_session,one,execute,utcnow
 
-ROLE_PREFIX={
- 'admin':None,
- 'sales':('/operations','/control-tower','/security','/team'),
- 'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),
- 'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),
- 'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/team'),
- 'viewer':(),
-}
-def role_allowed(request):
- s=get_session(request.cookies.get('gla_session'))
+ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/team'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/team'),'viewer':()}
+def role_allowed(request,s):
  if not s:return True
  role=s.get('role','viewer');path=request.url.path
  if role=='admin':return True
  if role=='viewer':return request.method in ('GET','HEAD','OPTIONS') and path not in ('/security','/team') and not path.startswith('/auth/google')
- blocked=ROLE_PREFIX.get(role,())
- return not any(path==p or path.startswith(p+'/') for p in blocked)
-
+ return not any(path==p or path.startswith(p+'/') for p in ROLE_PREFIX.get(role,()))
 @app.middleware('http')
 async def enterprise_security_guard(request,call_next):
     if not csrf_guard(request):
-        code=429 if request.url.path=='/login' else 403
-        return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
-    if not role_allowed(request):
-        return JSONResponse({'detail':'Role does not permit this action'},status_code=403)
+        code=429 if request.url.path=='/login' else 403;return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
+    sess=get_session(request.cookies.get('gla_session'))
+    if sess:
+        u=one('SELECT is_active,must_change_password FROM users WHERE id=?',(sess['user_id'],))
+        if not u or not u.get('is_active',1):
+            execute('DELETE FROM sessions WHERE id=?',(sess['id'],));return RedirectResponse('/login',303)
+        execute('UPDATE sessions SET last_seen_at=? WHERE id=?',(utcnow(),sess['id']))
+        allowed_gate=request.url.path.startswith('/identity') or request.url.path in ('/logout','/api/v50/health')
+        if u.get('must_change_password') and not allowed_gate:return RedirectResponse('/identity',303)
+    if not role_allowed(request,sess):return JSONResponse({'detail':'Role does not permit this action'},status_code=403)
     response=await call_next(request)
-    response.headers['X-Content-Type-Options']='nosniff'
-    response.headers['X-Frame-Options']='DENY'
-    response.headers['Referrer-Policy']='same-origin'
-    response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
+    response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
     return response
 
-app.include_router(verification_router)
-app.include_router(intelligence_router)
-app.include_router(sales_copilot_router)
-app.include_router(outbound_router)
-app.include_router(gmail_oauth_router)
-app.include_router(revenue_sales_router)
-app.include_router(sales_workspace_router)
-app.include_router(followup_automation_router)
-app.include_router(inbound_sales_router)
-app.include_router(inbound_actions_router)
-app.include_router(quote_builder_router)
-app.include_router(quote_pricing_router)
-app.include_router(quote_workflow_router)
-app.include_router(operations_control_router)
-app.include_router(control_tower_router)
-app.include_router(ceo_command_router)
-app.include_router(customer360_router)
-app.include_router(customer_success_router)
-app.include_router(revenue_growth_router)
-app.include_router(management_autopilot_router)
-app.include_router(security_governance_router)
-app.include_router(team_rbac_router)
+for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router):app.include_router(r)
