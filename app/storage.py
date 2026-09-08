@@ -7,6 +7,11 @@ DATABASE_URL=os.getenv('DATABASE_URL','')
 if not DATABASE_URL:
     raise RuntimeError('DATABASE_URL is required for production shared storage')
 
+OFFICIAL_DISCOVERY_SOURCES=[
+    ('ZATCA Tenders & Procurement','https://www.zatca.gov.sa/ar/AboutUs/Pages/Procurement-and-Tenders.aspx','web'),
+    ('ZATCA Procurement Plan 2026','https://zatca.gov.sa/ar/MediaCenter/Elan/Pages/Procurement-and-Tenders-for-the-Fiscal-Year-2026.aspx','web'),
+]
+
 def utcnow(): return datetime.datetime.now(datetime.timezone.utc)
 
 @contextmanager
@@ -46,6 +51,10 @@ def init_db(admin_email,admin_password):
         row=c.execute('SELECT id FROM users WHERE email=%s',(admin_email,)).fetchone()
         if not row:
             c.execute('INSERT INTO users(email,name,password_hash,role,created_at) VALUES(%s,%s,%s,%s,%s)',(admin_email,'Afaaq Tuwaiq Admin',hash_password(admin_password),'admin',utcnow()))
+        for name,url,source_type in OFFICIAL_DISCOVERY_SOURCES:
+            c.execute('''INSERT INTO source_watches(name,url,source_type,enabled,last_status,last_checked_at,created_at)
+                         VALUES(%s,%s,%s,1,'seeded',NULL,%s)
+                         ON CONFLICT(url) DO UPDATE SET name=EXCLUDED.name,source_type=EXCLUDED.source_type,enabled=1''',(name,url,source_type,utcnow()))
 
 def cleanup_sessions():
     with db() as c: c.execute('DELETE FROM sessions WHERE expires_at<%s',(utcnow(),))
