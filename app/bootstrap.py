@@ -23,30 +23,32 @@ from app.management_autopilot import router as management_autopilot_router
 from app.security_governance import router as security_governance_router,csrf_guard
 from app.team_rbac import router as team_rbac_router
 from app.identity_hardening import router as identity_hardening_router
+from app.fine_permissions import router as fine_permissions_router,has_permission
 from app.storage import get_session,one,execute,utcnow
-
-ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/team'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/team'),'viewer':()}
+ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team','/permissions'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/team','/permissions'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/team','/permissions'),'viewer':()}
+SENSITIVE=[('send_email','POST','/outbound/','/send'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
 def role_allowed(request,s):
  if not s:return True
  role=s.get('role','viewer');path=request.url.path
  if role=='admin':return True
- if role=='viewer':return request.method in ('GET','HEAD','OPTIONS') and path not in ('/security','/team') and not path.startswith('/auth/google')
+ if role=='viewer':return request.method in ('GET','HEAD','OPTIONS') and path not in ('/security','/team','/permissions') and not path.startswith('/auth/google')
  return not any(path==p or path.startswith(p+'/') for p in ROLE_PREFIX.get(role,()))
+def sensitive_allowed(request,s):
+ if not s:return True
+ path=request.url.path
+ for perm,method,prefix,suffix in SENSITIVE:
+  if request.method==method and path.startswith(prefix) and (not suffix or path.endswith(suffix)):return has_permission(s,perm)
+ return True
 @app.middleware('http')
 async def enterprise_security_guard(request,call_next):
-    if not csrf_guard(request):
-        code=429 if request.url.path=='/login' else 403;return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
-    sess=get_session(request.cookies.get('gla_session'))
-    if sess:
-        u=one('SELECT is_active,must_change_password FROM users WHERE id=?',(sess['user_id'],))
-        if not u or not u.get('is_active',1):
-            execute('DELETE FROM sessions WHERE id=?',(sess['id'],));return RedirectResponse('/login',303)
-        execute('UPDATE sessions SET last_seen_at=? WHERE id=?',(utcnow(),sess['id']))
-        allowed_gate=request.url.path.startswith('/identity') or request.url.path in ('/logout','/api/v50/health')
-        if u.get('must_change_password') and not allowed_gate:return RedirectResponse('/identity',303)
-    if not role_allowed(request,sess):return JSONResponse({'detail':'Role does not permit this action'},status_code=403)
-    response=await call_next(request)
-    response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
-    return response
-
-for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router):app.include_router(r)
+ if not csrf_guard(request):
+  code=429 if request.url.path=='/login' else 403;return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
+ sess=get_session(request.cookies.get('gla_session'))
+ if sess:
+  u=one('SELECT is_active,must_change_password FROM users WHERE id=?',(sess['user_id'],))
+  if not u or not u.get('is_active',1):execute('DELETE FROM sessions WHERE id=?',(sess['id'],));return RedirectResponse('/login',303)
+  execute('UPDATE sessions SET last_seen_at=? WHERE id=?',(utcnow(),sess['id']))
+  if u.get('must_change_password') and not (request.url.path.startswith('/identity') or request.url.path in ('/logout','/api/v50/health')):return RedirectResponse('/identity',303)
+ if not role_allowed(request,sess) or not sensitive_allowed(request,sess):return JSONResponse({'detail':'Permission does not permit this action'},status_code=403)
+ response=await call_next(request);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()';return response
+for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router):app.include_router(r)
