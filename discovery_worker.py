@@ -5,7 +5,7 @@ import os
 init_db(os.getenv('ADMIN_EMAIL','admin@afaaqtuwaiq.local'),os.getenv('ADMIN_PASSWORD','ChangeMe-Now-2026!'))
 
 def run():
-    scanned=new_signals=new_opportunities=0
+    scanned=new_signals=new_opportunities=errors=0
     for source in rows('SELECT * FROM source_watches WHERE enabled=1 ORDER BY id'):
         scanned+=1
         try:
@@ -18,7 +18,10 @@ def run():
                     oid=execute('INSERT INTO opportunities(company_name,source_url,signal,score,stage,estimated_value,currency,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(result['title'],result['url'],result['excerpt'],result['score'],'research',0,'SAR','Discovery Worker',now,now))
                     execute('UPDATE discovered_signals SET status=?,opportunity_id=? WHERE id=?',('promoted',oid,signal_id));new_opportunities+=1
         except Exception:
+            errors+=1
             execute('UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?',('scan_error',utcnow(),source['id']))
-    print('scanned=',scanned,'new_signals=',new_signals,'new_opportunities=',new_opportunities)
+    summary={'scanned':scanned,'new_signals':new_signals,'new_opportunities':new_opportunities,'errors':errors}
+    print('scanned=',scanned,'new_signals=',new_signals,'new_opportunities=',new_opportunities,'errors=',errors)
+    return summary
 
 if __name__=='__main__':run()
