@@ -119,6 +119,13 @@ async def retell_status():
                 response=await client.get('https://api.retellai.com/get-phone-number/'+urllib.parse.quote(from_number,safe=''),headers=headers)
                 result['from_number_reachable']=response.status_code==200
                 result['from_number_http_status']=response.status_code
+            response=await client.get('https://api.retellai.com/list-phone-numbers',headers=headers)
+            result['phone_list_http_status']=response.status_code
+            if response.status_code==200:
+                numbers=response.json()
+                if isinstance(numbers,dict):numbers=numbers.get('phone_numbers') or numbers.get('data') or []
+                if not isinstance(numbers,list):numbers=[]
+                result['available_phone_numbers']=[{'ending':str(x.get('phone_number') or '')[-4:],'linked_to_agent':x.get('outbound_agent_id')==agent_id,'type':str(x.get('phone_number_type') or x.get('type') or '')[:30]} for x in numbers if isinstance(x,dict) and x.get('phone_number')]
     except Exception:
         result['preflight_unavailable']=True
     return result
