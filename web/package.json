@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "dependencies": {
+    "esbuild": "0.25.9",
+    "retell-client-js-sdk": "3.0.1"
+  }
+}
