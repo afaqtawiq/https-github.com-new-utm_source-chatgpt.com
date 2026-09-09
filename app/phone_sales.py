@@ -85,9 +85,24 @@ async def execute_call(aid:int,r:Request):
  if PHONE_CALLS_TEST_MODE and (not TEST_PHONE_RECIPIENT or normalize_phone(a['phone'])!=normalize_phone(TEST_PHONE_RECIPIENT)):raise HTTPException(403,'Pilot mode permits only the configured test recipient')
  if not RETELL_TRANSFER_SAFE:raise HTTPException(409,'Retell transfer destination must be disabled or replaced with an authorized number before a real call')
  if not RETELL_API_KEY or not RETELL_AGENT_ID or not RETELL_FROM_NUMBER:raise HTTPException(503,'Retell outbound configuration incomplete')
- payload={'from_number':RETELL_FROM_NUMBER,'to_number':a['phone'],'override_agent_id':RETELL_AGENT_ID,'metadata':{'opportunity_id':a['opportunity_id'],'phone_call_action_id':aid,'pilot_test':PHONE_CALLS_TEST_MODE},'retell_llm_dynamic_variables':{'call_objective':a['objective']}}
  try:
-  async with httpx.AsyncClient(timeout=15) as client:resp=await client.post('https://api.retellai.com/v2/create-phone-call',headers={'Authorization':'Bearer '+RETELL_API_KEY,'Content-Type':'application/json'},json=payload)
+  headers={'Authorization':'Bearer '+RETELL_API_KEY,'Content-Type':'application/json'}
+  async with httpx.AsyncClient(timeout=15) as client:
+   from_number=RETELL_FROM_NUMBER
+   number_check=await client.get('https://api.retellai.com/get-phone-number/'+urllib.parse.quote(from_number,safe=''),headers=headers)
+   if number_check.status_code==404:
+    listed=await client.get('https://api.retellai.com/list-phone-numbers',headers=headers)
+    if listed.status_code!=200:raise HTTPException(502,'Retell could not list account phone numbers')
+    numbers=listed.json()
+    if isinstance(numbers,dict):numbers=numbers.get('phone_numbers') or numbers.get('data') or []
+    valid=[x for x in numbers if isinstance(x,dict) and x.get('phone_number')]
+    linked=[x for x in valid if x.get('outbound_agent_id')==RETELL_AGENT_ID]
+    choices=linked or valid
+    if len(choices)!=1:raise HTTPException(409,'Retell sending number is invalid and no unique authorized replacement is available')
+    from_number=str(choices[0]['phone_number'])
+   elif number_check.status_code!=200:raise HTTPException(502,'Retell phone-number verification failed')
+   payload={'from_number':from_number,'to_number':a['phone'],'override_agent_id':RETELL_AGENT_ID,'metadata':{'opportunity_id':a['opportunity_id'],'phone_call_action_id':aid,'pilot_test':PHONE_CALLS_TEST_MODE},'retell_llm_dynamic_variables':{'call_objective':a['objective']}}
+   resp=await client.post('https://api.retellai.com/v2/create-phone-call',headers=headers,json=payload)
   if resp.status_code>=300:
    try:
     body=resp.json();detail=str(body.get('message') or body.get('detail') or body.get('error') or '')
