@@ -28,6 +28,18 @@ def auth(request):
 def nav():
     return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/drivers">السائقون</a><a href="/data-import">استيراد البيانات</a><a href="/shipments">الشحنات</a><a href="/approvals">الموافقات</a></div>'
 
+def driver_form(action, driver=None):
+    driver = driver or {}
+    country_options = ''.join(
+        '<option value="'+code+'">'+label+' (+'+code+')</option>'
+        for code, label in (
+            ('966','السعودية'), ('971','الإمارات'), ('965','الكويت'),
+            ('973','البحرين'), ('974','قطر'), ('968','عُمان')
+        )
+    )
+    consent_value = str(driver.get('offer_consent', 0))
+    return '<form method="post" action="'+action+'"><div class="grid"><label>اسم السائق<input name="driver_name" value="'+esc(driver.get('driver_name'))+'" required></label><label>دولة الرقم<select name="country_code">'+country_options+'</select></label><label>رقم واتساب<input class="ltr" name="whatsapp_phone" value="'+esc(driver.get('whatsapp_phone'))+'" placeholder="مثال: 0501234567" required></label><label>نوع المركبة<input name="vehicle_type" value="'+esc(driver.get('vehicle_type'))+'" required></label><label>سعة الحمولة<input name="capacity" value="'+esc(driver.get('capacity'))+'"></label><label>المدينة الحالية<input name="current_city" value="'+esc(driver.get('current_city'))+'"></label><label>المسارات المفضلة<input name="preferred_routes" value="'+esc(driver.get('preferred_routes'))+'"></label><label>التوفر<select name="availability"><option value="متاح"'+selected(driver.get('availability','متاح'),'متاح')+'>متاح</option><option value="غير متاح"'+selected(driver.get('availability'),'غير متاح')+'>غير متاح</option><option value="غير محدد"'+selected(driver.get('availability'),'غير محدد')+'>غير محدد</option></select></label><label>اسم المؤسسة<input name="company_name" value="'+esc(driver.get('company_name'))+'"></label><label>موافقة استقبال العروض<select name="offer_consent"><option value="0"'+selected(consent_value,'0')+'>غير مسجلة</option><option value="1"'+selected(consent_value,'1')+'>موافق</option></select></label><label>تاريخ الموافقة<input type="date" name="consent_date" value="'+esc(driver.get('consent_date'))+'"></label></div><label>ملاحظات<textarea name="notes">'+esc(driver.get('notes'))+'</textarea></label><p class="muted">تفعيل الموافقة يجب أن يعتمد على موافقة حقيقية وموثقة من السائق.</p><button class="btn">حفظ السائق</button></form>'
+
 def selected(actual, expected):
     return ' selected' if (actual or '') == expected else ''
 
@@ -64,10 +76,50 @@ def drivers(request: Request, q: str = '', availability: str = '', consent: str 
     ) or '<tr><td colspan="8" class="muted">لا توجد نتائج مطابقة.</td></tr>'
     previous = '<a class="btn" href="/drivers?'+query+'&page_number='+str(page_number-1)+'">السابق</a>' if page_number > 1 else ''
     next_link = '<a class="btn" href="/drivers?'+query+'&page_number='+str(page_number+1)+'">التالي</a>' if offset + per_page < total else ''
-    body = nav()+'<h1>إدارة السائقين</h1><div class="grid"><div class="kpi">إجمالي السائقين<b>'+str(total_all)+'</b></div><div class="kpi">موافقة استقبال العروض<b>'+str(consented)+'</b></div><div class="kpi">متاحون<b>'+str(available)+'</b></div><div class="kpi">نتائج البحث<b>'+str(total)+'</b></div></div>'
+    body = nav()+'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h1>إدارة السائقين</h1><a class="btn" href="/drivers/new">+ إضافة سائق جديد</a></div><div class="grid"><div class="kpi">إجمالي السائقين<b>'+str(total_all)+'</b></div><div class="kpi">موافقة استقبال العروض<b>'+str(consented)+'</b></div><div class="kpi">متاحون<b>'+str(available)+'</b></div><div class="kpi">نتائج البحث<b>'+str(total)+'</b></div></div>'
     body += '<div class="card"><form method="get" action="/drivers"><div class="grid"><input name="q" value="'+esc(q)+'" placeholder="بحث بالاسم أو الجوال أو الشركة أو المدينة"><select name="availability"><option value="">كل حالات التوفر</option><option value="متاح"'+selected(availability,'متاح')+'>متاح</option><option value="غير متاح"'+selected(availability,'غير متاح')+'>غير متاح</option><option value="غير محدد"'+selected(availability,'غير محدد')+'>غير محدد</option></select><select name="consent"><option value="">كل حالات الموافقة</option><option value="1"'+selected(consent,'1')+'>موافق على العروض</option><option value="0"'+selected(consent,'0')+'>الموافقة غير مسجلة</option></select><button class="btn">بحث وتصفية</button></div></form></div>'
     body += '<div class="card scroll"><table><tr><th>السائق</th><th>واتساب</th><th>المركبة</th><th>المدينة</th><th>الشركة</th><th>التوفر</th><th>موافقة العروض</th><th>الإجراء</th></tr>'+table_rows+'</table><div class="pager">'+previous+'<span>صفحة '+str(page_number)+'</span>'+next_link+'</div></div>'
     return HTMLResponse(page('إدارة السائقين', body))
+
+@router.get('/drivers/new', response_class=HTMLResponse)
+def new_driver(request: Request):
+    session = auth(request)
+    if not session:
+        return RedirectResponse('/login', 303)
+    if session.get('role') != 'admin':
+        raise HTTPException(403, 'Admin role required to add drivers')
+    return HTMLResponse(page('إضافة سائق جديد', nav()+'<h1>إضافة سائق جديد</h1><div class="card">'+driver_form('/drivers/new')+'</div>'))
+
+@router.post('/drivers/new')
+async def create_driver(request: Request):
+    session = auth(request)
+    if not session:
+        return RedirectResponse('/login', 303)
+    if session.get('role') != 'admin':
+        raise HTTPException(403, 'Admin role required to add drivers')
+    form = await request.form()
+    driver_name = str(form.get('driver_name') or '').strip()
+    vehicle_type = str(form.get('vehicle_type') or '').strip()
+    phone = _phone(form.get('whatsapp_phone'), str(form.get('country_code') or '966'))
+    if not driver_name or not vehicle_type:
+        raise HTTPException(400, 'Driver name and vehicle type are required')
+    if not phone:
+        raise HTTPException(400, 'Invalid GCC WhatsApp number')
+    consent = 1 if form.get('offer_consent') == '1' else 0
+    consent_date = str(form.get('consent_date') or '') if consent else ''
+    if consent and not consent_date:
+        raise HTTPException(400, 'Consent date is required when offer consent is enabled')
+    now = utcnow()
+    try:
+        driver_id = execute('''INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,capacity,current_city,preferred_routes,availability,company_name,offer_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s)''',(
+            driver_name, phone, vehicle_type, str(form.get('capacity') or '').strip(), str(form.get('current_city') or '').strip(), str(form.get('preferred_routes') or '').strip(), str(form.get('availability') or 'متاح').strip(), str(form.get('company_name') or '').strip(), consent, consent_date, str(form.get('notes') or '').strip(), now, now
+        ))
+    except Exception as exc:
+        if 'unique' in str(exc).lower() or 'duplicate' in str(exc).lower():
+            raise HTTPException(409, 'WhatsApp number already belongs to another driver')
+        raise
+    log(session['user_id'], 'create', 'driver', driver_id, 'Driver added manually; offer consent='+str(consent))
+    return RedirectResponse('/drivers', 303)
 
 @router.get('/drivers/{driver_id}/edit', response_class=HTMLResponse)
 def edit_driver(driver_id: int, request: Request):
