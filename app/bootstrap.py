@@ -25,8 +25,8 @@ from app.team_rbac import router as team_rbac_router
 from app.identity_hardening import router as identity_hardening_router
 from app.fine_permissions import router as fine_permissions_router,has_permission
 from app import mfa_schema_compat
+from app import mfa_recovery  # initialize MFA attempt storage; recovery routes stay disabled
 from app.mfa_stepup import router as mfa_stepup_router,mfa_state,recent_stepup
-from app.mfa_recovery import router as mfa_recovery_router
 from app.security_operations import router as security_operations_router
 from app.incident_response import router as incident_response_router
 from app.retell_integration import router as retell_integration_router
@@ -64,4 +64,4 @@ async def enterprise_security_guard(request,call_next):
   if not m or not m.get('mfa_enabled'):return JSONResponse({'detail':'MFA enrollment required for this sensitive action','mfa_setup':'/mfa','permission':perm},status_code=428)
   if not recent_stepup(sess['id']):return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+request.url.path,'permission':perm},status_code=428)
  response=await call_next(request);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()';return response
-for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router,mfa_stepup_router,mfa_recovery_router,security_operations_router,incident_response_router,retell_integration_router,phone_sales_router,crm_contacts_router):app.include_router(r)
+for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router,mfa_stepup_router,security_operations_router,incident_response_router,retell_integration_router,phone_sales_router,crm_contacts_router):app.include_router(r)
