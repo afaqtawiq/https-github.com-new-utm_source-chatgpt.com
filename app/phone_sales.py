@@ -25,6 +25,36 @@ def sess(r):
  s=get_session(r.cookies.get('gla_session'))
  if not s:raise HTTPException(401)
  return s
+
+@router.get('/retell-web-test',response_class=HTMLResponse)
+def web_test_page(r:Request):
+ s=sess(r)
+ return HTMLResponse(f'''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>اختبار وكيل آفاق طويق</title><style>body{{font-family:Arial;background:#f4f7fb;color:#17202a;display:grid;place-items:center;min-height:90vh}}.box{{background:#fff;max-width:560px;width:90%;padding:28px;border-radius:18px;box-shadow:0 8px 30px #0002}}input,button{{box-sizing:border-box;width:100%;padding:13px;margin:7px 0;border-radius:9px;border:1px solid #ccd4df}}button{{background:#155eef;color:white;font-weight:bold;cursor:pointer}}button.stop{{background:#b42318}}#status{{padding:12px;background:#eef4ff;border-radius:9px;margin:10px 0}}#transcript{{white-space:pre-wrap;max-height:260px;overflow:auto}}</style><div class=box><h1>اختبار Web Call</h1><p>تحدث مباشرة مع وكيل <b>Afaaq Tuwaiq Sales AI</b> عبر ميكروفون المتصفح، دون رقم هاتف.</p><input id=password type=password autocomplete=current-password placeholder="كلمة مرور الحساب"><button id=start>بدء الاختبار الصوتي</button><button id=stop class=stop disabled>إنهاء المكالمة</button><div id=status>جاهز</div><div id=transcript></div></div><script type=module>import{{RetellWebClient}}from'https://esm.sh/retell-client-js-sdk';const client=new RetellWebClient(),start=document.querySelector('#start'),stop=document.querySelector('#stop'),status=document.querySelector('#status'),transcript=document.querySelector('#transcript');client.on('call_started',()=>{{status.textContent='المكالمة متصلة — تحدث الآن';start.disabled=true;stop.disabled=false}});client.on('update',u=>{{transcript.textContent=(u.transcript||[]).map(x=>(x.role==='agent'?'الوكيل: ':'أنت: ')+x.content).join('\n')}});client.on('call_ended',()=>{{status.textContent='انتهت المكالمة';start.disabled=false;stop.disabled=true}});client.on('error',e=>{{status.textContent='تعذر تشغيل المكالمة: '+String(e);client.stopCall()}});start.onclick=async()=>{{start.disabled=true;status.textContent='جارٍ الاتصال...';const body=new URLSearchParams({{csrf:'{e(s['csrf'])}',password:document.querySelector('#password').value}});const response=await fetch('/retell-web-test/start',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body}});const data=await response.json();if(!response.ok){{status.textContent=data.detail||'فشل بدء الاختبار';start.disabled=false;return}}try{{await client.startCall({{accessToken:data.access_token}})}}catch(e){{status.textContent='اسمح للمتصفح باستخدام الميكروفون ثم حاول مجددًا';start.disabled=false}}}};stop.onclick=()=>client.stopCall();</script>''')
+
+@router.post('/retell-web-test/start')
+async def start_web_test(r:Request):
+ s=sess(r);d=form(await r.body())
+ if d.get('csrf')!=s['csrf']:raise HTTPException(403)
+ import datetime
+ since=utcnow()-datetime.timedelta(minutes=15);fails=one("SELECT COUNT(*) n FROM mfa_attempts WHERE user_id=? AND kind='web_call_password' AND success=0 AND created_at>=?",(s['user_id'],since))
+ if int((fails or {}).get('n') or 0)>=5:raise HTTPException(429,'Too many password attempts; try again later')
+ u=one('SELECT password_hash FROM users WHERE id=?',(s['user_id'],));password_ok=bool(u and verify_password(d.get('password',''),u['password_hash']))
+ execute('INSERT INTO mfa_attempts(user_id,session_id,kind,success,ip_address,created_at) VALUES(?,?,?,?,?,?)',(s['user_id'],s['id'],'web_call_password',1 if password_ok else 0,r.client.host if r.client else None,utcnow()))
+ if not password_ok:raise HTTPException(400,'Invalid account password')
+ if not RETELL_API_KEY or not RETELL_AGENT_ID:raise HTTPException(503,'Retell web-call configuration incomplete')
+ payload={'agent_id':RETELL_AGENT_ID,'metadata':{'pilot_test':True,'initiated_by_user_id':s['user_id']},'retell_llm_dynamic_variables':{'call_objective':'Authorized browser voice test for Afaaq Tuwaiq Sales AI'}}
+ try:
+  async with httpx.AsyncClient(timeout=15) as client:resp=await client.post('https://api.retellai.com/v2/create-web-call',headers={'Authorization':'Bearer '+RETELL_API_KEY,'Content-Type':'application/json'},json=payload)
+  if resp.status_code>=300:
+   try:detail=str((resp.json() or {}).get('message') or (resp.json() or {}).get('detail') or '')
+   except Exception:detail=''
+   raise HTTPException(502,('Retell HTTP '+str(resp.status_code)+((': '+detail) if detail else ''))[:500])
+  data=resp.json();token=str(data.get('access_token') or '');cid=str(data.get('call_id') or '')
+  if not token:raise HTTPException(502,'Retell did not return a web-call access token')
+  log(s['user_id'],'retell_web_test_started','retell_call',None,'Authorized Retell browser web call created: '+cid[:80])
+  return {'access_token':token,'call_id':cid}
+ except HTTPException:raise
+ except Exception:raise HTTPException(502,'Retell web-call request failed')
 def action_html(x,s):
  aid=str(x['id'])
  if x['status']=='draft':return f'<form method=post action=/phone-sales/{aid}/request-approval><input type=hidden name=csrf value="{e(s["csrf"])}"><button>طلب الموافقة</button></form>'
