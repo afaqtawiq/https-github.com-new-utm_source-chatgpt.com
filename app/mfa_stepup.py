@@ -6,6 +6,7 @@ from cryptography.fernet import Fernet
 from app.storage import db,get_session,one,execute,log,utcnow,verify_password
 router=APIRouter();STEPUP_MINUTES=10
 ENROLLMENT_MINUTES=30
+ENROLLMENT_GENERATION=2
 def e(v):return html.escape(str(v or ''))
 def parse(raw):return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def sess(r):
@@ -33,10 +34,11 @@ def init():
   c.execute('CREATE TABLE IF NOT EXISTS user_mfa(user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,secret_enc TEXT,mfa_enabled INTEGER NOT NULL DEFAULT 0,enrolled_at TIMESTAMPTZ,updated_at TIMESTAMPTZ NOT NULL)')
   c.execute('CREATE TABLE IF NOT EXISTS stepup_auth(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,user_id BIGINT NOT NULL,verified_at TIMESTAMPTZ NOT NULL,expires_at TIMESTAMPTZ NOT NULL)')
   c.execute('CREATE TABLE IF NOT EXISTS mfa_enrollment_pending(user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,secret_enc TEXT NOT NULL,expires_at TIMESTAMPTZ NOT NULL,created_at TIMESTAMPTZ NOT NULL)')
+  c.execute('ALTER TABLE mfa_enrollment_pending ADD COLUMN IF NOT EXISTS generation INTEGER NOT NULL DEFAULT 1')
 init()
 def mfa_state(user_id):return one('SELECT * FROM user_mfa WHERE user_id=?',(user_id,))
 def recent_stepup(session_id):return bool(one('SELECT * FROM stepup_auth WHERE session_id=? AND expires_at>?',(session_id,utcnow())))
-def pending_enrollment(user_id,session_id):return one('SELECT * FROM mfa_enrollment_pending WHERE user_id=? AND session_id=? AND expires_at>?',(user_id,session_id,utcnow()))
+def pending_enrollment(user_id,session_id):return one('SELECT * FROM mfa_enrollment_pending WHERE user_id=? AND session_id=? AND expires_at>? AND generation=?',(user_id,session_id,utcnow(),ENROLLMENT_GENERATION))
 def guard_attempt(s,kind,ok,r):
  from app.mfa_recovery import blocked,attempt
  if blocked(s['user_id']):raise HTTPException(429,'Too many MFA attempts; try again later')
@@ -51,7 +53,7 @@ def begin_enrollment(s):
  current=pending_enrollment(s['user_id'],s['id'])
  if current:return dec(current['secret_enc'])
  secret=gen_secret();now=utcnow();exp=now+datetime.timedelta(minutes=ENROLLMENT_MINUTES)
- with db() as c:c.execute('INSERT INTO mfa_enrollment_pending(user_id,session_id,secret_enc,expires_at,created_at) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET session_id=excluded.session_id,secret_enc=excluded.secret_enc,expires_at=excluded.expires_at,created_at=excluded.created_at',(s['user_id'],s['id'],enc(secret),exp,now))
+ with db() as c:c.execute('INSERT INTO mfa_enrollment_pending(user_id,session_id,secret_enc,expires_at,created_at,generation) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET session_id=excluded.session_id,secret_enc=excluded.secret_enc,expires_at=excluded.expires_at,created_at=excluded.created_at,generation=excluded.generation',(s['user_id'],s['id'],enc(secret),exp,now,ENROLLMENT_GENERATION))
  return secret
 @router.get('/mfa')
 def mfa(r:Request):
