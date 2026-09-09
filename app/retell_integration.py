@@ -1,4 +1,5 @@
-import os, json, re, time, hmac, hashlib
+import os, json, re, time, hmac, hashlib, urllib.parse
+import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, HTMLResponse
 from app.storage import db, utcnow, log, get_session
@@ -100,5 +101,24 @@ def communications_api(request:Request):
     return {'items':[dict(zip(cols,r)) for r in rows]}
 
 @router.get('/api/v7/retell/status')
-def retell_status():
-    return {'api_configured':bool(RETELL_API_KEY),'webhook_configured':bool(RETELL_WEBHOOK_KEY),'webhook':'/webhooks/retell','signature_verification':True,'external_calls_automatic':False,'crm_sync':True,'communications_center':'/communications'}
+async def retell_status():
+    result={'api_configured':bool(RETELL_API_KEY),'webhook_configured':bool(RETELL_WEBHOOK_KEY),'webhook':'/webhooks/retell','signature_verification':True,'external_calls_automatic':False,'crm_sync':True,'communications_center':'/communications'}
+    agent_id=os.getenv('RETELL_AGENT_ID','').strip();from_number=os.getenv('RETELL_FROM_NUMBER','').strip()
+    result.update({'agent_configured':bool(agent_id),'from_number_configured':bool(from_number)})
+    if not RETELL_API_KEY:return result
+    headers={'Authorization':'Bearer '+RETELL_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            if agent_id:
+                response=await client.get('https://api.retellai.com/get-agent/'+urllib.parse.quote(agent_id,safe=''),headers=headers)
+                result['agent_reachable']=response.status_code==200
+                result['agent_http_status']=response.status_code
+                if response.status_code==200:
+                    data=response.json();result['agent_name']=str(data.get('agent_name') or '')[:100];result['agent_published']=bool(data.get('is_published'))
+            if from_number:
+                response=await client.get('https://api.retellai.com/get-phone-number/'+urllib.parse.quote(from_number,safe=''),headers=headers)
+                result['from_number_reachable']=response.status_code==200
+                result['from_number_http_status']=response.status_code
+    except Exception:
+        result['preflight_unavailable']=True
+    return result
