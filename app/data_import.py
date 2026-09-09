@@ -10,6 +10,7 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 CUSTOMER_COLUMNS = ['company_name','contact_name','phone','email','city','activity','service_interest','source','contact_consent','consent_date','notes']
 DRIVER_COLUMNS = ['driver_name','whatsapp_phone','vehicle_type','capacity','current_city','preferred_routes','availability','company_name','offer_consent','consent_date','notes']
+PROSPECT_COLUMNS = ['company_name','location','sector','lead_status','priority','fit_score','notes']
 ALIASES = {
  'اسم الشركة':'company_name','company':'company_name','company name':'company_name','اسم المسؤول':'contact_name','contact':'contact_name','contact name':'contact_name',
  'الجوال':'phone','رقم الجوال':'phone','phone':'phone','البريد':'email','البريد الإلكتروني':'email','email':'email','المدينة':'city','city':'city',
@@ -18,7 +19,9 @@ ALIASES = {
  'اسم السائق':'driver_name','driver name':'driver_name','رقم واتساب':'whatsapp_phone','whatsapp':'whatsapp_phone','whatsapp phone':'whatsapp_phone',
  'نوع المركبة':'vehicle_type','vehicle type':'vehicle_type','سعة الحمولة':'capacity','capacity':'capacity','المدينة الحالية':'current_city','current city':'current_city',
  'المسارات المفضلة':'preferred_routes','preferred routes':'preferred_routes','التوفر':'availability','availability':'availability',
- 'اسم المؤسسة':'company_name','موافقة استقبال العروض':'offer_consent','offer consent':'offer_consent'
+ 'اسم المؤسسة':'company_name','موافقة استقبال العروض':'offer_consent','offer consent':'offer_consent',
+ 'الموقع':'location','location':'location','القطاع':'sector','sector':'sector','الحالة':'lead_status','status':'lead_status',
+ 'الأولوية':'priority','priority':'priority','درجة التوافق':'fit_score','fit score':'fit_score'
 }
 GCC_PHONE_LENGTHS = {'966':9,'971':9,'973':8,'965':8,'968':8,'974':8}
 
@@ -81,12 +84,17 @@ def _read_upload(name, raw):
 
 def _prepare(dataset, matrix, default_country='966'):
  if not matrix:return []
- headers=[_normalize_header(x) for x in matrix[0]];allowed=CUSTOMER_COLUMNS if dataset=='customers' else DRIVER_COLUMNS
+ headers=[_normalize_header(x) for x in matrix[0]]
+ allowed=CUSTOMER_COLUMNS if dataset=='customers' else PROSPECT_COLUMNS if dataset=='prospects' else DRIVER_COLUMNS
  out=[];seen=set()
  for n,values in enumerate(matrix[1:],start=2):
   raw={headers[i]:_cell(values[i] if i<len(values) else '') for i in range(len(headers)) if headers[i] in allowed}
   if not any(raw.values()):continue
-  if dataset=='customers':
+  if dataset=='prospects':
+   errors=[]
+   if not raw.get('company_name'):errors.append('اسم الشركة مطلوب')
+   key=(raw.get('company_name','').lower(),)
+  elif dataset=='customers':
    raw['phone']=_phone(raw.get('phone'),default_country);raw['contact_consent']=_yes(raw.get('contact_consent'))
    errors=[]
    if not raw.get('company_name'):errors.append('اسم الشركة مطلوب')
@@ -113,7 +121,7 @@ def import_home(request:Request):
  s=_session(request)
  if not s:return RedirectResponse('/login',303)
  if s.get('role')!='admin':raise HTTPException(403,'Admin role required')
- return page('''<div class="links"><a href="/dashboard">الرئيسية</a><a href="/data-import/template/customers.csv">قالب العملاء CSV</a><a href="/data-import/template/drivers.csv">قالب السائقين CSV</a></div><h1>استيراد قاعدة البيانات</h1><div class="card"><h2>رفع ومعاينة</h2><p>لن تُحفظ البيانات قبل اعتماد المعاينة. الحد الأقصى 2MB. اختر الدولة للأرقام المحلية فقط؛ الأرقام المكتوبة بالمفتاح الدولي تُعتمد تلقائيًا.</p><form method="post" action="/data-import/preview" enctype="multipart/form-data"><div class="grid"><select name="dataset_type"><option value="customers">العملاء</option><option value="drivers">السائقون</option></select><select name="default_country"><option value="966">السعودية +966</option><option value="971">الإمارات +971</option><option value="973">البحرين +973</option><option value="965">الكويت +965</option><option value="968">عُمان +968</option><option value="974">قطر +974</option></select><input type="file" name="file" accept=".xlsx,.csv" required></div><p><button class="btn">معاينة الملف</button></p></form></div>''')
+ return page('''<div class="links"><a href="/dashboard">الرئيسية</a><a href="/data-import/template/customers.csv">قالب العملاء CSV</a><a href="/data-import/template/drivers.csv">قالب السائقين CSV</a></div><h1>استيراد قاعدة البيانات</h1><div class="card"><h2>رفع ومعاينة</h2><p>لن تُحفظ البيانات قبل اعتماد المعاينة. الحد الأقصى 2MB. اختر الدولة للأرقام المحلية فقط؛ الأرقام المكتوبة بالمفتاح الدولي تُعتمد تلقائيًا.</p><form method="post" action="/data-import/preview" enctype="multipart/form-data"><div class="grid"><select name="dataset_type"><option value="customers">جهات اتصال العملاء</option><option value="prospects">العملاء المحتملون</option><option value="drivers">السائقون</option></select><select name="default_country"><option value="966">السعودية +966</option><option value="971">الإمارات +971</option><option value="973">البحرين +973</option><option value="965">الكويت +965</option><option value="968">عُمان +968</option><option value="974">قطر +974</option></select><input type="file" name="file" accept=".xlsx,.csv" required></div><p><button class="btn">معاينة الملف</button></p></form></div>''')
 
 @router.get('/data-import/template/{name}')
 def template(name:str,request:Request):
@@ -127,7 +135,7 @@ def template(name:str,request:Request):
 @router.post('/data-import/preview',response_class=HTMLResponse)
 async def preview(request:Request,dataset_type:str=Form(...),default_country:str=Form('966'),file:UploadFile=File(...)):
  s=_admin(request)
- if dataset_type not in ('customers','drivers'):return page('<div class="card bad">نوع البيانات غير صالح.</div>')
+ if dataset_type not in ('customers','prospects','drivers'):return page('<div class="card bad">نوع البيانات غير صالح.</div>')
  if default_country not in GCC_PHONE_LENGTHS:return page('<div class="card bad">الدولة الافتراضية غير صالحة.</div>')
  raw=await file.read(MAX_FILE_BYTES+1)
  if len(raw)>MAX_FILE_BYTES:return page('<div class="card bad">حجم الملف يتجاوز 2MB.</div>')
@@ -143,6 +151,8 @@ async def preview(request:Request,dataset_type:str=Form(...),default_country:str
     if d.get('phone'):q.append('phone=%s');a.append(d['phone'])
     if d.get('email'):q.append('LOWER(email)=LOWER(%s)');a.append(d['email'])
     exists=bool(q and c.execute('SELECT 1 FROM customer_directory WHERE '+' OR '.join(q),a).fetchone())
+   if dataset_type=='prospects' and d.get('company_name'):
+    exists=bool(c.execute('SELECT 1 FROM accounts WHERE LOWER(name)=LOWER(%s)',(d['company_name'],)).fetchone())
    x['duplicate']=exists or x['duplicate_in_file']
    if x['errors']:errors+=1
    elif x['duplicate']:dupes+=1
@@ -163,8 +173,12 @@ def commit(batch_id:str,request:Request):
    d=x['data']
    if batch['dataset_type']=='drivers':
     saved=c.execute('''INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,capacity,current_city,preferred_routes,availability,company_name,offer_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s) ON CONFLICT(whatsapp_phone) DO NOTHING RETURNING id''',(d.get('driver_name'),d.get('whatsapp_phone'),d.get('vehicle_type'),d.get('capacity'),d.get('current_city'),d.get('preferred_routes'),d.get('availability') or 'متاح',d.get('company_name'),d.get('offer_consent',0),d.get('consent_date',''),d.get('notes'),now,now)).fetchone()
-   else:
+   elif batch['dataset_type']=='customers':
     saved=c.execute('''INSERT INTO customer_directory(company_name,contact_name,phone,email,city,activity,service_interest,source,contact_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,NULLIF(%s,''),NULLIF(%s,''),%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id''',(d.get('company_name'),d.get('contact_name'),d.get('phone',''),d.get('email',''),d.get('city'),d.get('activity'),d.get('service_interest'),d.get('source'),d.get('contact_consent',0),d.get('consent_date',''),d.get('notes'),now,now)).fetchone()
+   else:
+    details='القطاع: '+str(d.get('sector') or '')+' | الأولوية: '+str(d.get('priority') or '')+' | درجة التوافق: '+str(d.get('fit_score') or '')
+    if d.get('notes'):details+=' | '+str(d.get('notes'))
+    saved=c.execute('''INSERT INTO accounts(name,country,domain,status,notes,created_at,updated_at) SELECT %s,%s,%s,%s,%s,%s,%s WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE LOWER(name)=LOWER(%s)) RETURNING id''',(d.get('company_name'),d.get('location'),d.get('sector'),d.get('lead_status') or 'جديد',details,now,now,d.get('company_name'))).fetchone()
    if saved:inserted+=1
   c.execute("UPDATE data_import_batches SET status='committed',committed_at=%s WHERE id=%s",(now,batch_id))
  log(s['user_id'],'data_import',batch['dataset_type'],None,f'Imported {inserted} records from {batch["file_name"]}')
