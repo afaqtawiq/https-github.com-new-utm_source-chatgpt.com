@@ -29,13 +29,13 @@ def action_html(x,s):
  aid=str(x['id'])
  if x['status']=='draft':return f'<form method=post action=/phone-sales/{aid}/request-approval><input type=hidden name=csrf value="{e(s["csrf"])}"><button>طلب الموافقة</button></form>'
  if x['status']=='approval_requested' and s.get('role')=='admin':return f'<form method=post action=/phone-sales/{aid}/approve><input type=hidden name=csrf value="{e(s["csrf"])}"><button>موافقة الإدارة</button></form>'
- if x['status']=='approved':return f'<form method=post action=/phone-sales/{aid}/execute><input type=hidden name=csrf value="{e(s["csrf"])}"><input type=password name=password autocomplete=current-password placeholder="كلمة مرور الحساب" required><button>تأكيد كلمة المرور وتنفيذ Retell</button></form>'
+ if x['status'] in ('approved','failed') and x.get('approval_status')=='approved':return f'<form method=post action=/phone-sales/{aid}/execute><input type=hidden name=csrf value="{e(s["csrf"])}"><input type=password name=password autocomplete=current-password placeholder="كلمة مرور الحساب" required><button>تأكيد كلمة المرور وتنفيذ Retell</button></form>'
  return ''
 @router.get('/phone-sales',response_class=HTMLResponse)
 def page(r:Request):
  s=sess(r)
  with db() as c:
-  items=c.execute('''SELECT a.*,o.company_name,o.stage,c.name contact_name,c.verified FROM phone_call_actions a JOIN opportunities o ON o.id=a.opportunity_id LEFT JOIN sales_contacts c ON c.id=a.contact_id ORDER BY a.updated_at DESC LIMIT 100''').fetchall()
+  items=c.execute('''SELECT a.*,o.company_name,o.stage,c.name contact_name,c.verified,p.status approval_status FROM phone_call_actions a JOIN opportunities o ON o.id=a.opportunity_id LEFT JOIN sales_contacts c ON c.id=a.contact_id LEFT JOIN approvals p ON p.id=a.approval_id ORDER BY a.updated_at DESC LIMIT 100''').fetchall()
   opps=c.execute("SELECT id,company_name,stage FROM opportunities WHERE stage NOT IN ('won','lost') ORDER BY updated_at DESC LIMIT 100").fetchall()
  rows=''.join(f"<tr><td>{e(x['company_name'])}</td><td>{e(x['contact_name'])}</td><td dir=ltr>{e(x['phone'])}</td><td>{e(x['objective'])}</td><td>{e(x['status'])}</td><td>{action_html(x,s)}</td></tr>" for x in items)
  options=''.join(f"<option value={x['id']}>{e(x['company_name'])} — {e(x['stage'])}</option>" for x in opps)
@@ -81,7 +81,7 @@ async def execute_call(aid:int,r:Request):
  execute('INSERT INTO mfa_attempts(user_id,session_id,kind,success,ip_address,created_at) VALUES(?,?,?,?,?,?)',(s['user_id'],s['id'],'phone_execute_password',1 if password_ok else 0,r.client.host if r.client else None,utcnow()))
  if not password_ok:raise HTTPException(400,'Invalid account password')
  a=one('SELECT a.*,p.status approval_status FROM phone_call_actions a LEFT JOIN approvals p ON p.id=a.approval_id WHERE a.id=?',(aid,))
- if not a or a['status']!='approved' or a.get('approval_status')!='approved':raise HTTPException(403,'Approved human authorization required')
+ if not a or a['status'] not in ('approved','failed') or a.get('approval_status')!='approved':raise HTTPException(403,'Approved human authorization required')
  if PHONE_CALLS_TEST_MODE and (not TEST_PHONE_RECIPIENT or normalize_phone(a['phone'])!=normalize_phone(TEST_PHONE_RECIPIENT)):raise HTTPException(403,'Pilot mode permits only the configured test recipient')
  if not RETELL_TRANSFER_SAFE:raise HTTPException(409,'Retell transfer destination must be disabled or replaced with an authorized number before a real call')
  if not RETELL_API_KEY or not RETELL_AGENT_ID or not RETELL_FROM_NUMBER:raise HTTPException(503,'Retell outbound configuration incomplete')
@@ -89,12 +89,15 @@ async def execute_call(aid:int,r:Request):
  try:
   async with httpx.AsyncClient(timeout=15) as client:resp=await client.post('https://api.retellai.com/v2/create-phone-call',headers={'Authorization':'Bearer '+RETELL_API_KEY,'Content-Type':'application/json'},json=payload)
   if resp.status_code>=300:
-   err=('Retell HTTP '+str(resp.status_code))[:500];execute("UPDATE phone_call_actions SET status='failed',last_error=?,updated_at=? WHERE id=?",(err,utcnow(),aid));raise HTTPException(502,err)
+   try:
+    body=resp.json();detail=str(body.get('message') or body.get('detail') or body.get('error') or '')
+   except Exception:detail=''
+   err=('Retell HTTP '+str(resp.status_code)+((': '+detail) if detail else ''))[:500];execute("UPDATE phone_call_actions SET status='approved',last_error=?,updated_at=? WHERE id=?",(err,utcnow(),aid));raise HTTPException(502,err)
   data=resp.json();cid=str(data.get('call_id') or '')
   execute("UPDATE phone_call_actions SET status='started',provider_call_id=?,started_at=?,updated_at=? WHERE id=?",(cid,utcnow(),utcnow(),aid));log(s['user_id'],'phone_call_started','phone_call_action',aid,'Approved Retell pilot call started');return RedirectResponse('/phone-sales',303)
  except HTTPException:raise
  except Exception as ex:
-  execute("UPDATE phone_call_actions SET status='failed',last_error=?,updated_at=? WHERE id=?",(str(ex)[:500],utcnow(),aid));raise HTTPException(502,'Retell call request failed')
+  execute("UPDATE phone_call_actions SET status='approved',last_error=?,updated_at=? WHERE id=?",(str(ex)[:500],utcnow(),aid));raise HTTPException(502,'Retell call request failed')
 @router.get('/api/v7/phone-sales')
 def api(r:Request):
  sess(r)
