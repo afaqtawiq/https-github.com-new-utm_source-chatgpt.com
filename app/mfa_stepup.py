@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse,RedirectResponse
 from cryptography.fernet import Fernet
 from app.storage import db,get_session,one,execute,log,utcnow,verify_password
 router=APIRouter();STEPUP_MINUTES=10
-ENROLLMENT_MINUTES=10
+ENROLLMENT_MINUTES=30
 def e(v):return html.escape(str(v or ''))
 def parse(raw):return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def sess(r):
@@ -21,7 +21,7 @@ def dec(v):return _fernet().decrypt(v.encode()).decode()
 def gen_secret():return base64.b32encode(secrets.token_bytes(20)).decode().rstrip('=')
 def hotp(secret,counter):
  pad='='*((8-len(secret)%8)%8);key=base64.b32decode(secret+pad,casefold=True);msg=struct.pack('>Q',counter);d=hmac.new(key,msg,hashlib.sha1).digest();o=d[-1]&15;return f'{(struct.unpack(">I",d[o:o+4])[0]&0x7fffffff)%1000000:06d}'
-def valid_totp(secret,code,window=1):
+def valid_totp(secret,code,window=4):
  if not code or not code.isdigit() or len(code)!=6:return False
  c=int(time.time())//30;return any(hmac.compare_digest(hotp(secret,c+i),code) for i in range(-window,window+1))
 def qr_data_uri(text):
@@ -47,6 +47,8 @@ def enrollment_page(s,secret,title='إعداد MFA'):
  qr=qr_data_uri(uri)
  return page('<h1>'+e(title)+'</h1><div class="card"><h2>1) امسح رمز QR الجديد</h2><p class="muted">أضف الحساب إلى تطبيق Authenticator. هذا المفتاح مؤقت ولن يستبدل المفتاح الحالي قبل نجاح التحقق.</p><div class="qr"><img alt="TOTP QR code" src="'+qr+'"></div><div class="warn">لا تشارك صورة QR أو المفتاح السري أو رمز التحقق. تنتهي هذه العملية خلال '+str(ENROLLMENT_MINUTES)+' دقائق.</div><details><summary>إدخال يدوي بدل QR</summary><div class="secret">'+e(secret)+'</div></details><h2>2) أدخل الرمز الحالي من التطبيق</h2><form method="post" action="/mfa/enable"><input type="hidden" name="csrf" value="'+e(s['csrf'])+'"><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="123456" required><button class="btn">تأكيد المفتاح الجديد</button></form></div>')
 def begin_enrollment(s):
+ current=pending_enrollment(s['user_id'],s['id'])
+ if current:return dec(current['secret_enc'])
  secret=gen_secret();now=utcnow();exp=now+datetime.timedelta(minutes=ENROLLMENT_MINUTES)
  with db() as c:c.execute('INSERT INTO mfa_enrollment_pending(user_id,session_id,secret_enc,expires_at,created_at) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET session_id=excluded.session_id,secret_enc=excluded.secret_enc,expires_at=excluded.expires_at,created_at=excluded.created_at',(s['user_id'],s['id'],enc(secret),exp,now))
  return secret
