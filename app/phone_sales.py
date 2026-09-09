@@ -46,7 +46,7 @@ async def start_web_test(r:Request):
  execute('INSERT INTO mfa_attempts(user_id,session_id,kind,success,ip_address,created_at) VALUES(?,?,?,?,?,?)',(s['user_id'],s['id'],'web_call_password',1 if password_ok else 0,r.client.host if r.client else None,utcnow()))
  if not password_ok:raise HTTPException(400,'Invalid account password')
  if not RETELL_API_KEY or not RETELL_AGENT_ID:raise HTTPException(503,'Retell web-call configuration incomplete')
- payload={'agent_id':RETELL_AGENT_ID,'metadata':{'pilot_test':True,'initiated_by_user_id':s['user_id']},'retell_llm_dynamic_variables':{'call_objective':'Authorized browser voice test for Afaaq Tuwaiq Sales AI'}}
+ payload={'agent_id':RETELL_AGENT_ID,'metadata':{'pilot_test':True,'initiated_by_user_id':s['user_id']},'retell_llm_dynamic_variables':{'call_objective':'Authorized browser voice test for Afaaq Tuwaiq Sales AI. Collect shipment details, explain the relevant service, and offer to prepare a written quotation for human approval. Do not state prices or make binding commitments during the call.'}}
  try:
   async with httpx.AsyncClient(timeout=15) as client:resp=await client.post('https://api.retellai.com/v2/create-web-call',headers={'Authorization':'Bearer '+RETELL_API_KEY,'Content-Type':'application/json'},json=payload)
   if resp.status_code>=300:
