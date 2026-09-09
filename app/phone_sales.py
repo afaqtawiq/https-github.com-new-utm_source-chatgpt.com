@@ -2,7 +2,7 @@ import os,html,urllib.parse,re
 import httpx
 from fastapi import APIRouter,Request,HTTPException
 from fastapi.responses import HTMLResponse,RedirectResponse
-from app.storage import db,get_session,one,execute,utcnow,log
+from app.storage import db,get_session,one,execute,utcnow,log,verify_password
 router=APIRouter()
 RETELL_API_KEY=os.getenv('RETELL_API_KEY','')
 RETELL_AGENT_ID=os.getenv('RETELL_AGENT_ID','')
@@ -28,8 +28,8 @@ def sess(r):
 def action_html(x,s):
  aid=str(x['id'])
  if x['status']=='draft':return f'<form method=post action=/phone-sales/{aid}/request-approval><input type=hidden name=csrf value="{e(s["csrf"])}"><button>طلب الموافقة</button></form>'
- if x['status']=='approval_requested' and s.get('role')=='admin':return f'<form method=post action=/phone-sales/{aid}/approve><input type=hidden name=csrf value="{e(s["csrf"])}"><button>موافقة الإدارة + MFA</button></form>'
- if x['status']=='approved':return f'<form method=post action=/phone-sales/{aid}/execute><input type=hidden name=csrf value="{e(s["csrf"])}"><button>تنفيذ المكالمة عبر Retell</button></form>'
+ if x['status']=='approval_requested' and s.get('role')=='admin':return f'<form method=post action=/phone-sales/{aid}/approve><input type=hidden name=csrf value="{e(s["csrf"])}"><button>موافقة الإدارة</button></form>'
+ if x['status']=='approved':return f'<form method=post action=/phone-sales/{aid}/execute><input type=hidden name=csrf value="{e(s["csrf"])}"><input type=password name=password autocomplete=current-password placeholder="كلمة مرور الحساب" required><button>تأكيد كلمة المرور وتنفيذ Retell</button></form>'
  return ''
 @router.get('/phone-sales',response_class=HTMLResponse)
 def page(r:Request):
@@ -40,7 +40,7 @@ def page(r:Request):
  rows=''.join(f"<tr><td>{e(x['company_name'])}</td><td>{e(x['contact_name'])}</td><td dir=ltr>{e(x['phone'])}</td><td>{e(x['objective'])}</td><td>{e(x['status'])}</td><td>{action_html(x,s)}</td></tr>" for x in items)
  options=''.join(f"<option value={x['id']}>{e(x['company_name'])} — {e(x['stage'])}</option>" for x in opps)
  pilot=('مفعّل' if PHONE_CALLS_TEST_MODE else 'متوقف');transfer=('آمن' if RETELL_TRANSFER_SAFE else 'غير مؤكد — التنفيذ محظور')
- return HTMLResponse(f'''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>مكالمات المبيعات</title><style>body{{font-family:Arial;background:#f5f7fa;padding:28px}}.box{{background:white;padding:20px;border-radius:14px;margin-bottom:18px}}.status{{background:#eef7ff;padding:12px;border-radius:10px;margin:8px 0}}input,select,textarea,button{{padding:10px;margin:5px;width:100%;box-sizing:border-box}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd}}button{{cursor:pointer}}</style><div class=box><h1>مكالمات المبيعات — Retell</h1><p>تجهيز → طلب موافقة → MFA → موافقة الإدارة → تنفيذ Retell. لا توجد مكالمة تلقائية.</p><div class=status>وضع الاختبار: {pilot} | رقم الاختبار المسموح: <span dir=ltr>{e(TEST_PHONE_RECIPIENT or 'غير مضبوط')}</span> | حالة تحويل المكالمة: {transfer}</div><form method=post action=/phone-sales/prepare accept-charset="UTF-8"><input type=hidden name=csrf value="{e(s['csrf'])}"><label>الفرصة</label><select name=opportunity_id required>{options}</select><label>رقم هاتف العميل المسجل</label><input name=phone type=tel dir=ltr autocomplete=tel value="{e(TEST_PHONE_RECIPIENT)}" placeholder="+9665XXXXXXXX" required><small>يجب أن يطابق جهة اتصال موثقة في CRM.</small><label>هدف المكالمة</label><textarea name=objective required>مكالمة اختبار مصرح بها للتأكد من تشغيل مساعد آفاق طويق للمبيعات عبر Retell دون تقديم أسعار أو التزامات.</textarea><button>تجهيز المكالمة فقط</button></form></div><div class=box><table><tr><th>الشركة</th><th>جهة الاتصال</th><th>الهاتف</th><th>الهدف</th><th>الحالة</th><th>الإجراء</th></tr>{rows or '<tr><td colspan=6>لا توجد إجراءات بعد.</td></tr>'}</table></div></html>''')
+ return HTMLResponse(f'''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>مكالمات المبيعات</title><style>body{{font-family:Arial;background:#f5f7fa;padding:28px}}.box{{background:white;padding:20px;border-radius:14px;margin-bottom:18px}}.status{{background:#eef7ff;padding:12px;border-radius:10px;margin:8px 0}}input,select,textarea,button{{padding:10px;margin:5px;width:100%;box-sizing:border-box}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd}}button{{cursor:pointer}}</style><div class=box><h1>مكالمات المبيعات — Retell</h1><p>تجهيز → طلب موافقة → موافقة الإدارة → تأكيد كلمة المرور → تنفيذ Retell. لا توجد مكالمة تلقائية.</p><div class=status>وضع الاختبار: {pilot} | رقم الاختبار المسموح: <span dir=ltr>{e(TEST_PHONE_RECIPIENT or 'غير مضبوط')}</span> | حالة تحويل المكالمة: {transfer}</div><form method=post action=/phone-sales/prepare accept-charset="UTF-8"><input type=hidden name=csrf value="{e(s['csrf'])}"><label>الفرصة</label><select name=opportunity_id required>{options}</select><label>رقم هاتف العميل المسجل</label><input name=phone type=tel dir=ltr autocomplete=tel value="{e(TEST_PHONE_RECIPIENT)}" placeholder="+9665XXXXXXXX" required><small>يجب أن يطابق جهة اتصال موثقة في CRM.</small><label>هدف المكالمة</label><textarea name=objective required>مكالمة اختبار مصرح بها للتأكد من تشغيل مساعد آفاق طويق للمبيعات عبر Retell دون تقديم أسعار أو التزامات.</textarea><button>تجهيز المكالمة فقط</button></form></div><div class=box><table><tr><th>الشركة</th><th>جهة الاتصال</th><th>الهاتف</th><th>الهدف</th><th>الحالة</th><th>الإجراء</th></tr>{rows or '<tr><td colspan=6>لا توجد إجراءات بعد.</td></tr>'}</table></div></html>''')
 @router.post('/phone-sales/prepare')
 async def prepare(r:Request):
  s=sess(r);d=form(await r.body())
@@ -74,6 +74,12 @@ async def approve(aid:int,r:Request):
 async def execute_call(aid:int,r:Request):
  s=sess(r);d=form(await r.body())
  if d.get('csrf')!=s['csrf']:raise HTTPException(403)
+ import datetime
+ since=utcnow()-datetime.timedelta(minutes=15);fails=one("SELECT COUNT(*) n FROM mfa_attempts WHERE user_id=? AND kind='phone_execute_password' AND success=0 AND created_at>=?",(s['user_id'],since))
+ if int((fails or {}).get('n') or 0)>=5:raise HTTPException(429,'Too many password attempts; try again later')
+ u=one('SELECT password_hash FROM users WHERE id=?',(s['user_id'],));password_ok=bool(u and verify_password(d.get('password',''),u['password_hash']))
+ execute('INSERT INTO mfa_attempts(user_id,session_id,kind,success,ip_address,created_at) VALUES(?,?,?,?,?,?)',(s['user_id'],s['id'],'phone_execute_password',1 if password_ok else 0,r.client.host if r.client else None,utcnow()))
+ if not password_ok:raise HTTPException(400,'Invalid account password')
  a=one('SELECT a.*,p.status approval_status FROM phone_call_actions a LEFT JOIN approvals p ON p.id=a.approval_id WHERE a.id=?',(aid,))
  if not a or a['status']!='approved' or a.get('approval_status')!='approved':raise HTTPException(403,'Approved human authorization required')
  if PHONE_CALLS_TEST_MODE and (not TEST_PHONE_RECIPIENT or normalize_phone(a['phone'])!=normalize_phone(TEST_PHONE_RECIPIENT)):raise HTTPException(403,'Pilot mode permits only the configured test recipient')
