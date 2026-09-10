@@ -4,7 +4,7 @@ import html
 import os
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -146,20 +146,26 @@ async def naqliat_manual(request: Request):
     item_id = _save(payload)
     if item_id:
         log(session["user_id"], "capture", "naqliat_load", item_id, payload.origin+" → "+payload.destination)
+        if payload.owner_phone:
+            from app.shipment_automation import start_owner_negotiation
+            await start_owner_negotiation(item_id)
     return RedirectResponse("/naqliat", 303)
 
 
 @router.post("/api/v7/naqliat/loads")
-def ingest_naqliat_load(payload: NaqliatLoad, request: Request):
+def ingest_naqliat_load(payload: NaqliatLoad, request: Request, background_tasks: BackgroundTasks):
     expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(401, "Connector authorization failed")
     item_id = _save(payload)
+    if item_id and payload.owner_phone:
+        from app.shipment_automation import start_owner_negotiation
+        background_tasks.add_task(start_owner_negotiation, item_id)
     return {"ok": True, "created": item_id is not None, "id": item_id}
 
 @router.post("/api/v7/naqliat/ocr")
-def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
+async def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
     expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     if not expected or not provided or not hmac.compare_digest(provided, expected):
@@ -176,6 +182,9 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
         description=raw[:3000], owner_phone=phone.group(0) if phone else "", raw_text=raw,
         capture_method="android_ocr")
     item_id = _save(item)
+    if item_id and item.owner_phone:
+        from app.shipment_automation import start_owner_negotiation
+        await start_owner_negotiation(item_id)
     return {"ok": True, "created": item_id is not None, "id": item_id,
             "origin": item.origin, "destination": item.destination, "owner_phone": _clean_phone(item.owner_phone)}
 

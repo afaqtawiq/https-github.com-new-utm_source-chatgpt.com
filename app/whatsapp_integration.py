@@ -63,6 +63,8 @@ async def receive_webhook(request: Request):
         "INSERT INTO whatsapp_webhook_events(event_key,payload,received_at) VALUES(?,?,?) ON CONFLICT(event_key) DO NOTHING",
         (event_key, json.dumps(payload), utcnow()),
     )
+    from app.shipment_automation import process_owner_webhook
+    await process_owner_webhook(payload)
     return {"received": True}
 
 
