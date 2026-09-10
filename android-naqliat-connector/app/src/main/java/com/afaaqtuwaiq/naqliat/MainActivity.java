@@ -3,7 +3,6 @@ package com.afaaqtuwaiq.naqliat;
 import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.widget.Button;
@@ -25,8 +24,7 @@ public class MainActivity extends Activity {
         server = new EditText(this); server.setHint("رابط نظام آفاق طويق"); server.setInputType(InputType.TYPE_TEXT_VARIATION_URI); server.setText(getPreferences().getString("server", "https://gulf-logistics-ai-v7-production.up.railway.app")); box.addView(server);
         token = new EditText(this); token.setHint("رمز ربط الجهاز"); token.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); token.setText(getPreferences().getString("token", "")); box.addView(token);
         Button save = new Button(this); save.setText("حفظ إعدادات الربط"); save.setOnClickListener(v -> { getPreferences().edit().putString("server", server.getText().toString().trim()).putString("token", token.getText().toString().trim()).apply(); Toast.makeText(this,"تم الحفظ",Toast.LENGTH_SHORT).show(); }); box.addView(save);
-        Button access = new Button(this); access.setText("تفعيل قراءة بطاقات نقليات"); access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))); box.addView(access);
-        TextView steps = new TextView(this); steps.setText("بعد التفعيل: افتح نقليات ← ابحث عن حمولة ← افتح تفاصيل الحمولة. سيظهر إشعار قصير عند التقاطها."); steps.setTextSize(16); steps.setPadding(0,28,0,0); box.addView(steps);
+        TextView steps = new TextView(this); steps.setText("لا يحتاج التطبيق إلى صلاحية إمكانية الوصول. أدخل بيانات الحمولة أو استخدم مشاركة تفاصيل الحمولة إلى النظام عند توفرها."); steps.setTextSize(16); steps.setPadding(0,28,0,0); box.addView(steps);
         setContentView(box);
     }
     private android.content.SharedPreferences getPreferences() { return getSharedPreferences("connector", MODE_PRIVATE); }
