@@ -3,8 +3,8 @@ from fastapi import APIRouter,Request,HTTPException
 from fastapi.responses import HTMLResponse,RedirectResponse
 from app.storage import db,get_session,rows,one,execute,log,utcnow
 router=APIRouter()
-ACTIONS={'send_email':'إرسال البريد','make_phone_call':'إجراء مكالمة هاتفية','approve_quote':'اعتماد العرض','approve_pricing':'اعتماد التسعير','view_profit':'مشاهدة التكلفة والربحية','manage_users':'إدارة المستخدمين','edit_operations':'تعديل العمليات','manage_gmail':'إدارة Gmail','accept_quote':'تسجيل قبول العميل'}
-DEFAULT={'admin':set(ACTIONS),'sales':{'send_email','make_phone_call','accept_quote'},'customs':{'edit_operations'},'transport':{'edit_operations'},'finance':{'approve_pricing','view_profit'},'viewer':set()}
+ACTIONS={'send_email':'إرسال البريد','send_whatsapp':'إرسال واتساب','make_phone_call':'إجراء مكالمة هاتفية','approve_quote':'اعتماد العرض','approve_pricing':'اعتماد التسعير','view_profit':'مشاهدة التكلفة والربحية','manage_users':'إدارة المستخدمين','edit_operations':'تعديل العمليات','manage_gmail':'إدارة Gmail','accept_quote':'تسجيل قبول العميل'}
+DEFAULT={'admin':set(ACTIONS),'sales':{'send_email','send_whatsapp','make_phone_call','accept_quote'},'customs':{'edit_operations'},'transport':{'edit_operations','send_whatsapp'},'finance':{'approve_pricing','view_profit'},'viewer':set()}
 def init():
  with db() as c:c.execute('''CREATE TABLE IF NOT EXISTS role_permissions(role TEXT NOT NULL,permission TEXT NOT NULL,allowed INTEGER NOT NULL DEFAULT 1,updated_by BIGINT,updated_at TIMESTAMPTZ NOT NULL,PRIMARY KEY(role,permission))''')
 init()
