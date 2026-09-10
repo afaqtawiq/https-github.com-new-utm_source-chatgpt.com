@@ -1,5 +1,9 @@
 plugins { id("com.android.application") }
 
+dependencies {
+    implementation("com.google.mlkit:text-recognition-arabic:16.0.0")
+}
+
 android {
     namespace = "com.afaaqtuwaiq.naqliat"
     compileSdk = 35
