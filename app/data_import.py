@@ -32,6 +32,12 @@ def _init():
   c.execute("CREATE UNIQUE INDEX IF NOT EXISTS customer_directory_email_uq ON customer_directory(LOWER(email)) WHERE email IS NOT NULL AND email<>''")
   c.execute('''CREATE TABLE IF NOT EXISTS drivers(id BIGSERIAL PRIMARY KEY,driver_name TEXT NOT NULL,whatsapp_phone TEXT NOT NULL UNIQUE,vehicle_type TEXT NOT NULL,capacity TEXT,current_city TEXT,preferred_routes TEXT,availability TEXT NOT NULL DEFAULT 'متاح',company_name TEXT,offer_consent INTEGER NOT NULL DEFAULT 0,consent_date DATE,notes TEXT,created_at TIMESTAMPTZ NOT NULL,updated_at TIMESTAMPTZ NOT NULL)''')
   c.execute('''CREATE TABLE IF NOT EXISTS data_import_batches(id TEXT PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id),dataset_type TEXT NOT NULL,file_name TEXT NOT NULL,rows_json TEXT NOT NULL,valid_count INTEGER NOT NULL,duplicate_count INTEGER NOT NULL,error_count INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'preview',created_at TIMESTAMPTZ NOT NULL,committed_at TIMESTAMPTZ)''')
+  c.execute("CREATE TABLE IF NOT EXISTS system_migrations(key TEXT PRIMARY KEY,applied_at TIMESTAMPTZ NOT NULL)")
+  reset_key='reset_customers_20260910_v1'
+  if not c.execute("SELECT 1 FROM system_migrations WHERE key=%s",(reset_key,)).fetchone():
+   c.execute("DELETE FROM customer_directory")
+   c.execute("DELETE FROM accounts")
+   c.execute("INSERT INTO system_migrations(key,applied_at) VALUES(%s,%s)",(reset_key,utcnow()))
 _init()
 
 def esc(v):
