@@ -13,7 +13,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.TextRecognition;
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import com.google.mlkit.vision.text.arabic.ArabicTextRecognizerOptions;
 
 public class MainActivity extends Activity {
     private EditText server;
@@ -35,6 +35,6 @@ public class MainActivity extends Activity {
     private android.content.SharedPreferences getPreferences() { return getSharedPreferences("connector", MODE_PRIVATE); }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data); if(requestCode!=42 || resultCode!=RESULT_OK || data==null) return;
-        try { Uri uri=data.getData(); InputImage image=InputImage.fromFilePath(this,uri); TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(image).addOnSuccessListener(r -> { getPreferences().edit().putString("ocr_text",r.getText()).apply(); Toast.makeText(this,"تم استخراج النص. افتح النظام لمراجعته وحفظ الحمولة.",Toast.LENGTH_LONG).show(); }).addOnFailureListener(e -> Toast.makeText(this,"تعذر قراءة الصورة، جرّب لقطة أوضح",Toast.LENGTH_LONG).show()); } catch(Exception e){ Toast.makeText(this,"تعذر فتح الصورة",Toast.LENGTH_SHORT).show(); }
+        try { Uri uri=data.getData(); InputImage image=InputImage.fromFilePath(this,uri); TextRecognition.getClient(new ArabicTextRecognizerOptions.Builder().build()).process(image).addOnSuccessListener(r -> { getPreferences().edit().putString("ocr_text",r.getText()).apply(); Toast.makeText(this,"تم استخراج النص. افتح النظام لمراجعته وحفظ الحمولة.",Toast.LENGTH_LONG).show(); }).addOnFailureListener(e -> Toast.makeText(this,"تعذر قراءة الصورة، جرّب لقطة أوضح",Toast.LENGTH_LONG).show()); } catch(Exception e){ Toast.makeText(this,"تعذر فتح الصورة",Toast.LENGTH_SHORT).show(); }
     }
 }

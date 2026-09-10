@@ -1,7 +1,7 @@
 plugins { id("com.android.application") }
 
 dependencies {
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:text-recognition-arabic:16.0.0")
 }
 
 android {
