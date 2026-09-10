@@ -34,9 +34,8 @@ from app.phone_sales import router as phone_sales_router
 from app.crm_contacts import router as crm_contacts_router
 from app.data_import import router as data_import_router
 from app.drivers_management import router as drivers_management_router
-from app.google_places import router as google_places_router
-from app.daily_command import router as daily_command_router
 from app.whatsapp_integration import router as whatsapp_integration_router
+from app.command_assistant import router as command_assistant_router
 from app.storage import get_session,one,execute,utcnow
 ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/soc','/incidents','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'viewer':()}
 SENSITIVE=[('send_email','POST','/outbound/','/send'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
@@ -68,10 +67,9 @@ async def enterprise_security_guard(request,call_next):
   m=mfa_state(sess['user_id'])
   if not m or not m.get('mfa_enabled'):return JSONResponse({'detail':'MFA enrollment required for this sensitive action','mfa_setup':'/mfa','permission':perm},status_code=428)
   if not recent_stepup(sess['id']):return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+request.url.path,'permission':perm},status_code=428)
- response=await call_next(request);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(self), geolocation=()' if request.url.path=='/retell-web-test' else 'camera=(), microphone=(), geolocation=()';return response
+ response=await call_next(request);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(self), geolocation=()' if request.url.path in ('/retell-web-test','/commands') else 'camera=(), microphone=(), geolocation=()';return response
 for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router,mfa_stepup_router,security_operations_router,incident_response_router,retell_integration_router,phone_sales_router,crm_contacts_router):app.include_router(r)
 app.include_router(data_import_router)
 app.include_router(drivers_management_router)
-app.include_router(google_places_router)
-app.include_router(daily_command_router)
 app.include_router(whatsapp_integration_router)
+app.include_router(command_assistant_router)

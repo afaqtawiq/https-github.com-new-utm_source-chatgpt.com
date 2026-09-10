@@ -18,7 +18,7 @@ def current(r):
 def require(r):
  try:return current(r)
  except:return None
-def nav(): return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/daily-command">مركز العمل اليومي</a><a href="/discovery">الاكتشاف</a><a href="/google-places">شركات خرائط Google</a><a href="/intelligence-v2">الذكاء</a><a href="/sales-copilot">Sales Copilot</a><a href="/accounts">العملاء</a><a href="/drivers">السائقون</a><a href="/data-import">استيراد البيانات</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">Pipeline</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a href="/logout">خروج</a></div>'
+def nav(): return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/commands">🎙 مساعد الأوامر</a><a href="/discovery">الاكتشاف</a><a href="/intelligence-v2">الذكاء</a><a href="/sales-copilot">Sales Copilot</a><a href="/accounts">العملاء</a><a href="/drivers">السائقون</a><a href="/data-import">استيراد البيانات</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">Pipeline</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a href="/logout">خروج</a></div>'
 def head(s,t): return '<div class="top"><div><h1>'+esc(t)+'</h1><div class="muted">Gulf Logistics AI · آفاق طويق</div></div><div><span class="good">● PostgreSQL مشترك</span><br><span class="muted">'+esc(s['email'])+'</span></div></div>'+nav()
 def parse(raw): return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def rl(): return RedirectResponse('/login',303)
@@ -43,8 +43,8 @@ def logout(r:Request):
 def dashboard(r:Request):
  s=require(r)
  if not s:return rl()
- a=one('SELECT COUNT(*) n FROM accounts')['n'];o=one('SELECT COUNT(*) n FROM opportunities')['n'];sig=one('SELECT COUNT(*) n FROM discovered_signals')['n'];src=one('SELECT COUNT(*) n FROM source_watches WHERE enabled=1')['n'];pipe=one("SELECT COALESCE(SUM(estimated_value),0) v FROM opportunities WHERE stage NOT IN ('lost','won')")['v']
- b=head(s,'لوحة التشغيل')+f'<div class="grid"><div class="kpi">العملاء<b>{a}</b></div><div class="kpi">الفرص<b>{o}</b></div><div class="kpi">إشارات مكتشفة<b>{sig}</b></div><div class="kpi">مصادر مراقبة<b>{src}</b></div><div class="kpi">Pipeline<b>{pipe:,.0f} SAR</b></div></div><div class="card notice"><b>قاعدة PostgreSQL مركزية مشتركة.</b> الويب والـDiscovery Worker يستخدمان نفس مخزن البيانات.</div><div class="card notice"><b>Sales Copilot مفعل.</b> يحول الفرص إلى ملف بيع ومسودة عرض وخطة متابعة داخلية.</div><div class="card warn">التواصل الخارجي متوقف ويحتاج موافقة بشرية.</div>'
+ a=one('SELECT COUNT(*) n FROM accounts')['n'];o=one('SELECT COUNT(*) n FROM opportunities')['n'];d=one('SELECT COUNT(*) n FROM drivers')['n'];sig=one('SELECT COUNT(*) n FROM discovered_signals')['n'];src=one('SELECT COUNT(*) n FROM source_watches WHERE enabled=1')['n'];pipe=one("SELECT COALESCE(SUM(estimated_value),0) v FROM opportunities WHERE stage NOT IN ('lost','won')")['v']
+ b=head(s,'لوحة التشغيل')+f'<div class="grid"><div class="kpi">العملاء<b>{a}</b></div><div class="kpi"><a href="/drivers" style="color:inherit;text-decoration:none">السائقون<b>{d}</b></a></div><div class="kpi">الفرص<b>{o}</b></div><div class="kpi">إشارات مكتشفة<b>{sig}</b></div><div class="kpi">مصادر مراقبة<b>{src}</b></div><div class="kpi">Pipeline<b>{pipe:,.0f} SAR</b></div></div><div class="card notice"><b>قاعدة PostgreSQL مركزية مشتركة.</b> الويب والـDiscovery Worker يستخدمان نفس مخزن البيانات.</div><div class="card notice"><b>Sales Copilot مفعل.</b> يحول الفرص إلى ملف بيع ومسودة عرض وخطة متابعة داخلية.</div><div class="card warn">التواصل الخارجي متوقف ويحتاج موافقة بشرية.</div>'
  return HTMLResponse(page('لوحة التشغيل',b))
 @app.get('/discovery',response_class=HTMLResponse)
 def discovery(r:Request):
