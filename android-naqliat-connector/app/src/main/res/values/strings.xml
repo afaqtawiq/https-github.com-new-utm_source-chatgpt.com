@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">موصل نقليات - آفاق طويق</string>
+    <string name="accessibility_description">يقرأ نص بطاقات الحمولات الظاهرة داخل تطبيق نقليات فقط ويرسلها إلى نظام آفاق طويق.</string>
+</resources>

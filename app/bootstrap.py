@@ -36,6 +36,7 @@ from app.data_import import router as data_import_router
 from app.drivers_management import router as drivers_management_router
 from app.whatsapp_integration import router as whatsapp_integration_router
 from app.command_assistant import router as command_assistant_router
+from app.naqliat_connector import router as naqliat_connector_router
 from app.storage import get_session,one,execute,utcnow
 ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/soc','/incidents','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'viewer':()}
 SENSITIVE=[('send_email','POST','/outbound/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
@@ -73,3 +74,4 @@ app.include_router(data_import_router)
 app.include_router(drivers_management_router)
 app.include_router(whatsapp_integration_router)
 app.include_router(command_assistant_router)
+app.include_router(naqliat_connector_router)
