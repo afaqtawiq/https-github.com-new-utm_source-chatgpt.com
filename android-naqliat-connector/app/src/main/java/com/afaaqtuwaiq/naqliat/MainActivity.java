@@ -14,6 +14,11 @@ import android.widget.Toast;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import org.json.JSONObject;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
     private EditText server;
@@ -35,6 +40,15 @@ public class MainActivity extends Activity {
     private android.content.SharedPreferences getPreferences() { return getSharedPreferences("connector", MODE_PRIVATE); }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data); if(requestCode!=42 || resultCode!=RESULT_OK || data==null) return;
-        try { Uri uri=data.getData(); InputImage image=InputImage.fromFilePath(this,uri); TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(image).addOnSuccessListener(r -> { getPreferences().edit().putString("ocr_text",r.getText()).apply(); Toast.makeText(this,"تم استخراج النص. افتح النظام لمراجعته وحفظ الحمولة.",Toast.LENGTH_LONG).show(); }).addOnFailureListener(e -> Toast.makeText(this,"تعذر قراءة الصورة، جرّب لقطة أوضح",Toast.LENGTH_LONG).show()); } catch(Exception e){ Toast.makeText(this,"تعذر فتح الصورة",Toast.LENGTH_SHORT).show(); }
+        try { Uri uri=data.getData(); InputImage image=InputImage.fromFilePath(this,uri); TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(image).addOnSuccessListener(r -> sendOcr(r.getText())).addOnFailureListener(e -> Toast.makeText(this,"تعذر قراءة الصورة، جرّب لقطة أوضح",Toast.LENGTH_LONG).show()); } catch(Exception e){ Toast.makeText(this,"تعذر فتح الصورة",Toast.LENGTH_SHORT).show(); }
+    }
+    private void sendOcr(String raw) {
+        new Thread(() -> { try {
+            String base=getPreferences().getString("server","").replaceAll("/+$",""); String key=getPreferences().getString("token","");
+            if(base.isEmpty()||key.isEmpty()){ runOnUiThread(() -> Toast.makeText(this,"أكمل إعدادات الربط",Toast.LENGTH_LONG).show()); return; }
+            HttpURLConnection c=(HttpURLConnection)new URL(base+"/api/v7/naqliat/ocr").openConnection(); c.setRequestMethod("POST"); c.setConnectTimeout(15000); c.setReadTimeout(15000); c.setDoOutput(true); c.setRequestProperty("Content-Type","application/json; charset=utf-8"); c.setRequestProperty("Authorization","Bearer "+key);
+            JSONObject json=new JSONObject(); json.put("raw_text",raw); try(OutputStream os=c.getOutputStream()){os.write(json.toString().getBytes(StandardCharsets.UTF_8));}
+            int code=c.getResponseCode(); c.disconnect(); runOnUiThread(() -> Toast.makeText(this,code>=200&&code<300?"تم إرسال الحمولة إلى النظام":"تعذر حفظ الحمولة: "+code,Toast.LENGTH_LONG).show());
+        } catch(Exception e){ runOnUiThread(() -> Toast.makeText(this,"تعذر الاتصال بالخادم",Toast.LENGTH_LONG).show()); } }).start();
     }
 }
