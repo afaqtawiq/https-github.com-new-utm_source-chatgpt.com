@@ -19,6 +19,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
     private EditText server;
@@ -46,9 +48,21 @@ public class MainActivity extends Activity {
         new Thread(() -> { try {
             String base=getPreferences().getString("server","").replaceAll("/+$",""); String key=getPreferences().getString("token","");
             if(base.isEmpty()||key.isEmpty()){ runOnUiThread(() -> Toast.makeText(this,"أكمل إعدادات الربط",Toast.LENGTH_LONG).show()); return; }
-            HttpURLConnection c=(HttpURLConnection)new URL(base+"/api/v7/naqliat/ocr").openConnection(); c.setRequestMethod("POST"); c.setConnectTimeout(15000); c.setReadTimeout(15000); c.setDoOutput(true); c.setRequestProperty("Content-Type","application/json; charset=utf-8"); c.setRequestProperty("Authorization","Bearer "+key);
-            JSONObject json=new JSONObject(); json.put("raw_text",raw); try(OutputStream os=c.getOutputStream()){os.write(json.toString().getBytes(StandardCharsets.UTF_8));}
+            String text=raw.replace('\u00a0',' ').replaceAll("\\s+"," ").trim();
+            Matcher route=Pattern.compile("(?:مطلوب\\s+من|من)\\s*:?\\s*(.+?)\\s+(?:إلى|الى|إلي|الي)\\s*:?\\s*(.+?)(?=\\s+(?:الحمولة|نوع الشاحنة|الوصف|[0-9٠-٩]+\\s*طن)|$)").matcher(text);
+            if(!route.find()){ runOnUiThread(() -> Toast.makeText(this,"تعذر تحديد المنشأ والوجهة من الصورة",Toast.LENGTH_LONG).show()); return; }
+            Matcher weight=Pattern.compile("([0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)\\s*(?:\\+\\s*)?طن").matcher(text);
+            Matcher phone=Pattern.compile("(?:\\+|00)?966\\s*5(?:[\\s-]*\\d){8}").matcher(text);
+            Matcher vehicle=Pattern.compile("نوع الشاحنة\\s*:?\\s*(.+?)(?=\\s+(?:حوالي|الدفع|التنزيل|$))").matcher(text);
+            JSONObject json=new JSONObject(); json.put("origin",route.group(1).trim()); json.put("destination",route.group(2).trim());
+            if(weight.find()) json.put("weight_tons",Double.parseDouble(arabicDigits(weight.group(1)).replace(',','.')));
+            if(phone.find()) json.put("owner_phone",phone.group());
+            if(vehicle.find()) json.put("vehicle_type",vehicle.group(1).trim());
+            json.put("description",raw); json.put("raw_text",raw); json.put("capture_method","android_ocr");
+            HttpURLConnection c=(HttpURLConnection)new URL(base+"/api/v7/naqliat/loads").openConnection(); c.setRequestMethod("POST"); c.setConnectTimeout(15000); c.setReadTimeout(15000); c.setDoOutput(true); c.setRequestProperty("Content-Type","application/json; charset=utf-8"); c.setRequestProperty("Authorization","Bearer "+key);
+            try(OutputStream os=c.getOutputStream()){os.write(json.toString().getBytes(StandardCharsets.UTF_8));}
             int code=c.getResponseCode(); c.disconnect(); runOnUiThread(() -> Toast.makeText(this,code>=200&&code<300?"تم إرسال الحمولة إلى النظام":"تعذر حفظ الحمولة: "+code,Toast.LENGTH_LONG).show());
         } catch(Exception e){ runOnUiThread(() -> Toast.makeText(this,"تعذر الاتصال بالخادم",Toast.LENGTH_LONG).show()); } }).start();
     }
+    private String arabicDigits(String value){ return value.replace('٠','0').replace('١','1').replace('٢','2').replace('٣','3').replace('٤','4').replace('٥','5').replace('٦','6').replace('٧','7').replace('٨','8').replace('٩','9'); }
 }
