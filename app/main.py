@@ -4,10 +4,12 @@ from fastapi.responses import HTMLResponse,RedirectResponse
 from app.storage import init_db,authenticate,create_session,get_session,delete_session,rows,one,execute,log,utcnow
 from app.discovery import fetch_public
 from app.intelligence import analyze
+from app.prospect_seed import seed_afaaq_prospects
 
 app=FastAPI(title='Gulf Logistics AI',version='7.2.0-sales-copilot')
 ADMIN_EMAIL=os.getenv('ADMIN_EMAIL','admin@afaaqtuwaiq.local'); ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD','ChangeMe-Now-2026!')
 init_db(ADMIN_EMAIL,ADMIN_PASSWORD)
+seed_afaaq_prospects()
 STYLE='''<style>body{font-family:Arial;background:#07131f;color:#eef6fb;margin:0}*{box-sizing:border-box}.wrap{max-width:1250px;margin:auto;padding:24px}.card{background:#102536;border:1px solid #28475d;border-radius:16px;padding:20px;margin:14px 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.nav{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.nav a,.btn{display:inline-block;padding:10px 14px;border:0;border-radius:10px;background:#18384d;color:white;font-weight:700;text-decoration:none;cursor:pointer}.btn{background:#22c55e;color:#04130a}.muted{color:#9fb4c4}.good{color:#54e28b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.kpi{background:#0b1d2b;padding:18px;border-radius:12px}.kpi b{font-size:26px;display:block;margin-top:8px}input,select,textarea{padding:12px;border:1px solid #36586e;border-radius:9px;margin:6px 0;background:#081925;color:white;width:100%}textarea{min-height:85px}.formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}table{width:100%;border-collapse:collapse}th,td{text-align:right;padding:11px;border-bottom:1px solid #28475d;vertical-align:top}.scroll{overflow:auto}.pill{padding:4px 8px;border-radius:999px;background:#18384d}.notice{border-right:4px solid #22c55e}.warn{border-right:4px solid #f59e0b}</style>'''
 def esc(x): return html.escape(str(x or ''))
 def page(t,b): return '<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(t)+'</title>'+STYLE+'<body><div class="wrap">'+b+'</div></body></html>'
@@ -75,12 +77,12 @@ def intelligence(r:Request):
 def accounts(r:Request):
  s=require(r)
  if not s:return rl()
- data=rows('SELECT * FROM accounts ORDER BY id DESC');f='<div class="card"><form method="post" action="/accounts"><div class="formgrid"><input name="name" placeholder="الشركة" required><input name="country" placeholder="الدولة"><input name="domain" placeholder="النطاق"></div><textarea name="notes" placeholder="ملاحظات"></textarea><button class="btn">حفظ</button></form></div>';trs=''.join(f'<tr><td>{x["id"]}</td><td>{esc(x["name"])}</td><td>{esc(x["country"])}</td><td>{esc(x["domain"])}</td><td>{esc(x["status"])}</td></tr>' for x in data);return HTMLResponse(page('العملاء',head(s,'العملاء')+f+'<div class="card scroll"><table>'+trs+'</table></div>'))
+ data=rows('SELECT * FROM accounts ORDER BY id DESC');f='<div class="card"><form method="post" action="/accounts"><div class="formgrid"><input name="name" placeholder="اسم الشركة" required><input name="country" placeholder="الدولة"><input name="phone" placeholder="رقم الجوال" type="tel"><input name="email" placeholder="البريد الإلكتروني" type="email"><input name="domain" placeholder="النطاق"></div><textarea name="notes" placeholder="ملاحظات"></textarea><button class="btn">حفظ العميل</button></form></div>';trs=''.join(f'<tr><td>{x["id"]}</td><td>{esc(x["name"])}</td><td>{esc(x["country"])}</td><td dir="ltr">{esc(x.get("phone"))}</td><td dir="ltr">{esc(x.get("email"))}</td><td>{esc(x["domain"])}</td><td>{esc(x["status"])}</td></tr>' for x in data);return HTMLResponse(page('العملاء',head(s,'العملاء')+f+'<div class="card scroll"><table><tr><th>ID</th><th>اسم الشركة</th><th>البلد</th><th>الجوال</th><th>الإيميل</th><th>النطاق</th><th>الحالة</th></tr>'+trs+'</table></div>'))
 @app.post('/accounts')
 async def add_account(r:Request):
  s=require(r)
  if not s:return rl()
- d=parse(await r.body());now=utcnow();iid=execute('INSERT INTO accounts(name,country,domain,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',(d['name'],d.get('country'),d.get('domain'),'lead',d.get('notes'),now,now));log(s['user_id'],'create','account',iid,d['name']);return RedirectResponse('/accounts',303)
+ d=parse(await r.body());now=utcnow();iid=execute('INSERT INTO accounts(name,country,domain,phone,email,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(d['name'],d.get('country'),d.get('domain'),d.get('phone'),d.get('email'),'lead',d.get('notes'),now,now));log(s['user_id'],'create','account',iid,d['name']);return RedirectResponse('/accounts',303)
 @app.get('/opportunities',response_class=HTMLResponse)
 def opportunities(r:Request):
  s=require(r)

@@ -25,6 +25,8 @@ def init_db(admin_email,admin_password):
  '''CREATE TABLE IF NOT EXISTS shipment_exceptions(id BIGSERIAL PRIMARY KEY,shipment_id BIGINT NOT NULL REFERENCES shipments(id) ON DELETE CASCADE,kind TEXT NOT NULL,severity TEXT NOT NULL DEFAULT 'medium',status TEXT NOT NULL DEFAULT 'open',summary TEXT,created_at TIMESTAMPTZ NOT NULL,updated_at TIMESTAMPTZ NOT NULL,resolved_by BIGINT,resolved_at TIMESTAMPTZ)''']
  with db() as c:
   for sql in ddl:c.execute(sql)
+  c.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS phone TEXT")
+  c.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email TEXT")
   row=c.execute('SELECT id FROM users WHERE email=%s',(admin_email,)).fetchone()
   if not row:c.execute('INSERT INTO users(email,name,password_hash,role,created_at) VALUES(%s,%s,%s,%s,%s)',(admin_email,'Afaaq Tuwaiq Admin',hash_password(admin_password),'admin',utcnow()))
   for name,url,source_type in OFFICIAL_DISCOVERY_SOURCES:c.execute('''INSERT INTO source_watches(name,url,source_type,enabled,last_status,last_checked_at,created_at) VALUES(%s,%s,%s,1,'seeded',NULL,%s) ON CONFLICT(url) DO UPDATE SET name=EXCLUDED.name,source_type=EXCLUDED.source_type,enabled=1''',(name,url,source_type,utcnow()))
