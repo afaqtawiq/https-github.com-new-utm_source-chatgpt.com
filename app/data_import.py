@@ -8,12 +8,12 @@ from app.storage import db, get_session, utcnow, log
 router = APIRouter()
 MAX_FILE_BYTES = 2 * 1024 * 1024
 
-CUSTOMER_COLUMNS = ['company_name','contact_name','phone','email','city','activity','service_interest','source','contact_consent','consent_date','notes']
+CUSTOMER_COLUMNS = ['company_name','contact_name','phone','email','country','city','activity','service_interest','source','contact_consent','consent_date','notes']
 DRIVER_COLUMNS = ['driver_name','whatsapp_phone','vehicle_type','capacity','current_city','preferred_routes','availability','company_name','offer_consent','consent_date','notes']
 PROSPECT_COLUMNS = ['company_name','location','sector','lead_status','priority','fit_score','notes']
 ALIASES = {
  'اسم الشركة':'company_name','company':'company_name','company name':'company_name','اسم المسؤول':'contact_name','contact':'contact_name','contact name':'contact_name',
- 'الجوال':'phone','رقم الجوال':'phone','phone':'phone','البريد':'email','البريد الإلكتروني':'email','email':'email','المدينة':'city','city':'city',
+ 'الجوال':'phone','رقم الجوال':'phone','phone':'phone','البريد':'email','البريد الإلكتروني':'email','email':'email','البلد':'country','الدولة':'country','country':'country','المدينة':'city','city':'city',
  'النشاط':'activity','activity':'activity','الخدمة المطلوبة':'service_interest','service':'service_interest','مصدر البيانات':'source','source':'source',
  'موافقة التواصل':'contact_consent','contact consent':'contact_consent','تاريخ الموافقة':'consent_date','consent date':'consent_date','ملاحظات':'notes','notes':'notes',
  'اسم السائق':'driver_name','driver name':'driver_name','رقم واتساب':'whatsapp_phone','whatsapp':'whatsapp_phone','whatsapp phone':'whatsapp_phone',
@@ -175,6 +175,10 @@ def commit(batch_id:str,request:Request):
     saved=c.execute('''INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,capacity,current_city,preferred_routes,availability,company_name,offer_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s) ON CONFLICT(whatsapp_phone) DO NOTHING RETURNING id''',(d.get('driver_name'),d.get('whatsapp_phone'),d.get('vehicle_type'),d.get('capacity'),d.get('current_city'),d.get('preferred_routes'),d.get('availability') or 'متاح',d.get('company_name'),d.get('offer_consent',0),d.get('consent_date',''),d.get('notes'),now,now)).fetchone()
    elif batch['dataset_type']=='customers':
     saved=c.execute('''INSERT INTO customer_directory(company_name,contact_name,phone,email,city,activity,service_interest,source,contact_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,NULLIF(%s,''),NULLIF(%s,''),%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id''',(d.get('company_name'),d.get('contact_name'),d.get('phone',''),d.get('email',''),d.get('city'),d.get('activity'),d.get('service_interest'),d.get('source'),d.get('contact_consent',0),d.get('consent_date',''),d.get('notes'),now,now)).fetchone()
+    c.execute('''INSERT INTO accounts(name,country,phone,email,status,notes,created_at,updated_at)
+      SELECT %s,%s,NULLIF(%s,''),NULLIF(%s,''),'lead',%s,%s,%s
+      WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE LOWER(name)=LOWER(%s))''',
+      (d.get('company_name'),d.get('country') or 'السعودية',d.get('phone',''),d.get('email',''),d.get('notes'),now,now,d.get('company_name')))
    else:
     details='القطاع: '+str(d.get('sector') or '')+' | الأولوية: '+str(d.get('priority') or '')+' | درجة التوافق: '+str(d.get('fit_score') or '')
     if d.get('notes'):details+=' | '+str(d.get('notes'))
