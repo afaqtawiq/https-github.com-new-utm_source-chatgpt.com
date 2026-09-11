@@ -105,6 +105,11 @@ async def contact_owner(shipment_id):
         execute("UPDATE freight_negotiations SET status='missing_owner_phone',last_error=?,updated_at=? WHERE shipment_id=?",
                 ("رقم صاحب الشحنة غير متوفر", utcnow(), shipment_id))
         return
+    missing = _shipment_requirements(item)
+    if missing:
+        execute("UPDATE freight_negotiations SET status='needs_manual_data',last_error=?,updated_at=? WHERE shipment_id=?",
+                ("أكمل البيانات أولًا: " + "، ".join(missing), utcnow(), shipment_id))
+        return
     if os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") != "1":
         execute("UPDATE freight_negotiations SET status='contact_ready',updated_at=? WHERE shipment_id=?", (utcnow(), shipment_id))
         return
@@ -195,11 +200,42 @@ def _valid_phone(value):
     return phone if re.fullmatch(r"\+[1-9]\d{7,14}", phone) else ""
 
 
+def _usable_text(value):
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    invalid = {"-", "—", "غير محدد", "غير معروف", "unknown", "none", "null"}
+    return value if len(value) >= 2 and value.lower() not in invalid else ""
+
+
+def _shipment_requirements(item, agreement=False):
+    missing = []
+    if not _usable_text(item.get("origin")):
+        missing.append("مدينة/موقع التحميل")
+    if not _usable_text(item.get("destination")):
+        missing.append("مدينة/موقع التنزيل")
+    if not _valid_phone(item.get("owner_phone")):
+        missing.append("رقم صاحب الشحنة بصيغة دولية")
+    if agreement:
+        if not item.get("weight_tons") or float(item["weight_tons"]) <= 0:
+            missing.append("الوزن")
+        if not _usable_text(item.get("unloading_location") or item.get("destination")):
+            missing.append("مكان التنزيل")
+        if not _usable_text(item.get("payment_method")):
+            missing.append("طريقة الدفع")
+    return missing
+
+
+def _require_complete(item, agreement=False):
+    missing = _shipment_requirements(item, agreement)
+    if missing:
+        raise HTTPException(409, "أكمل البيانات أولًا: " + "، ".join(missing))
+
+
 def prepare_driver_offer(shipment_id, user_id):
     item = one("""SELECT s.*,n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.payment_method,
         n.unloading_location FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item or item.get("agreed_owner_price") is None:
         raise HTTPException(409, "يجب تسجيل اتفاق صاحب الشحنة أولًا")
+    _require_complete(item, agreement=True)
     existing = one("SELECT id FROM driver_broadcasts WHERE shipment_id=? AND status NOT IN ('cancelled','rejected') ORDER BY id DESC LIMIT 1", (shipment_id,))
     if existing:
         return existing["id"]
@@ -272,7 +308,7 @@ def workflow_page(request: Request):
 
 
 def _page(title, body):
-    return f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>{esc(title)}</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;margin:0;padding:24px}}a{{color:#86efac}}.card{{max-width:1100px;margin:14px auto;background:#102536;padding:20px;border-radius:16px;overflow:auto}}input,textarea,button{{width:100%;padding:11px;margin:6px 0;box-sizing:border-box;border-radius:8px;border:1px solid #36586e}}button{{background:#ff7900;color:white;font-weight:bold}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}.warn{{color:#fde68a}}</style>{body}</html>"""
+    return f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>{esc(title)}</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;margin:0;padding:24px}}a{{color:#86efac}}.card{{max-width:1100px;margin:14px auto;background:#102536;padding:20px;border-radius:16px;overflow:auto}}input,textarea,button{{width:100%;padding:11px;margin:6px 0;box-sizing:border-box;border-radius:8px;border:1px solid #36586e}}button{{background:#ff7900;color:white;font-weight:bold}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}.warn{{color:#fde68a}}.good{{color:#86efac}}hr{{border:0;border-top:1px solid #36586e;margin:20px 0}}</style>{body}</html>"""
 
 
 @router.get("/freight-workflow/{shipment_id}", response_class=HTMLResponse)
@@ -283,17 +319,65 @@ def workflow_detail(shipment_id: int, request: Request):
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404)
     broadcast = one("SELECT * FROM driver_broadcasts WHERE shipment_id=? ORDER BY id DESC LIMIT 1", (shipment_id,))
-    controls = f"""<form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>التواصل مع صاحب الشحنة الآن</button></form>
+    missing_contact = _shipment_requirements(item)
+    readiness = ("<p class=good>بيانات المسار والتواصل مكتملة.</p>" if not missing_contact else
+                 "<p class=warn>يلزم استكمال: " + esc("، ".join(missing_contact)) + "</p>")
+    controls = f"""<h2>الاستخراج والتصحيح اليدوي</h2>
+    <p>راجع نتيجة OCR وصحح أي حقل قبل بدء التواصل.</p>
+    <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
+    <input name=origin required placeholder='مدينة أو موقع التحميل' value='{esc(item.get('origin'))}'>
+    <input name=destination required placeholder='مدينة أو موقع التنزيل' value='{esc(item.get('destination'))}'>
+    <input name=owner_phone required dir=ltr placeholder='+9665xxxxxxxx' value='{esc(item.get('owner_phone'))}'>
+    <input name=weight_tons type=number min=.01 step=.01 placeholder='الوزن بالطن' value='{esc(item.get('weight_tons'))}'>
+    </div><button>حفظ البيانات المصححة يدويًا</button></form>{readiness}<hr>
+    <form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>التواصل مع صاحب الشحنة الآن</button></form>
     <form method=post action='/freight-workflow/{shipment_id}/agreement'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid><input name=asking_price type=number step=.01 placeholder='السعر المطلوب' value='{esc(item.get('asking_price'))}'><input name=agreed_owner_price type=number step=.01 required placeholder='السعر المتفق مع صاحب الشحنة' value='{esc(item.get('agreed_owner_price'))}'><input name=weight_tons type=number step=.01 placeholder='الوزن طن' value='{esc(item.get('weight_tons'))}'><input name=unloading_location placeholder='مكان التنزيل' value='{esc(item.get('unloading_location'))}'><input name=payment_method placeholder='طريقة الدفع' value='{esc(item.get('payment_method'))}'></div><textarea name=notes placeholder='ملخص التفاوض'>{esc(item.get('notes'))}</textarea><button>حفظ الاتفاق وتجهيز عرض السائقين ناقص 150 ريال</button></form>"""
     if broadcast:
         controls += f"<p><a href='/commands/broadcast/{broadcast['id']}'>مراجعة العرض وتأكيد الإرسال الجماعي مرة واحدة</a> — الحالة: {esc(broadcast['status'])}</p>"
     return HTMLResponse(_page(item["reference"], f"<div class=card><h1>{esc(item['reference'])}</h1><p>{esc(item['origin'])} → {esc(item['destination'])}</p><p>صاحب الشحنة: <span dir=ltr>{esc(item['owner_phone'])}</span> | الحالة: {esc(item['negotiation_status'])}</p><p class=warn>{esc(item.get('last_error'))}</p>{controls}</div>"))
 
 
+@router.post("/freight-workflow/{shipment_id}/manual-data")
+async def save_manual_data(shipment_id: int, request: Request):
+    current = session(request); data = form(await request.body())
+    if data.get("csrf") != current["csrf"]: raise HTTPException(403)
+    item = one("""SELECT s.id,n.naqliat_load_id FROM shipments s
+        JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
+    if not item: raise HTTPException(404, "الشحنة غير موجودة")
+    origin = _usable_text(data.get("origin")); destination = _usable_text(data.get("destination"))
+    phone = _valid_phone(data.get("owner_phone"))
+    if not origin or not destination:
+        raise HTTPException(400, "أدخل موقع التحميل وموقع التنزيل")
+    if not phone:
+        raise HTTPException(400, "أدخل رقم صاحب الشحنة بالصيغة الدولية مثل +9665xxxxxxxx")
+    try:
+        weight = float(data["weight_tons"]) if data.get("weight_tons") else None
+    except ValueError:
+        raise HTTPException(400, "الوزن غير صحيح")
+    if weight is not None and weight <= 0:
+        raise HTTPException(400, "الوزن يجب أن يكون أكبر من صفر")
+    now = utcnow()
+    with db() as c:
+        c.execute("UPDATE shipments SET origin=%s,destination=%s,updated_at=%s WHERE id=%s",
+                  (origin, destination, now, shipment_id))
+        c.execute("""UPDATE freight_negotiations SET owner_phone=%s,weight_tons=%s,status='ready_to_contact',
+            last_error=NULL,updated_at=%s WHERE shipment_id=%s""", (phone, weight, now, shipment_id))
+        if item.get("naqliat_load_id"):
+            c.execute("UPDATE naqliat_loads SET origin=%s,destination=%s,owner_phone=%s,weight_tons=%s WHERE id=%s",
+                      (origin, destination, phone, weight, item["naqliat_load_id"]))
+    log(current["user_id"], "freight_manual_data_updated", "shipment", shipment_id,
+        origin + " → " + destination)
+    return RedirectResponse(f"/freight-workflow/{shipment_id}", 303)
+
+
 @router.post("/freight-workflow/{shipment_id}/contact-owner")
 async def contact_owner_now(shipment_id: int, request: Request, background_tasks: BackgroundTasks):
     current = session(request); data = form(await request.body())
     if data.get("csrf") != current["csrf"]: raise HTTPException(403)
+    item = one("""SELECT s.origin,s.destination,n.owner_phone FROM shipments s
+        JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
+    if not item: raise HTTPException(404, "الشحنة غير موجودة")
+    _require_complete(item)
     background_tasks.add_task(contact_owner, shipment_id)
     return RedirectResponse(f"/freight-workflow/{shipment_id}", 303)
 
@@ -302,10 +386,19 @@ async def contact_owner_now(shipment_id: int, request: Request, background_tasks
 async def save_agreement(shipment_id: int, request: Request):
     current = session(request); data = form(await request.body())
     if data.get("csrf") != current["csrf"]: raise HTTPException(403)
-    agreed = float(data.get("agreed_owner_price") or 0)
+    try:
+        agreed = float(data.get("agreed_owner_price") or 0)
+        asking = float(data["asking_price"]) if data.get("asking_price") else None
+        weight = float(data["weight_tons"]) if data.get("weight_tons") else None
+    except ValueError:
+        raise HTTPException(400, "تحقق من السعر والوزن")
     if agreed <= 150: raise HTTPException(400, "سعر صاحب الشحنة يجب أن يكون أكبر من 150 ريال")
-    asking = float(data["asking_price"]) if data.get("asking_price") else None
-    weight = float(data["weight_tons"]) if data.get("weight_tons") else None
+    item = one("""SELECT s.origin,s.destination,n.owner_phone FROM shipments s
+        JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
+    if not item: raise HTTPException(404, "الشحنة غير موجودة")
+    item.update({"weight_tons": weight, "unloading_location": data.get("unloading_location"),
+                 "payment_method": data.get("payment_method")})
+    _require_complete(item, agreement=True)
     driver_price = agreed - 150
     now = utcnow()
     execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=?,agreed_owner_price=?,driver_offer_price=?,
