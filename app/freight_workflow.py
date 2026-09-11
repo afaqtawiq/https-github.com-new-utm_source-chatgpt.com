@@ -47,6 +47,13 @@ def _init_storage():
     with db() as c:
         for statement in statements:
             c.execute(statement)
+        c.execute(
+            """INSERT INTO freight_negotiations(shipment_id,naqliat_load_id,owner_phone,weight_tons,status,created_at,updated_at)
+               SELECT s.id,n.id,n.owner_phone,n.weight_tons,'ready_to_contact',%s,%s
+               FROM shipments s JOIN naqliat_loads n ON s.reference=('NQ-' || n.id::text)
+               ON CONFLICT(shipment_id) DO NOTHING""",
+            (utcnow(), utcnow()),
+        )
 
 
 _init_storage()
