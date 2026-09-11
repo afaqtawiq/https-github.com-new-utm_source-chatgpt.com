@@ -139,6 +139,12 @@ CARRIER_MARKERS = {
 
 
 def extract_document_text(path, media_type):
+    def ocr_image(image_path):
+        outputs = []
+        for psm in (6, 11):
+            result = subprocess.run(["tesseract", str(image_path), "stdout", "-l", "eng", "--psm", str(psm), "--dpi", "300", "-c", "preserve_interword_spaces=1"], capture_output=True, text=True, timeout=45)
+            if result.returncode == 0 and result.stdout.strip(): outputs.append(result.stdout)
+        return "\n".join(outputs)
     suffix = path.suffix.lower()
     if media_type == "application/pdf" or suffix == ".pdf":
         direct = subprocess.run(["pdftotext", "-layout", str(path), "-"], capture_output=True, text=True, timeout=30)
@@ -151,13 +157,11 @@ def extract_document_text(path, media_type):
             raise RuntimeError("تعذر قراءة ملف PDF")
         parts = []
         for image_path in sorted(path.parent.glob("bill-page-*.jpg")):
-            result = subprocess.run(["tesseract", str(image_path), "stdout", "-l", "eng", "--psm", "6"], capture_output=True, text=True, timeout=45)
-            if result.returncode == 0: parts.append(result.stdout)
+            parts.append(ocr_image(image_path))
         return "\n".join(parts).strip()
-    result = subprocess.run(["tesseract", str(path), "stdout", "-l", "eng", "--psm", "6"], capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError("تعذر استخراج النص من الصورة")
-    return result.stdout.strip()
+    text = ocr_image(path).strip()
+    if not text: raise RuntimeError("تعذر استخراج النص من الصورة")
+    return text
 
 
 def identify_agent(text):
@@ -181,19 +185,27 @@ def identify_agent(text):
     return agent, scores[name], "، ".join(dict.fromkeys(evidence[name]))
 
 
-def document_metadata(text):
+def document_metadata(text, agent_name=""):
     upper = text.upper()
     normalized = re.sub(r"[ \t]+", " ", upper)
     reference_patterns = [
-        r"(?:BILL\s+OF\s+LADING|B/?L)\s*(?:NO\.?|NUMBER|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
+        r"(?:BILL\s+OF\s+LAD[I1!]NG|BILL\s+NO|B[\s./-]*L)\s*(?:NO\.?|N[O0]\.?|NUMBER|NUM8ER|REF(?:ERENCE)?|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
         r"(?:MASTER|HOUSE)\s+B/?L\s*(?:NO\.?|NUMBER|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
+        r"(?:SEA\s+WAYBILL|WAYBILL)\s*(?:NO\.?|N[O0]\.?|NUMBER|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
         r"(?:BOOKING|DOCUMENT)\s*(?:NO\.?|NUMBER|#)\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
     ]
     references = []
     for pattern in reference_patterns:
         references.extend(re.findall(pattern, normalized))
-    references = [x.strip("-./") for x in references if not re.fullmatch(r"(?:NUMBER|ORIGINAL|COPY|DATE)", x)]
     containers = sorted(set(re.findall(r"\b[A-Z]{4}\s?\d{7}\b", upper)))
+    container_set = {x.replace(" ", "") for x in containers}
+    references = [x.strip("-./") for x in references if not re.fullmatch(r"(?:NUMBER|ORIGINAL|COPY|DATE|SHIPPER|CONSIGNEE)", x)]
+    references = [x for x in references if x.replace(" ", "") not in container_set]
+    if not references:
+        carrier_prefixes = {"MSC": ("MEDU", "MSC"), "Maersk Line": ("MAEU",), "CMA CGM": ("CMDU",), "COSCO Line": ("COSU",), "Hapag-Lloyd": ("HLCU",), "Evergreen": ("EGLV",), "OOCL Line": ("OOLU",), "ONE Line": ("ONEY",), "PIL": ("PIL",)}
+        prefixes = carrier_prefixes.get(agent_name, ())
+        candidates = re.findall(r"\b[A-Z]{3,5}[A-Z0-9/-]{4,25}\b", normalized)
+        references = [x for x in candidates if x not in container_set and any(x.startswith(prefix) for prefix in prefixes)]
     doc_type = "بوليصة شحن" if "BILL OF LADING" in upper or re.search(r"\bB/?L\b", upper) else "مستند شحن"
     return doc_type, (references[0] if references else ""), ", ".join(x.replace(" ", "") for x in containers[:20])
 
@@ -225,7 +237,7 @@ async def process_document(request: Request, csrf: str = Form(...), shipment_id:
         try: text = extract_document_text(path, media)
         except (subprocess.TimeoutExpired, RuntimeError) as exc: raise HTTPException(422, str(exc))
     if len(text.strip()) < 20: raise HTTPException(422, "النص غير واضح. ارفع صورة أوضح للبوليصة كاملة")
-    agent, confidence, evidence = identify_agent(text); doc_type, reference, containers = document_metadata(text)
+    agent, confidence, evidence = identify_agent(text); doc_type, reference, containers = document_metadata(text, agent["name"] if agent else "")
     now = utcnow(); did = execute("""INSERT INTO shipping_agent_documents(shipment_id,filename,media_type,file_size,file_sha256,content,extracted_text,document_type,document_reference,container_numbers,detected_agent_id,confidence,evidence,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'processed',?,?,?)""", (int(shipment_id) if shipment_id else None, (file.filename or "document")[:240], media, len(data), hashlib.sha256(data).hexdigest(), data, text[:50000], doc_type, reference, containers, agent["id"] if agent else None, confidence, evidence, current["user_id"], now, now))
     log(current["user_id"], "bill_of_lading_processed", "shipping_agent_document", did, f"Agent candidate: {agent['name'] if agent else 'manual review'}")
@@ -241,8 +253,30 @@ def document_result(document_id: int, request: Request):
     opts = "".join(f"<option value='{x['id']}' {'selected' if x['id']==doc.get('detected_agent_id') else ''}>{esc(x['name'])}</option>" for x in agents)
     confidence = round(float(doc.get("confidence") or 0) * 100)
     warning = "<p class=good>ثقة جيدة؛ راجع الاسم ثم اعتمد.</p>" if confidence >= 75 else "<p class=warn>الثقة منخفضة؛ اختر الوكيل يدويًا قبل المتابعة.</p>"
-    body = nav() + f"""<h1>نتيجة تحليل البوليصة</h1><div class=grid><div class=kpi>الوكيل المقترح<b>{esc(doc.get('agent_name') or 'غير محدد')}</b></div><div class=kpi>درجة الثقة<b>{confidence}%</b></div><div class=kpi>رقم البوليصة<b>{esc(doc.get('document_reference') or 'يحتاج إدخالًا يدويًا')}</b></div></div><div class=card><b>الدليل:</b> {esc(doc.get('evidence'))}<br><b>الحاويات:</b> {esc(doc.get('container_numbers') or 'غير مستخرجة')}<br><b>الشحنة المرتبطة:</b> {esc(doc.get('shipment_reference'))}{warning}</div><div class=card><h2>تأكيد الوكيل ورقم البوليصة</h2><form method=post action='/shipping-agent-documents/{document_id}/confirm'><input type=hidden name=csrf value='{esc(current['csrf'])}'><label>الوكيل الملاحي</label><select name=agent_id required>{opts}</select><label>رقم البوليصة المستخرج</label><input name=bill_number required value='{esc(doc.get('document_reference'))}' placeholder='راجع الرقم أو أدخله يدويًا'><label>نوع المعاملة</label><select name=case_type><option>مستندات استيراد</option><option>إذن تسليم</option><option>تحديث وصول</option><option>فاتورة</option><option>طلب عام</option></select><textarea name=details>نرجو مراجعة البوليصة المرفوعة وتأكيد بيانات الوصول ومتطلبات إصدار إذن التسليم والرسوم والمستندات المطلوبة. أرقام الحاويات: {esc(doc.get('container_numbers'))}</textarea><button>تأكيد الوكيل ورقم البوليصة وإنشاء المسودة</button></form></div><details class=card><summary>النص المستخرج للمراجعة</summary><pre style='white-space:pre-wrap'>{esc(doc.get('extracted_text'))}</pre></details>"""
+    retry = (f"<form method=post action='/shipping-agent-documents/{document_id}/reprocess'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>إعادة الاستخراج بالمحرك المحسّن</button></form>" if not doc.get("document_reference") else "")
+    body = nav() + f"""<h1>نتيجة تحليل البوليصة</h1><div class=grid><div class=kpi>الوكيل المقترح<b>{esc(doc.get('agent_name') or 'غير محدد')}</b></div><div class=kpi>درجة الثقة<b>{confidence}%</b></div><div class=kpi>رقم البوليصة<b>{esc(doc.get('document_reference') or 'يحتاج إعادة استخراج')}</b></div></div><div class=card><b>الدليل:</b> {esc(doc.get('evidence'))}<br><b>الحاويات:</b> {esc(doc.get('container_numbers') or 'غير مستخرجة')}<br><b>الشحنة المرتبطة:</b> {esc(doc.get('shipment_reference'))}{warning}{retry}</div><div class=card><h2>تأكيد الوكيل ورقم البوليصة</h2><form method=post action='/shipping-agent-documents/{document_id}/confirm'><input type=hidden name=csrf value='{esc(current['csrf'])}'><label>الوكيل الملاحي</label><select name=agent_id required>{opts}</select><label>رقم البوليصة المستخرج</label><input name=bill_number required value='{esc(doc.get('document_reference'))}' placeholder='سيُملأ آليًا بعد إعادة الاستخراج'><label>نوع المعاملة</label><select name=case_type><option>مستندات استيراد</option><option>إذن تسليم</option><option>تحديث وصول</option><option>فاتورة</option><option>طلب عام</option></select><textarea name=details>نرجو مراجعة البوليصة المرفوعة وتأكيد بيانات الوصول ومتطلبات إصدار إذن التسليم والرسوم والمستندات المطلوبة. أرقام الحاويات: {esc(doc.get('container_numbers'))}</textarea><button>تأكيد الوكيل ورقم البوليصة وإنشاء المسودة</button></form></div><details class=card><summary>النص المستخرج للمراجعة</summary><pre style='white-space:pre-wrap'>{esc(doc.get('extracted_text'))}</pre></details>"""
     return HTMLResponse(page("نتيجة البوليصة", body))
+
+
+@router.post("/shipping-agent-documents/{document_id}/reprocess")
+async def reprocess_document(document_id: int, request: Request):
+    current = auth(request); data = parse(await request.body())
+    if data.get("csrf") != current["csrf"]: raise HTTPException(403)
+    doc = one("SELECT * FROM shipping_agent_documents WHERE id=?", (document_id,))
+    if not doc or not doc.get("content"): raise HTTPException(404, "المستند الأصلي غير متوفر")
+    suffixes = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+    suffix = suffixes.get(doc["media_type"])
+    if not suffix: raise HTTPException(400, "نوع المستند غير مدعوم")
+    with tempfile.TemporaryDirectory(prefix="bill-reprocess-") as tmp:
+        path = Path(tmp) / ("document" + suffix); path.write_bytes(bytes(doc["content"]))
+        try: text = extract_document_text(path, doc["media_type"])
+        except (subprocess.TimeoutExpired, RuntimeError) as exc: raise HTTPException(422, str(exc))
+    agent, confidence, evidence = identify_agent(text); doc_type, reference, containers = document_metadata(text, agent["name"] if agent else "")
+    execute("""UPDATE shipping_agent_documents SET extracted_text=?,document_type=?,document_reference=?,container_numbers=?,
+        detected_agent_id=?,confidence=?,evidence=?,status='reprocessed',updated_at=? WHERE id=?""",
+        (text[:50000], doc_type, reference, containers, agent["id"] if agent else doc.get("detected_agent_id"), confidence, evidence, utcnow(), document_id))
+    log(current["user_id"], "bill_of_lading_reprocessed", "shipping_agent_document", document_id, f"Reference: {reference or 'not found'}")
+    return RedirectResponse(f"/shipping-agent-documents/{document_id}", 303)
 
 
 def best_contact(agent_id, case_type):
