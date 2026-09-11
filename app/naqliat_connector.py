@@ -4,7 +4,7 @@ import html
 import os
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -142,7 +142,17 @@ def _save(payload: NaqliatLoad):
                    ON CONFLICT(shipment_id) DO NOTHING""",
                 (shipment["id"], "مصدر الحمولة: نقليات | سجل الالتقاط: " + str(load_id), now, now),
             )
-        return load_id, created
+        c.execute(
+            """INSERT INTO freight_negotiations(shipment_id,naqliat_load_id,owner_phone,weight_tons,status,created_at,updated_at)
+               VALUES(%s,%s,%s,%s,'ready_to_contact',%s,%s)
+               ON CONFLICT(shipment_id) DO UPDATE SET
+                 naqliat_load_id=COALESCE(freight_negotiations.naqliat_load_id,EXCLUDED.naqliat_load_id),
+                 owner_phone=COALESCE(NULLIF(freight_negotiations.owner_phone,''),EXCLUDED.owner_phone),
+                 weight_tons=COALESCE(freight_negotiations.weight_tons,EXCLUDED.weight_tons),
+                 updated_at=EXCLUDED.updated_at""",
+            (shipment["id"], load_id, phone, payload.weight_tons, now, now),
+        )
+        return load_id, created, shipment["id"]
 
 
 @router.get("/naqliat", response_class=HTMLResponse)
@@ -181,17 +191,20 @@ async def naqliat_manual(request: Request):
 
 
 @router.post("/api/v7/naqliat/loads")
-def ingest_naqliat_load(payload: NaqliatLoad, request: Request):
+def ingest_naqliat_load(payload: NaqliatLoad, request: Request, background_tasks: BackgroundTasks):
     expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(401, "Connector authorization failed")
     saved = _save(payload)
+    if saved:
+        from app.freight_workflow import contact_owner
+        background_tasks.add_task(contact_owner, saved[2])
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None}
 
 @router.post("/api/v7/naqliat/ocr")
-def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
+def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: BackgroundTasks):
     expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     if not expected or not provided or not hmac.compare_digest(provided, expected):
@@ -208,6 +221,9 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
         description=raw[:3000], owner_phone=phone.group(0) if phone else "", raw_text=raw,
         capture_method="android_ocr")
     saved = _save(item)
+    if saved:
+        from app.freight_workflow import contact_owner
+        background_tasks.add_task(contact_owner, saved[2])
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None,
             "origin": item.origin, "destination": item.destination, "owner_phone": _clean_phone(item.owner_phone)}

@@ -231,7 +231,8 @@ async def deliver_driver_broadcast(broadcast_id):
             execute("UPDATE driver_broadcast_recipients SET status='failed',last_error=? WHERE id=?", (str(exc)[:300], recipient["id"]))
             failed += 1
         execute("UPDATE driver_broadcasts SET sent_count=?,failed_count=?,updated_at=? WHERE id=?", (sent, failed, utcnow(), broadcast_id))
-    final_status = "completed" if not failed else "completed_with_errors"
+    final_status = ("awaiting_driver" if campaign.get("shipment_id") and sent else
+                    ("completed" if not failed else "completed_with_errors"))
     execute("UPDATE driver_broadcasts SET status=?,completed_at=?,updated_at=? WHERE id=?", (final_status, utcnow(), utcnow(), broadcast_id))
 
 

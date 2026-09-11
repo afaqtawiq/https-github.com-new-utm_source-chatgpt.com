@@ -63,8 +63,22 @@ async def receive_webhook(request: Request):
         "INSERT INTO whatsapp_webhook_events(event_key,payload,received_at) VALUES(?,?,?) ON CONFLICT(event_key) DO NOTHING",
         (event_key, json.dumps(payload), utcnow()),
     )
-    from app.shipment_automation import process_owner_webhook
-    await process_owner_webhook(payload)
+    # Match inbound driver acceptance to the open shipment offer. The first
+    # valid acceptance wins atomically; later replies cannot replace it.
+    try:
+        from app.freight_workflow import accept_driver_reply
+        for entry in payload.get("entry") or []:
+            for change in entry.get("changes") or []:
+                value = change.get("value") or {}
+                for message in value.get("messages") or []:
+                    sender = str(message.get("from") or "")
+                    body = str((message.get("text") or {}).get("body") or "")
+                    if sender and body:
+                        accept_driver_reply("+" + sender.lstrip("+"), body)
+    except Exception:
+        # Webhook acknowledgement must not be lost because a message was not
+        # relevant to a freight offer or an optional table is unavailable.
+        pass
     return {"received": True}
 
 
