@@ -40,7 +40,7 @@ public class NaqliatAccessibilityService extends AccessibilityService {
     }
 
     private ParsedLoad parse(String raw) {
-        Matcher route = Pattern.compile("مطلوب من:\\s*([^\\n]+?)\\s*(?:إلى:|الي:)\\s*(.+?)(?:\\s+الحمولة:|\\s+نوع الشاحنة:|\\n|$)").matcher(raw.replace('\u00a0',' '));
+        Matcher route = Pattern.compile("(?:مطلوب\\s+من|من)\\s*:?\\s*([^\\n،]+?)\\s*(?:إلى|الى|إلي|الي)\\s*:?\\s*(.+?)(?=\\s+(?:الحمولة|نوع الشاحنة|سعر|طريقة الدفع|الدفع)\\s*:|[\\n،.]|$)").matcher(raw.replace('\u00a0',' '));
         if (!route.find()) return null;
         ParsedLoad p = new ParsedLoad(); p.origin=route.group(1).trim(); p.destination=route.group(2).trim();
         Matcher distance=Pattern.compile("([0-9٠-٩]+)\\s*Km",Pattern.CASE_INSENSITIVE).matcher(raw); if(distance.find()) p.distance=arabicNumber(distance.group(1));

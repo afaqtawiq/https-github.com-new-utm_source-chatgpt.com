@@ -4,7 +4,7 @@ import html
 import os
 import re
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -112,7 +112,28 @@ def _save(payload: NaqliatLoad):
              payload.vehicle_type.strip(), payload.description.strip(), phone, payload.age_text.strip(),
              payload.raw_text.strip(), payload.capture_method, now, now),
         ).fetchone()
-    return saved["id"] if saved else None
+        if not saved:
+            return None
+
+        # Promote every accepted capture to the operational shipments queue.
+        # The old flow only populated naqliat_loads, which made the capture
+        # invisible on /shipments and in the operations control center.
+        load_id = saved["id"]
+        reference = "NQ-" + str(load_id)
+        shipment = c.execute("SELECT id FROM shipments WHERE reference=%s", (reference,)).fetchone()
+        if not shipment:
+            shipment = c.execute(
+                """INSERT INTO shipments(reference,service_type,origin,destination,status,revenue,cost,currency,created_at,updated_at)
+                   VALUES(%s,'Transport',%s,%s,'new',0,0,'SAR',%s,%s) RETURNING id""",
+                (reference, payload.origin.strip(), payload.destination.strip(), now, now),
+            ).fetchone()
+            c.execute(
+                """INSERT INTO shipment_operations(shipment_id,stage,notes,created_at,updated_at)
+                   VALUES(%s,'new',%s,%s,%s)
+                   ON CONFLICT(shipment_id) DO NOTHING""",
+                (shipment["id"], "مصدر الحمولة: نقليات | سجل الالتقاط: " + str(load_id), now, now),
+            )
+        return load_id
 
 
 @router.get("/naqliat", response_class=HTMLResponse)
@@ -146,32 +167,26 @@ async def naqliat_manual(request: Request):
     item_id = _save(payload)
     if item_id:
         log(session["user_id"], "capture", "naqliat_load", item_id, payload.origin+" → "+payload.destination)
-        if payload.owner_phone:
-            from app.shipment_automation import start_owner_negotiation
-            await start_owner_negotiation(item_id)
     return RedirectResponse("/naqliat", 303)
 
 
 @router.post("/api/v7/naqliat/loads")
-def ingest_naqliat_load(payload: NaqliatLoad, request: Request, background_tasks: BackgroundTasks):
+def ingest_naqliat_load(payload: NaqliatLoad, request: Request):
     expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(401, "Connector authorization failed")
     item_id = _save(payload)
-    if item_id and payload.owner_phone:
-        from app.shipment_automation import start_owner_negotiation
-        background_tasks.add_task(start_owner_negotiation, item_id)
     return {"ok": True, "created": item_id is not None, "id": item_id}
 
 @router.post("/api/v7/naqliat/ocr")
-async def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
+def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
     expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(401, "Connector authorization failed")
     raw = payload.raw_text.replace("\u00a0", " ")
-    route = re.search(r"(?:من|مطلوب من:)\s*([^\n،]+?)\s*(?:إلى|الى|إلي|الي:)\s*([^\n،.]+)", raw)
+    route = re.search(r"(?:مطلوب\s+من|من)\s*:?\s*([^\n،]+?)\s*(?:إلى|الى|إلي|الي)\s*:?\s*(.+?)(?=\s+(?:الحمولة|نوع الشاحنة|سعر|طريقة الدفع|الدفع)\s*:|[\n،.]|$)", raw)
     phone = re.search(r"(?:\+|00)?966\s*5(?:[\s-]*\d){8}", raw)
     weight = re.search(r"([0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)\s*(?:\+\s*)?طن", raw)
     if not route:
@@ -182,9 +197,6 @@ async def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request):
         description=raw[:3000], owner_phone=phone.group(0) if phone else "", raw_text=raw,
         capture_method="android_ocr")
     item_id = _save(item)
-    if item_id and item.owner_phone:
-        from app.shipment_automation import start_owner_negotiation
-        await start_owner_negotiation(item_id)
     return {"ok": True, "created": item_id is not None, "id": item_id,
             "origin": item.origin, "destination": item.destination, "owner_phone": _clean_phone(item.owner_phone)}
 
