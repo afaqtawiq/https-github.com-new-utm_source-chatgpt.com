@@ -18,7 +18,7 @@ def current(r):
 def require(r):
  try:return current(r)
  except:return None
-def nav(): return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/commands">🎙 مساعد الأوامر</a><a href="/naqliat">شحنات نقليات</a><a href="/freight-workflow">إدارة عروض الشحن</a><a href="/shipping-agents">وكلاء الملاحة</a><a href="/discovery">الاكتشاف</a><a href="/intelligence-v2">الذكاء</a><a href="/sales-copilot">Sales Copilot</a><a href="/accounts">العملاء</a><a href="/drivers">السائقون</a><a href="/data-import">استيراد البيانات</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">Pipeline</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a href="/logout">خروج</a></div>'
+def nav(): return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/commands">🎙 مساعد الأوامر</a><a href="/naqliat">شحنات نقليات</a><a href="/freight-workflow">إدارة عروض الشحن</a><a href="/shipping-agents">وكلاء الملاحة</a><a href="/saber">سابر</a><a href="/discovery">الاكتشاف</a><a href="/intelligence-v2">الذكاء</a><a href="/sales-copilot">Sales Copilot</a><a href="/accounts">العملاء</a><a href="/drivers">السائقون</a><a href="/data-import">استيراد البيانات</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">Pipeline</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a href="/logout">خروج</a></div>'
 def head(s,t): return '<div class="top"><div><h1>'+esc(t)+'</h1><div class="muted">Gulf Logistics AI · آفاق طويق</div></div><div><span class="good">● PostgreSQL مشترك</span><br><span class="muted">'+esc(s['email'])+'</span></div></div>'+nav()
 def parse(raw): return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def rl(): return RedirectResponse('/login',303)
