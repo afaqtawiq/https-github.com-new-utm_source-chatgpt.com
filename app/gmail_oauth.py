@@ -90,3 +90,16 @@ def send_gmail(user_id,recipient,subject,body):
   sr=client.post(SEND,headers={'Authorization':'Bearer '+access},json={'raw':raw})
   if sr.status_code>=400:raise RuntimeError(safe_google_error(sr))
   return sr.json().get('id','')
+
+def send_gmail_with_attachment(user_id,recipient,subject,body,filename,media_type,content):
+ if os.getenv('ENABLE_EXTERNAL_ACTIONS','0')!='1':raise RuntimeError('External actions are disabled')
+ c=connection(user_id)
+ if not c or c.get('status')!='connected':raise RuntimeError('Gmail is not connected')
+ access=access_token(user_id);msg=EmailMessage();msg['To']=recipient;msg['From']=c.get('sender_email') or 'me';msg['Subject']=subject;msg.set_content(body)
+ main,sub=(media_type or 'application/octet-stream').split('/',1) if '/' in (media_type or '') else ('application','octet-stream')
+ msg.add_attachment(bytes(content),maintype=main,subtype=sub,filename=filename or 'document')
+ raw=base64.urlsafe_b64encode(msg.as_bytes()).decode().rstrip('=')
+ with httpx.Client(timeout=40) as client:
+  sr=client.post(SEND,headers={'Authorization':'Bearer '+access},json={'raw':raw})
+  if sr.status_code>=400:raise RuntimeError(safe_google_error(sr))
+  return sr.json().get('id','')
