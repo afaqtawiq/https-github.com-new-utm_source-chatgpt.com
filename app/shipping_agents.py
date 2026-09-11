@@ -183,7 +183,16 @@ def identify_agent(text):
 
 def document_metadata(text):
     upper = text.upper()
-    references = re.findall(r"(?:B/?L|BILL OF LADING|BL NO\.?|B/L NO\.?)\s*[:#-]?\s*([A-Z0-9-]{6,30})", upper)
+    normalized = re.sub(r"[ \t]+", " ", upper)
+    reference_patterns = [
+        r"(?:BILL\s+OF\s+LADING|B/?L)\s*(?:NO\.?|NUMBER|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
+        r"(?:MASTER|HOUSE)\s+B/?L\s*(?:NO\.?|NUMBER|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
+        r"(?:BOOKING|DOCUMENT)\s*(?:NO\.?|NUMBER|#)\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
+    ]
+    references = []
+    for pattern in reference_patterns:
+        references.extend(re.findall(pattern, normalized))
+    references = [x.strip("-./") for x in references if not re.fullmatch(r"(?:NUMBER|ORIGINAL|COPY|DATE)", x)]
     containers = sorted(set(re.findall(r"\b[A-Z]{4}\s?\d{7}\b", upper)))
     doc_type = "بوليصة شحن" if "BILL OF LADING" in upper or re.search(r"\bB/?L\b", upper) else "مستند شحن"
     return doc_type, (references[0] if references else ""), ", ".join(x.replace(" ", "") for x in containers[:20])
@@ -232,7 +241,7 @@ def document_result(document_id: int, request: Request):
     opts = "".join(f"<option value='{x['id']}' {'selected' if x['id']==doc.get('detected_agent_id') else ''}>{esc(x['name'])}</option>" for x in agents)
     confidence = round(float(doc.get("confidence") or 0) * 100)
     warning = "<p class=good>ثقة جيدة؛ راجع الاسم ثم اعتمد.</p>" if confidence >= 75 else "<p class=warn>الثقة منخفضة؛ اختر الوكيل يدويًا قبل المتابعة.</p>"
-    body = nav() + f"""<h1>نتيجة تحليل البوليصة</h1><div class=grid><div class=kpi>الوكيل المقترح<b>{esc(doc.get('agent_name') or 'غير محدد')}</b></div><div class=kpi>درجة الثقة<b>{confidence}%</b></div><div class=kpi>رقم البوليصة<b>{esc(doc.get('document_reference') or 'غير مستخرج')}</b></div></div><div class=card><b>الدليل:</b> {esc(doc.get('evidence'))}<br><b>الحاويات:</b> {esc(doc.get('container_numbers') or 'غير مستخرجة')}<br><b>الشحنة المرتبطة:</b> {esc(doc.get('shipment_reference'))}{warning}</div><div class=card><h2>تأكيد الوكيل وإنشاء المعاملة</h2><form method=post action='/shipping-agent-documents/{document_id}/confirm'><input type=hidden name=csrf value='{esc(current['csrf'])}'><select name=agent_id required>{opts}</select><select name=case_type><option>مستندات استيراد</option><option>إذن تسليم</option><option>تحديث وصول</option><option>فاتورة</option><option>طلب عام</option></select><input name=reference required value='{esc(doc.get('document_reference') or doc.get('shipment_reference'))}' placeholder='رقم البوليصة أو المرجع'><textarea name=details>نرجو مراجعة البوليصة المرفوعة وتأكيد بيانات الوصول ومتطلبات إصدار إذن التسليم والرسوم والمستندات المطلوبة. أرقام الحاويات: {esc(doc.get('container_numbers'))}</textarea><button>تأكيد وإنشاء مسودة التعامل مع الوكيل</button></form></div><details class=card><summary>النص المستخرج للمراجعة</summary><pre style='white-space:pre-wrap'>{esc(doc.get('extracted_text'))}</pre></details>"""
+    body = nav() + f"""<h1>نتيجة تحليل البوليصة</h1><div class=grid><div class=kpi>الوكيل المقترح<b>{esc(doc.get('agent_name') or 'غير محدد')}</b></div><div class=kpi>درجة الثقة<b>{confidence}%</b></div><div class=kpi>رقم البوليصة<b>{esc(doc.get('document_reference') or 'يحتاج إدخالًا يدويًا')}</b></div></div><div class=card><b>الدليل:</b> {esc(doc.get('evidence'))}<br><b>الحاويات:</b> {esc(doc.get('container_numbers') or 'غير مستخرجة')}<br><b>الشحنة المرتبطة:</b> {esc(doc.get('shipment_reference'))}{warning}</div><div class=card><h2>تأكيد الوكيل ورقم البوليصة</h2><form method=post action='/shipping-agent-documents/{document_id}/confirm'><input type=hidden name=csrf value='{esc(current['csrf'])}'><label>الوكيل الملاحي</label><select name=agent_id required>{opts}</select><label>رقم البوليصة المستخرج</label><input name=bill_number required value='{esc(doc.get('document_reference'))}' placeholder='راجع الرقم أو أدخله يدويًا'><label>نوع المعاملة</label><select name=case_type><option>مستندات استيراد</option><option>إذن تسليم</option><option>تحديث وصول</option><option>فاتورة</option><option>طلب عام</option></select><textarea name=details>نرجو مراجعة البوليصة المرفوعة وتأكيد بيانات الوصول ومتطلبات إصدار إذن التسليم والرسوم والمستندات المطلوبة. أرقام الحاويات: {esc(doc.get('container_numbers'))}</textarea><button>تأكيد الوكيل ورقم البوليصة وإنشاء المسودة</button></form></div><details class=card><summary>النص المستخرج للمراجعة</summary><pre style='white-space:pre-wrap'>{esc(doc.get('extracted_text'))}</pre></details>"""
     return HTMLResponse(page("نتيجة البوليصة", body))
 
 
@@ -248,19 +257,22 @@ async def confirm_document(document_id: int, request: Request):
     if data.get("csrf") != current["csrf"]: raise HTTPException(403)
     doc = one("SELECT * FROM shipping_agent_documents WHERE id=?", (document_id,)); agent = one("SELECT * FROM shipping_agents WHERE id=?", (int(data.get("agent_id") or 0),))
     if not doc or not agent: raise HTTPException(404)
+    bill_number = re.sub(r"\s+", "", data.get("bill_number", "").upper())
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9/-]{5,39}", bill_number):
+        raise HTTPException(400, "راجع رقم البوليصة؛ يجب أن يتكون من 6 إلى 40 حرفًا أو رقمًا")
     now = utcnow(); due = now + datetime.timedelta(days=2)
     cid = execute("""INSERT INTO shipping_agent_cases(agent_id,shipment_id,document_id,case_type,reference,subject,details,status,due_at,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,'draft',?,?,?,?)""", (agent["id"], doc.get("shipment_id"), document_id, data.get("case_type"), data.get("reference"), f"{data.get('case_type')} - {data.get('reference')}", data.get("details"), due, current["user_id"], now, now))
+        VALUES(?,?,?,?,?,?,?,'draft',?,?,?,?)""", (agent["id"], doc.get("shipment_id"), document_id, data.get("case_type"), bill_number, f"{data.get('case_type')} - {bill_number}", data.get("details"), due, current["user_id"], now, now))
     contact = best_contact(agent["id"], data.get("case_type", ""))
-    execute("UPDATE shipping_agent_documents SET detected_agent_id=?,status='confirmed',updated_at=? WHERE id=?", (agent["id"], now, document_id))
+    execute("UPDATE shipping_agent_documents SET detected_agent_id=?,document_reference=?,status='confirmed',updated_at=? WHERE id=?", (agent["id"], bill_number, now, document_id))
     if not contact:
         log(current["user_id"], "shipping_agent_identified", "shipping_agent_document", document_id, "Confirmed; no email available")
         return RedirectResponse(f"/shipping-agent-cases/{cid}", 303)
-    subject = f"{data.get('case_type')} - {data.get('reference')} - آفاق طويق"
+    subject = f"{data.get('case_type')} - {bill_number} - آفاق طويق"
     body = f"""السادة/ {agent['name']} المحترمين،
 
 تحية طيبة،
-نرجو مراجعة البوليصة رقم {data.get('reference')} وإفادتنا ببيانات الوصول ومتطلبات {data.get('case_type')} والرسوم والمستندات المطلوبة.
+نرجو مراجعة البوليصة رقم {bill_number} وإفادتنا ببيانات الوصول ومتطلبات {data.get('case_type')} والرسوم والمستندات المطلوبة.
 أرقام الحاويات: {doc.get('container_numbers') or 'يرجى مراجعة البوليصة'}
 
 تفاصيل الطلب:
