@@ -56,7 +56,7 @@ def sensitive_permission(request):
  return None
 @app.middleware('http')
 async def enterprise_security_guard(request,call_next):
- if request.url.path not in ('/webhooks/retell','/webhooks/whatsapp') and not csrf_guard(request):
+ if request.url.path not in ('/webhooks/retell','/webhooks/whatsapp','/webhooks/twilio/whatsapp') and not csrf_guard(request):
   code=429 if request.url.path=='/login' else 403;return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
  sess=get_session(request.cookies.get('gla_session'))
  if sess:
