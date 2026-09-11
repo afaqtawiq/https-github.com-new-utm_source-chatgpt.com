@@ -158,12 +158,14 @@ def _save(payload: NaqliatLoad):
 @router.get("/naqliat", response_class=HTMLResponse)
 def naqliat_home(request: Request):
     session = _session(request)
-    data = rows("SELECT * FROM naqliat_loads ORDER BY captured_at DESC,id DESC LIMIT 300")
+    data = rows("""SELECT n.*,s.id shipment_id,s.reference shipment_reference
+        FROM naqliat_loads n LEFT JOIN shipments s ON s.reference=('NQ-' || n.id::text)
+        ORDER BY n.captured_at DESC,n.id DESC LIMIT 300""")
     total = len(data)
     fresh = sum(1 for item in data if item["status"] == "new")
     with_phone = sum(1 for item in data if item.get("owner_phone"))
     table = "".join(
-        "<tr><td>"+_esc(x["captured_at"])+"</td><td>"+_esc(x["origin"])+"</td><td>"+_esc(x["destination"])+"</td><td>"+_esc(x["distance_km"])+"</td><td>"+_esc(x["weight_tons"])+"</td><td>"+_esc(x["vehicle_type"])+"</td><td dir='ltr'>"+_esc(x["owner_phone"])+"</td><td>"+_esc(x["status"])+"</td></tr>"
+        "<tr><td>"+_esc(x["captured_at"])+"</td><td>"+_esc(x["origin"])+"</td><td>"+_esc(x["destination"])+"</td><td>"+_esc(x["distance_km"])+"</td><td>"+_esc(x["weight_tons"])+"</td><td>"+_esc(x["vehicle_type"])+"</td><td dir='ltr'>"+_esc(x["owner_phone"])+"</td><td>"+("<a href='/freight-workflow/"+str(x["shipment_id"])+"'>مراجعة وتعديل</a>" if x.get("shipment_id") else _esc(x["status"]))+"</td></tr>"
         for x in data
     )
     form = """<div class="card"><h2>إضافة حمولة تجريبية</h2><p class="muted">تُستخدم لاختبار المطابقة قبل تركيب تطبيق الهاتف.</p>
@@ -213,10 +215,9 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: 
     route = re.search(r"(?:مطلوب\s+من|من)\s*:?\s*([^\n،]+?)\s*(?:إلى|الى|إلي|الي)\s*:?\s*(.+?)(?=\s+(?:الحمولة|نوع الشاحنة|سعر|طريقة الدفع|الدفع)\s*:|[\n،.]|$)", raw)
     phone = re.search(r"(?:\+|00)?966\s*5(?:[\s-]*\d){8}", raw)
     weight = re.search(r"([0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)\s*(?:\+\s*)?طن", raw)
-    if not route:
-        raise HTTPException(422, "Could not detect shipment route")
     digits = lambda value: str(value).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
-    item = NaqliatLoad(origin=route.group(1).strip(), destination=route.group(2).strip(),
+    item = NaqliatLoad(origin=route.group(1).strip() if route else "غير محدد",
+        destination=route.group(2).strip() if route else "غير محدد",
         weight_tons=float(digits(weight.group(1)).replace(",", ".")) if weight else None,
         description=raw[:3000], owner_phone=phone.group(0) if phone else "", raw_text=raw,
         capture_method="android_ocr")
@@ -226,7 +227,8 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: 
         background_tasks.add_task(contact_owner, saved[2])
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None,
-            "origin": item.origin, "destination": item.destination, "owner_phone": _clean_phone(item.owner_phone)}
+            "origin": item.origin, "destination": item.destination, "owner_phone": _clean_phone(item.owner_phone),
+            "needs_manual_review": route is None}
 
 
 @router.get("/api/v7/naqliat/loads")
