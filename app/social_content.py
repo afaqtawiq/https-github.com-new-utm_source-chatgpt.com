@@ -44,6 +44,9 @@ def init_social_content():
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
         ("Instagram","آفاق طويق — @afaqwaiq","https://www.instagram.com/afaqwaiq/","linked",None,now,now))
+    execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
+        ("TikTok","آفاق طويق — @afaqt79","https://www.tiktok.com/@afaqt79","linked",None,now,now))
 
 
 init_social_content()
