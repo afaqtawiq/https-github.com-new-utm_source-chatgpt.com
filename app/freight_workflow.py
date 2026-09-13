@@ -98,6 +98,14 @@ def _owner_message(item):
     )
 
 
+def _whatsapp_link(phone, message):
+    """Create a click-to-chat URL without sending anything through an API."""
+    normalized = _valid_phone(phone)
+    if not normalized:
+        return ""
+    return "https://wa.me/" + normalized.lstrip("+") + "?text=" + urllib.parse.quote(message)
+
+
 async def contact_owner(shipment_id):
     item = one("""SELECT s.*,n.owner_phone,n.status negotiation_status FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
@@ -308,7 +316,7 @@ def workflow_page(request: Request):
 
 
 def _page(title, body):
-    return f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>{esc(title)}</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;margin:0;padding:24px}}a{{color:#86efac}}.card{{max-width:1100px;margin:14px auto;background:#102536;padding:20px;border-radius:16px;overflow:auto}}input,textarea,button{{width:100%;padding:11px;margin:6px 0;box-sizing:border-box;border-radius:8px;border:1px solid #36586e}}button{{background:#ff7900;color:white;font-weight:bold}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}.warn{{color:#fde68a}}.good{{color:#86efac}}hr{{border:0;border-top:1px solid #36586e;margin:20px 0}}</style>{body}</html>"""
+    return f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>{esc(title)}</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;margin:0;padding:24px}}a{{color:#86efac}}.card{{max-width:1100px;margin:14px auto;background:#102536;padding:20px;border-radius:16px;overflow:auto}}input,textarea,button{{width:100%;padding:11px;margin:6px 0;box-sizing:border-box;border-radius:8px;border:1px solid #36586e}}button{{background:#ff7900;color:white;font-weight:bold}}.manual{{display:block;padding:12px;margin:10px 0;border-radius:9px;background:#22c55e;color:#04130a;text-align:center;text-decoration:none;font-weight:bold}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}.warn{{color:#fde68a}}.good{{color:#86efac}}hr{{border:0;border-top:1px solid #36586e;margin:20px 0}}</style>{body}</html>"""
 
 
 @router.get("/freight-workflow/{shipment_id}", response_class=HTMLResponse)
@@ -322,6 +330,10 @@ def workflow_detail(shipment_id: int, request: Request):
     missing_contact = _shipment_requirements(item)
     readiness = ("<p class=good>بيانات المسار والتواصل مكتملة.</p>" if not missing_contact else
                  "<p class=warn>يلزم استكمال: " + esc("، ".join(missing_contact)) + "</p>")
+    owner_link = _whatsapp_link(item.get("owner_phone"), _owner_message(item)) if not missing_contact else ""
+    manual_contact = (f"<a class=manual href='{esc(owner_link)}' target='_blank' rel='noopener'>فتح واتساب لصاحب الشحنة برسالة جاهزة</a>"
+                      "<p class=warn>هذا الزر يفتح المحادثة فقط؛ راجع الرسالة واضغط إرسال داخل واتساب بنفسك.</p>"
+                      if owner_link else "")
     controls = f"""<h2>الاستخراج والتصحيح اليدوي</h2>
     <p>راجع نتيجة OCR وصحح أي حقل قبل بدء التواصل.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
@@ -329,7 +341,7 @@ def workflow_detail(shipment_id: int, request: Request):
     <input name=destination required placeholder='مدينة أو موقع التنزيل' value='{esc(item.get('destination'))}'>
     <input name=owner_phone required dir=ltr placeholder='+9665xxxxxxxx' value='{esc(item.get('owner_phone'))}'>
     <input name=weight_tons type=number min=.01 step=.01 placeholder='الوزن بالطن' value='{esc(item.get('weight_tons'))}'>
-    </div><button>حفظ البيانات المصححة يدويًا</button></form>{readiness}<hr>
+    </div><button>حفظ البيانات المصححة يدويًا</button></form>{readiness}{manual_contact}<hr>
     <form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>التواصل مع صاحب الشحنة الآن</button></form>
     <form method=post action='/freight-workflow/{shipment_id}/agreement'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid><input name=asking_price type=number step=.01 placeholder='السعر المطلوب' value='{esc(item.get('asking_price'))}'><input name=agreed_owner_price type=number step=.01 required placeholder='السعر المتفق مع صاحب الشحنة' value='{esc(item.get('agreed_owner_price'))}'><input name=weight_tons type=number step=.01 placeholder='الوزن طن' value='{esc(item.get('weight_tons'))}'><input name=unloading_location placeholder='مكان التنزيل' value='{esc(item.get('unloading_location'))}'><input name=payment_method placeholder='طريقة الدفع' value='{esc(item.get('payment_method'))}'></div><textarea name=notes placeholder='ملخص التفاوض'>{esc(item.get('notes'))}</textarea><button>حفظ الاتفاق وتجهيز عرض السائقين ناقص 150 ريال</button></form>"""
     if broadcast:
