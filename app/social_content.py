@@ -37,6 +37,10 @@ def init_social_content():
         approval_id BIGINT REFERENCES approvals(id) ON DELETE SET NULL,
         created_by BIGINT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
         published_at TIMESTAMPTZ)""")
+    now = utcnow()
+    execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
+        ("YouTube","آفاق طويق — @afaqtaw","https://www.youtube.com/@afaqtaw","linked",None,now,now))
 
 
 init_social_content()
