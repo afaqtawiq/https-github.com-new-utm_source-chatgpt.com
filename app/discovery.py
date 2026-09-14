@@ -144,8 +144,8 @@ def _promote_signal(signal_id, source_name, result):
            VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (
             opportunity_id,
-            "email",
-            "",
+            "email" if result.get("email") else ("whatsapp" if result.get("phone") else "email"),
+            result.get("recipient", ""),
             "طلب تفاصيل فرصة خدمات لوجستية — آفاق طويق",
             proposal,
             proposal,
@@ -171,10 +171,96 @@ def _promote_signal(signal_id, source_name, result):
     return opportunity_id
 
 
+
+IMPORTER_TERMS = (
+    "استيراد", "مستورد", "تصدير", "تجارة دولية", "تجاري", "مصنع", "مصانع",
+    "import", "importer", "export", "trading", "manufacturer", "distribution"
+)
+CUSTOMER_SERVICE_TERMS = (
+    "تخليص", "جمرك", "شحن", "نقل", "مستودع", "تخزين",
+    "customs", "clearance", "freight", "transport", "warehouse", "storage"
+)
+
+
+def _scan_registered_customers():
+    from app.storage import rows, one, execute, utcnow
+    stats = {"customers_checked": 0, "customer_signals": 0, "customer_opportunities": 0}
+    try:
+        customers = rows(
+            """SELECT 'account' kind,id,name company_name,COALESCE(country,'') city,
+                      COALESCE(phone,'') phone,COALESCE(email,'') email,COALESCE(notes,'') notes
+               FROM accounts
+               UNION ALL
+               SELECT 'directory' kind,id,company_name,COALESCE(city,'') city,
+                      COALESCE(phone,'') phone,COALESCE(email,'') email,'' notes
+               FROM customer_directory"""
+        )
+    except Exception:
+        customers = rows(
+            """SELECT 'account' kind,id,name company_name,COALESCE(country,'') city,
+                      COALESCE(phone,'') phone,COALESCE(email,'') email,COALESCE(notes,'') notes
+               FROM accounts"""
+        )
+    seen = set()
+    for customer in customers:
+        name = (customer.get("company_name") or "").strip()
+        phone = (customer.get("phone") or "").strip()
+        email = (customer.get("email") or "").strip()
+        key = (name.lower(), phone or email)
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        stats["customers_checked"] += 1
+        text = " ".join((name, customer.get("city") or "", customer.get("notes") or "")).lower()
+        importer_hits = [term for term in IMPORTER_TERMS if term.lower() in text]
+        service_hits = [term for term in CUSTOMER_SERVICE_TERMS if term.lower() in text]
+        contact_score = 15 if (phone or email) else 0
+        score = min(95, 35 + contact_score + (25 if importer_hits else 0) + (20 if service_hits else 0))
+        signal_url = f"internal://customer/{customer['kind']}/{customer['id']}"
+        if one("SELECT id FROM discovered_signals WHERE url=?", (signal_url,)):
+            continue
+        matched = list(dict.fromkeys(importer_hits + service_hits))
+        excerpt = (
+            f"عميل مسجل في النظام: {name}. المدينة/الدولة: {customer.get('city') or 'غير محدد'}. "
+            f"بيانات التواصل: {'متوفرة' if (phone or email) else 'غير مكتملة'}. "
+            f"التصنيف: {'مستورد أو نشاط تجاري محتمل' if importer_hits else 'عميل يحتاج تأهيل'}."
+        )
+        signal_id = execute(
+            """INSERT INTO discovered_signals(title,url,company_name,excerpt,score,matched_terms,status,discovered_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                "فرصة من قاعدة العملاء — " + name,
+                signal_url,
+                name,
+                excerpt,
+                score,
+                "، ".join(matched) if matched else "عميل مسجل",
+                "new",
+                utcnow(),
+            ),
+        )
+        stats["customer_signals"] += 1
+        if score >= 65:
+            result = {
+                "title": "فرصة عميل مسجل — " + name,
+                "url": signal_url,
+                "excerpt": excerpt,
+                "score": score,
+                "matched_terms": matched,
+                "email": email,
+                "phone": phone,
+                "recipient": email or phone,
+            }
+            _promote_signal(signal_id, name, result)
+            stats["customer_opportunities"] += 1
+    return stats
+
 def run_discovery_cycle():
     from app.storage import rows, one, execute, utcnow
     ensure_default_sources()
     stats = {"checked": 0, "signals": 0, "opportunities": 0, "errors": 0}
+    customer_stats = _scan_registered_customers()
+    stats.update(customer_stats)
     for source in rows("SELECT * FROM source_watches WHERE enabled=1 ORDER BY id"):
         stats["checked"] += 1
         try:
