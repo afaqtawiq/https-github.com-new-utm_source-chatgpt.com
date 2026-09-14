@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.storage import execute, get_session, log, one, rows, utcnow
 from app.discovery import run_discovery_cycle
+from app.data_import import _phone
 from app.whatsapp_integration import send_text_message
 
 router = APIRouter()
@@ -73,6 +74,19 @@ def normalize_text(value):
 
 def parse_command(raw):
     text = normalize_text(raw).strip(" .،؟!")
+    text = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    add_driver = re.match(
+        r"^(?:اضف|سجل|احفظ)\\s+(?:السائق|سائق)\\s+(.+?)\\s+(?:ورقمه|ورقم|رقمه|رقم|جواله|جوال|هاتفه|هاتف)\\s*([+0-9\\s()\\-]{8,22})(?:\\s+(?:ومركبته|مركبته|نوع المركبة|المركبة)\\s+(.+))?$",
+        text, flags=re.IGNORECASE,
+    )
+    if add_driver:
+        return {
+            "action_type": "add_driver",
+            "target": add_driver.group(1).strip(" ،,."),
+            "phone": add_driver.group(2).strip(),
+            "vehicle_type": (add_driver.group(3) or "غير محدد").strip(),
+            "content": "",
+        }
     broadcast = re.match(r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:واتساب|واتس)?\\s*(?:الى|ل)?\\s*(?:جميع|كل)\\s+السائقين\\s*(.*)$", text, flags=re.IGNORECASE)
     if broadcast:
         content = re.sub(r"^(?:بخصوص|محتوى|وقل|برسالة)\\s+", "", broadcast.group(1).strip())
@@ -93,6 +107,16 @@ def parse_command(raw):
         "حدث الفرص", "نفذ دورة البحث", "تعامل مع عشر فرص", "تعامل مع 10 فرص"
     )):
         return {"action_type": "run_discovery", "target": "محرك اكتشاف الفرص", "content": ""}
+    contact_request = re.match(
+        r"^(?:تواصل|راسل)\\s+(?:مع\\s+)?(?:العميل\\s+)?(.+?)(?:\\s+(?:بخصوص|وقل|محتوى)\\s+(.+))?$",
+        text, flags=re.IGNORECASE,
+    )
+    if contact_request:
+        return {
+            "action_type": "auto_contact",
+            "target": contact_request.group(1).strip(" ،,."),
+            "content": (contact_request.group(2) or "").strip(),
+        }
     navigation = {
         "الرئيسية": "/dashboard", "افتح الرئيسية": "/dashboard", "اعرض الرئيسية": "/dashboard",
         "افتح العملاء": "/accounts", "اعرض العملاء": "/accounts", "العملاء": "/accounts",
@@ -115,15 +139,55 @@ def parse_command(raw):
 
 def find_contact(target):
     needle = "%" + normalize_text(target) + "%"
-    return rows("""SELECT c.*,o.company_name,o.stage FROM sales_contacts c
+    matches = rows("""SELECT c.*,o.company_name,o.stage FROM sales_contacts c
         JOIN opportunities o ON o.id=c.opportunity_id
         WHERE LOWER(REPLACE(REPLACE(REPLACE(COALESCE(c.name,''),'إ','ا'),'أ','ا'),'آ','ا')) LIKE LOWER(?)
            OR LOWER(REPLACE(REPLACE(REPLACE(COALESCE(o.company_name,''),'إ','ا'),'أ','ا'),'آ','ا')) LIKE LOWER(?)
         ORDER BY c.verified DESC,c.updated_at DESC LIMIT 6""", (needle, needle))
-
+    if matches:
+        return matches
+    registered = rows("""SELECT 'account' source_kind,id,name company_name,
+               COALESCE(phone,'') phone,COALESCE(email,'') email
+        FROM accounts WHERE name ILIKE ?
+        UNION ALL
+        SELECT 'directory' source_kind,id,company_name,
+               COALESCE(phone,'') phone,COALESCE(email,'') email
+        FROM customer_directory WHERE company_name ILIKE ?
+        LIMIT 6""", (needle, needle))
+    materialized = []
+    for customer in registered:
+        source_url = f"internal://customer/{customer['source_kind']}/{customer['id']}"
+        opportunity = one("SELECT * FROM opportunities WHERE source_url=? ORDER BY id LIMIT 1", (source_url,))
+        if not opportunity:
+            now = utcnow()
+            opportunity_id = execute("""INSERT INTO opportunities(
+                company_name,source_url,signal,score,stage,estimated_value,currency,owner,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""", (
+                customer["company_name"], source_url, "طلب تواصل مباشر من مساعد الأوامر",
+                65, "qualified", 0, "SAR", "مساعد الأوامر", now, now,
+            ))
+            opportunity = one("SELECT * FROM opportunities WHERE id=?", (opportunity_id,))
+        contact = one("""SELECT * FROM sales_contacts
+            WHERE opportunity_id=? AND (COALESCE(phone,'')=? OR COALESCE(email,'')=?)
+            ORDER BY id LIMIT 1""", (
+                opportunity["id"], customer["phone"], customer["email"],
+            ))
+        if not contact:
+            now = utcnow()
+            contact_id = execute("""INSERT INTO sales_contacts(
+                opportunity_id,name,email,phone,source_url,verified,notes,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?)""", (
+                opportunity["id"], customer["company_name"], customer["email"], customer["phone"],
+                source_url, 0, "أُنشئت من سجل العميل عند طلب التواصل", now, now,
+            ))
+            contact = one("SELECT * FROM sales_contacts WHERE id=?", (contact_id,))
+        contact["company_name"] = opportunity["company_name"]
+        contact["stage"] = opportunity["stage"]
+        materialized.append(contact)
+    return materialized
 
 def action_label(kind):
-    return {"call": "مكالمة", "whatsapp": "واتساب", "email": "بريد إلكتروني", "driver_broadcast": "واتساب جماعي للسائقين"}.get(kind, kind)
+    return {"call": "مكالمة", "whatsapp": "واتساب", "email": "بريد إلكتروني", "auto_contact": "تواصل مع عميل", "add_driver": "إضافة سائق", "driver_broadcast": "واتساب جماعي للسائقين"}.get(kind, kind)
 
 
 @router.get("/commands", response_class=HTMLResponse)
@@ -141,7 +205,7 @@ def commands_page(request: Request):
 <div class=w><a class=btn href=/dashboard>الرئيسية</a><h1>مساعد الأوامر الصوتية والكتابية</h1>
 <div class=card><p class=muted>قل الأمر أو اكتبه. التنقل ينفذ مباشرة، أما الاتصال أو واتساب أو البريد فينشئ مسودة للمراجعة ولا يرسل شيئًا تلقائيًا.</p>
 <form method=post action=/commands><input type=hidden name=csrf value="{e(current['csrf'])}"><textarea id=command name=command required placeholder="مثال: أرسل واتساب إلى أحمد بخصوص عرض النقل"></textarea><button type=button id=mic>🎙 بدء الاستماع</button><button type=submit>تنفيذ الأمر</button><div id=status class=muted></div></form></div>
-<div class="card examples"><b>أمثلة:</b><br>«اتصل على محمد»<br>«أرسل واتساب إلى شركة النور بخصوص عرض النقل»<br>«أرسل لجميع السائقين شحنة من الرياض إلى جدة»<br>«أرسل بريدًا إلى أحمد بخصوص خدمات التخليص»<br>«افتح السائقين»<br>«شغّل البحث عن فرص»<br>«اعرض الشحنات»<br>«افتح وكلاء الملاحة»</div>
+<div class="card examples"><b>أمثلة:</b><br>«اتصل على محمد»<br>«أرسل واتساب إلى شركة النور بخصوص عرض النقل»<br>«أرسل لجميع السائقين شحنة من الرياض إلى جدة»<br>«أرسل بريدًا إلى أحمد بخصوص خدمات التخليص»<br>«افتح السائقين»<br>«شغّل البحث عن فرص»<br>«اعرض الشحنات»<br>«افتح وكلاء الملاحة»<br>«أضف السائق محمد ورقمه 0501234567»<br>«تواصل مع العميل شركة النور بخصوص خدمات التخليص»</div>
 <div class="card scroll"><h2>المسودات الأخيرة</h2><table><tr><th>#</th><th>الأمر</th><th>الجهة</th><th>الشركة</th><th>المستلم</th><th>الحالة</th></tr>{item_rows or '<tr><td colspan=6>لا توجد أوامر بعد.</td></tr>'}</table></div></div>
 <script>const mic=document.querySelector('#mic'),field=document.querySelector('#command'),status=document.querySelector('#status');const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SpeechRecognition){{mic.disabled=true;status.textContent='التعرف الصوتي غير متاح في هذا المتصفح؛ استخدم Chrome أو اكتب الأمر.'}}else{{const recognition=new SpeechRecognition();recognition.lang='ar-SA';recognition.interimResults=false;recognition.continuous=false;mic.onclick=()=>{{status.textContent='أستمع الآن...';mic.classList.add('listening');recognition.start()}};recognition.onresult=event=>{{field.value=event.results[0][0].transcript;status.textContent='تم التقاط الأمر، جارٍ تنفيذه...';setTimeout(()=>field.form.requestSubmit(),650)}};recognition.onerror=event=>{{status.textContent='تعذر التقاط الصوت: '+event.error}};recognition.onend=()=>mic.classList.remove('listening')}}</script></html>""")
 
@@ -165,6 +229,26 @@ async def create_command(request: Request):
         return response
     if parsed["action_type"] == "unknown":
         return HTMLResponse("<html lang=ar dir=rtl><meta charset=utf-8><body style='font-family:Arial;padding:30px'><h2>لم أفهم الأمر.</h2><p>ابدأ بـ: اتصل على، أرسل واتساب إلى، أرسل بريدًا إلى، أو افتح.</p><a href=/commands>عودة</a></body></html>", 400)
+    if parsed["action_type"] == "add_driver":
+        if current.get("role") != "admin":
+            raise HTTPException(403, "إضافة السائقين تتطلب صلاحية الإدارة")
+        phone = _phone(parsed.get("phone"), "966")
+        if not phone:
+            raise HTTPException(400, "رقم الجوال غير صالح؛ اذكر رقمًا سعوديًا أو خليجيًا كاملًا")
+        existing = one("SELECT id,driver_name FROM drivers WHERE whatsapp_phone=?", (phone,))
+        if existing:
+            return HTMLResponse(f"<html lang=ar dir=rtl><meta charset=utf-8><body style='font-family:Arial;padding:30px'><h2>السائق مسجل مسبقًا</h2><p>{e(existing['driver_name'])} — <span dir=ltr>{e(phone)}</span></p><a href=/drivers>فتح قائمة السائقين</a></body></html>", 409)
+        now = utcnow()
+        driver_id = execute("""INSERT INTO drivers(
+            driver_name,whatsapp_phone,vehicle_type,capacity,current_city,preferred_routes,
+            availability,company_name,offer_consent,consent_date,notes,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?)""", (
+            parsed["target"], phone, parsed.get("vehicle_type") or "غير محدد", "", "", "",
+            "متاح", "", 0, "أُضيف بواسطة مساعد الأوامر؛ موافقة استقبال العروض غير مسجلة",
+            now, now,
+        ))
+        log(current["user_id"], "command_driver_created", "driver", driver_id, raw[:300])
+        return RedirectResponse("/drivers?q=" + urllib.parse.quote(parsed["target"]), 303)
     if parsed["action_type"] == "driver_broadcast":
         message = parsed["content"].strip()
         if not message:
@@ -195,6 +279,15 @@ async def create_command(request: Request):
         reason = "لم نجد جهة اتصال مطابقة" if not matches else "وجدنا أكثر من جهة مطابقة؛ اكتب الاسم بشكل أدق"
         return HTMLResponse(f"<html lang=ar dir=rtl><meta charset=utf-8><body style='font-family:Arial;padding:30px'><h2>{e(reason)}</h2><p>الهدف: {e(parsed['target'])}</p><a href=/commands>عودة</a></body></html>", 409)
     contact = matches[0]
+    if parsed["action_type"] == "auto_contact":
+        if contact.get("verified") and contact.get("phone"):
+            parsed["action_type"] = "whatsapp"
+        elif contact.get("email"):
+            parsed["action_type"] = "email"
+        elif contact.get("phone"):
+            raise HTTPException(409, "رقم العميل موجود لكنه يحتاج تحقق قبل تجهيز تواصل واتساب")
+        else:
+            raise HTTPException(409, "العميل مسجل لكن لا توجد له وسيلة تواصل")
     recipient = contact.get("email") if parsed["action_type"] == "email" else contact.get("phone")
     if not recipient: raise HTTPException(409, "Selected contact has no recipient for this channel")
     if parsed["action_type"] in ("call", "whatsapp") and not contact.get("verified"):
@@ -219,7 +312,7 @@ def command_review(action_id: int, request: Request):
 @router.get("/api/v7/commands")
 def command_api(request: Request):
     session(request)
-    return {"automatic_external_actions": False, "supported": ["call", "whatsapp", "driver_broadcast", "email", "navigate", "run_discovery"], "items": rows("SELECT id,raw_command,action_type,target_name,recipient,status,created_at FROM command_actions ORDER BY id DESC LIMIT 100")}
+    return {"automatic_external_actions": False, "supported": ["add_driver", "call", "whatsapp", "auto_contact", "driver_broadcast", "email", "navigate", "run_discovery"], "items": rows("SELECT id,raw_command,action_type,target_name,recipient,status,created_at FROM command_actions ORDER BY id DESC LIMIT 100")}
 
 
 @router.get("/commands/broadcast/{broadcast_id}", response_class=HTMLResponse)
