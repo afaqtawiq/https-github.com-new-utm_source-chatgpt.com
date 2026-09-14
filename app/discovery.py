@@ -355,7 +355,7 @@ def _activate_customer_pilot(limit=10):
     from app.storage import rows, one
 
     active = one(
-        "SELECT COUNT(*) n FROM opportunities WHERE source_url LIKE 'internal://customer/%'"
+        "SELECT COUNT(*) n FROM opportunities WHERE source_url LIKE 'internal://customer/%%'"
     )["n"]
     needed = max(0, limit - active)
     activated = 0
@@ -364,7 +364,7 @@ def _activate_customer_pilot(limit=10):
 
     candidates = rows(
         """SELECT * FROM discovered_signals
-           WHERE url LIKE 'internal://customer/%' AND opportunity_id IS NULL
+           WHERE url LIKE 'internal://customer/%%' AND opportunity_id IS NULL
            ORDER BY score DESC,id ASC LIMIT ?""",
         (needed * 5,),
     )
