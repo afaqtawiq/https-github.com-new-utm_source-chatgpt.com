@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.storage import execute, get_session, log, one, rows, utcnow
+from app.discovery import run_discovery_cycle
 from app.whatsapp_integration import send_text_message
 
 router = APIRouter()
@@ -71,32 +72,46 @@ def normalize_text(value):
 
 
 def parse_command(raw):
-    text = normalize_text(raw)
-    broadcast = re.match(r"^(?:ارسل|ابعث)\s+(?:رسالة\s+)?(?:واتساب|واتس)?\s*(?:الى|ل)?\s*(?:جميع|كل)\s+السائقين\s*(.*)$", text, flags=re.IGNORECASE)
+    text = normalize_text(raw).strip(" .،؟!")
+    broadcast = re.match(r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:واتساب|واتس)?\\s*(?:الى|ل)?\\s*(?:جميع|كل)\\s+السائقين\\s*(.*)$", text, flags=re.IGNORECASE)
     if broadcast:
-        content = re.sub(r"^(?:بخصوص|محتوى|وقل|برسالة)\s+", "", broadcast.group(1).strip())
+        content = re.sub(r"^(?:بخصوص|محتوى|وقل|برسالة)\\s+", "", broadcast.group(1).strip())
         return {"action_type": "driver_broadcast", "target": "جميع السائقين", "content": content}
     patterns = (
-        ("call", r"^(?:اتصل|اتصال|كلم)\s+(?:على|ب)?\s*(.+)$"),
-        ("whatsapp", r"^(?:ارسل|ابعث)\s+(?:رسالة\s+)?(?:واتساب|واتس)\s+(?:الى|ل)?\s*(.+)$"),
-        ("email", r"^(?:ارسل|ابعث)\s+(?:رسالة\s+)?(?:ايميل|بريد(?:ا\s+الكترونيا)?)\s+(?:الى|ل)?\s*(.+)$"),
+        ("call", r"^(?:اتصل|اتصال|كلم)\\s+(?:على|ب)?\\s*(.+)$"),
+        ("whatsapp", r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:واتساب|واتس)\\s+(?:الى|ل)?\\s*(.+)$"),
+        ("email", r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:ايميل|ايميلًا|بريد(?:ا\\s+الكترونيا)?)\\s+(?:الى|ل)?\\s*(.+)$"),
     )
     for action_type, pattern in patterns:
         match = re.match(pattern, text, flags=re.IGNORECASE)
         if match:
             remainder = match.group(1).strip()
-            parts = re.split(r"\s+(?:وقل|وقولي|برسالة|بخصوص|محتوى)\s+", remainder, maxsplit=1)
+            parts = re.split(r"\\s+(?:وقل|وقولي|برسالة|بخصوص|محتوى)\\s+", remainder, maxsplit=1)
             return {"action_type": action_type, "target": parts[0].strip(" ،,."), "content": parts[1].strip() if len(parts) > 1 else ""}
+    if any(phrase in text for phrase in (
+        "شغل البحث", "شغل اكتشاف الفرص", "ابحث عن فرص", "اكتشف فرص",
+        "حدث الفرص", "نفذ دورة البحث", "تعامل مع عشر فرص", "تعامل مع 10 فرص"
+    )):
+        return {"action_type": "run_discovery", "target": "محرك اكتشاف الفرص", "content": ""}
     navigation = {
-        "افتح العملاء": "/accounts", "اعرض العملاء": "/accounts",
-        "افتح السائقين": "/drivers", "اعرض السائقين": "/drivers",
-        "افتح الفرص": "/opportunities", "اعرض الفرص": "/opportunities",
-        "افتح الموافقات": "/approvals", "اعرض الموافقات": "/approvals",
+        "الرئيسية": "/dashboard", "افتح الرئيسية": "/dashboard", "اعرض الرئيسية": "/dashboard",
+        "افتح العملاء": "/accounts", "اعرض العملاء": "/accounts", "العملاء": "/accounts",
+        "افتح السائقين": "/drivers", "اعرض السائقين": "/drivers", "السائقين": "/drivers",
+        "افتح الفرص": "/opportunities", "اعرض الفرص": "/opportunities", "الفرص": "/opportunities",
+        "افتح العشر فرص": "/opportunities", "اعرض العشر فرص": "/opportunities",
+        "افتح الموافقات": "/approvals", "اعرض الموافقات": "/approvals", "الموافقات": "/approvals",
+        "افتح الشحنات": "/shipments", "اعرض الشحنات": "/shipments", "الشحنات": "/shipments",
+        "افتح وكلاء الملاحة": "/shipping-agents", "اعرض وكلاء الملاحة": "/shipping-agents",
+        "افتح سابر": "/saber", "اعرض سابر": "/saber",
+        "افتح المحتوى": "/content-center", "افتح صناعة المحتوى": "/content-center",
+        "افتح اكتشاف الفرص": "/discovery", "اعرض اكتشاف الفرص": "/discovery",
+        "افتح مساعد المبيعات": "/sales-copilot", "اعرض مساعد المبيعات": "/sales-copilot",
+        "افتح مسار المبيعات": "/pipeline", "اعرض مسار المبيعات": "/pipeline",
+        "افتح السجل": "/activity", "اعرض السجل": "/activity",
     }
     if text in navigation:
         return {"action_type": "navigate", "target": text, "url": navigation[text], "content": ""}
     return {"action_type": "unknown", "target": "", "content": ""}
-
 
 def find_contact(target):
     needle = "%" + normalize_text(target) + "%"
@@ -125,10 +140,10 @@ def commands_page(request: Request):
 <style>body{{font-family:Arial;background:#07131f;color:#eef6fb;margin:0}}.w{{max-width:1100px;margin:auto;padding:24px}}.card{{background:#102536;border:1px solid #28475d;border-radius:18px;padding:20px;margin:14px 0}}textarea{{width:100%;min-height:120px;box-sizing:border-box;padding:14px;border-radius:12px;border:1px solid #36586e;background:#081925;color:white;font-size:18px}}button,.btn{{border:0;border-radius:10px;padding:12px 16px;margin:7px 3px;background:#22c55e;color:#04130a;font-weight:bold;cursor:pointer;text-decoration:none;display:inline-block}}#mic{{background:#2563eb;color:white}}#mic.listening{{background:#ef4444}}.muted{{color:#aac0cf}}table{{width:100%;border-collapse:collapse}}td,th{{padding:10px;border-bottom:1px solid #28475d;text-align:right}}.scroll{{overflow:auto}}.examples{{line-height:2}}</style>
 <div class=w><a class=btn href=/dashboard>الرئيسية</a><h1>مساعد الأوامر الصوتية والكتابية</h1>
 <div class=card><p class=muted>قل الأمر أو اكتبه. التنقل ينفذ مباشرة، أما الاتصال أو واتساب أو البريد فينشئ مسودة للمراجعة ولا يرسل شيئًا تلقائيًا.</p>
-<form method=post action=/commands><input type=hidden name=csrf value="{e(current['csrf'])}"><textarea id=command name=command required placeholder="مثال: أرسل واتساب إلى أحمد بخصوص عرض النقل"></textarea><button type=button id=mic>🎙 بدء الاستماع</button><button type=submit>تحليل الأمر</button><div id=status class=muted></div></form></div>
-<div class="card examples"><b>أمثلة:</b><br>«اتصل على محمد»<br>«أرسل واتساب إلى شركة النور بخصوص عرض النقل»<br>«أرسل لجميع السائقين شحنة من الرياض إلى جدة»<br>«أرسل بريدًا إلى أحمد بخصوص خدمات التخليص»<br>«افتح السائقين»</div>
+<form method=post action=/commands><input type=hidden name=csrf value="{e(current['csrf'])}"><textarea id=command name=command required placeholder="مثال: أرسل واتساب إلى أحمد بخصوص عرض النقل"></textarea><button type=button id=mic>🎙 بدء الاستماع</button><button type=submit>تنفيذ الأمر</button><div id=status class=muted></div></form></div>
+<div class="card examples"><b>أمثلة:</b><br>«اتصل على محمد»<br>«أرسل واتساب إلى شركة النور بخصوص عرض النقل»<br>«أرسل لجميع السائقين شحنة من الرياض إلى جدة»<br>«أرسل بريدًا إلى أحمد بخصوص خدمات التخليص»<br>«افتح السائقين»<br>«شغّل البحث عن فرص»<br>«اعرض الشحنات»<br>«افتح وكلاء الملاحة»</div>
 <div class="card scroll"><h2>المسودات الأخيرة</h2><table><tr><th>#</th><th>الأمر</th><th>الجهة</th><th>الشركة</th><th>المستلم</th><th>الحالة</th></tr>{item_rows or '<tr><td colspan=6>لا توجد أوامر بعد.</td></tr>'}</table></div></div>
-<script>const mic=document.querySelector('#mic'),field=document.querySelector('#command'),status=document.querySelector('#status');const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SpeechRecognition){{mic.disabled=true;status.textContent='التعرف الصوتي غير متاح في هذا المتصفح؛ استخدم Chrome أو اكتب الأمر.'}}else{{const recognition=new SpeechRecognition();recognition.lang='ar-SA';recognition.interimResults=false;recognition.continuous=false;mic.onclick=()=>{{status.textContent='أستمع الآن...';mic.classList.add('listening');recognition.start()}};recognition.onresult=event=>{{field.value=event.results[0][0].transcript;status.textContent='تم التقاط الأمر. راجعه ثم اضغط تحليل الأمر.'}};recognition.onerror=event=>{{status.textContent='تعذر التقاط الصوت: '+event.error}};recognition.onend=()=>mic.classList.remove('listening')}}</script></html>""")
+<script>const mic=document.querySelector('#mic'),field=document.querySelector('#command'),status=document.querySelector('#status');const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SpeechRecognition){{mic.disabled=true;status.textContent='التعرف الصوتي غير متاح في هذا المتصفح؛ استخدم Chrome أو اكتب الأمر.'}}else{{const recognition=new SpeechRecognition();recognition.lang='ar-SA';recognition.interimResults=false;recognition.continuous=false;mic.onclick=()=>{{status.textContent='أستمع الآن...';mic.classList.add('listening');recognition.start()}};recognition.onresult=event=>{{field.value=event.results[0][0].transcript;status.textContent='تم التقاط الأمر، جارٍ تنفيذه...';setTimeout(()=>field.form.requestSubmit(),650)}};recognition.onerror=event=>{{status.textContent='تعذر التقاط الصوت: '+event.error}};recognition.onend=()=>mic.classList.remove('listening')}}</script></html>""")
 
 
 @router.post("/commands")
@@ -141,6 +156,13 @@ async def create_command(request: Request):
     if parsed["action_type"] == "navigate":
         log(current["user_id"], "command_navigation", summary=raw[:300])
         return RedirectResponse(parsed["url"], 303)
+    if parsed["action_type"] == "run_discovery":
+        log(current["user_id"], "command_discovery_started", summary=raw[:300])
+        tasks = BackgroundTasks()
+        tasks.add_task(run_discovery_cycle)
+        response = RedirectResponse("/discovery", 303)
+        response.background = tasks
+        return response
     if parsed["action_type"] == "unknown":
         return HTMLResponse("<html lang=ar dir=rtl><meta charset=utf-8><body style='font-family:Arial;padding:30px'><h2>لم أفهم الأمر.</h2><p>ابدأ بـ: اتصل على، أرسل واتساب إلى، أرسل بريدًا إلى، أو افتح.</p><a href=/commands>عودة</a></body></html>", 400)
     if parsed["action_type"] == "driver_broadcast":
@@ -197,7 +219,7 @@ def command_review(action_id: int, request: Request):
 @router.get("/api/v7/commands")
 def command_api(request: Request):
     session(request)
-    return {"automatic_external_actions": False, "supported": ["call", "whatsapp", "driver_broadcast", "email", "navigate"], "items": rows("SELECT id,raw_command,action_type,target_name,recipient,status,created_at FROM command_actions ORDER BY id DESC LIMIT 100")}
+    return {"automatic_external_actions": False, "supported": ["call", "whatsapp", "driver_broadcast", "email", "navigate", "run_discovery"], "items": rows("SELECT id,raw_command,action_type,target_name,recipient,status,created_at FROM command_actions ORDER BY id DESC LIMIT 100")}
 
 
 @router.get("/commands/broadcast/{broadcast_id}", response_class=HTMLResponse)
