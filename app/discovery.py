@@ -227,9 +227,10 @@ def start_discovery_worker():
         time.sleep(20)
         while True:
             try:
-                run_discovery_cycle()
-            except Exception:
-                pass
+                stats = run_discovery_cycle()
+                print("DISCOVERY_CYCLE", stats, flush=True)
+            except Exception as exc:
+                print("DISCOVERY_CYCLE_ERROR", str(exc)[:300], flush=True)
             time.sleep(max(900, int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "21600"))))
 
     threading.Thread(target=loop, name="afaaq-discovery", daemon=True).start()
