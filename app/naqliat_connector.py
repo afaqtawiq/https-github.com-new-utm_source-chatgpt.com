@@ -162,14 +162,25 @@ class NaqliatOcr(BaseModel):
 
 def _save(payload: NaqliatLoad):
     phone = _clean_phone(payload.owner_phone)
-    fingerprint = _fingerprint(payload.origin, payload.destination, payload.weight_tons, payload.vehicle_type, payload.description, phone)
+    origin = origin
+    destination = destination
+    if payload.raw_text and (
+        not origin or origin == "غير محدد" or
+        not destination or destination == "غير محدد"
+    ):
+        extracted_origin, extracted_destination = _extract_route(payload.raw_text)
+        origin = extracted_origin or origin
+        destination = extracted_destination or destination
+    origin = origin or "غير محدد"
+    destination = destination or "غير محدد"
+    fingerprint = _fingerprint(origin, destination, payload.weight_tons, payload.vehicle_type, payload.description, phone)
     now = utcnow()
     with db() as c:
         saved = c.execute(
             """INSERT INTO naqliat_loads(fingerprint,origin,destination,distance_km,weight_tons,vehicle_type,description,owner_phone,age_text,raw_text,capture_method,status,captured_at,created_at)
                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new',%s,%s)
                ON CONFLICT(fingerprint) DO NOTHING RETURNING id""",
-            (fingerprint, payload.origin.strip(), payload.destination.strip(), payload.distance_km, payload.weight_tons,
+            (fingerprint, origin, destination, payload.distance_km, payload.weight_tons,
              payload.vehicle_type.strip(), payload.description.strip(), phone, payload.age_text.strip(),
              payload.raw_text.strip(), payload.capture_method, now, now),
         ).fetchone()
@@ -195,7 +206,7 @@ def _save(payload: NaqliatLoad):
             shipment = c.execute(
                 """INSERT INTO shipments(reference,service_type,origin,destination,status,revenue,cost,currency,created_at,updated_at)
                    VALUES(%s,'Transport',%s,%s,'new',0,0,'SAR',%s,%s) RETURNING id""",
-                (reference, payload.origin.strip(), payload.destination.strip(), now, now),
+                (reference, origin, destination, now, now),
             ).fetchone()
             c.execute(
                 """INSERT INTO shipment_operations(shipment_id,stage,notes,created_at,updated_at)
