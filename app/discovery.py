@@ -50,13 +50,13 @@ def extract_candidates(raw, base_url):
     directory_mode = any(host in base_url.lower() for host in (
         "saudiexports.gov.sa", "investindubai.gov.ae"
     ))
-    for match in re.finditer(r'(?is)<a\\b[^>]*href=["\\\']([^"\\\']+)["\\\'][^>]*>(.*?)</a>', raw):
+    for match in re.finditer(r"""(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""", raw):
         href = urljoin(base_url, match.group(1).strip())
         parsed = urlparse(href)
         if parsed.scheme not in ("http", "https") or parsed.hostname != urlparse(base_url).hostname:
             continue
         title = re.sub(r"(?s)<[^>]+>", " ", match.group(2))
-        title = re.sub(r"\\s+", " ", title).strip()
+        title = re.sub(r"\s+", " ", title).strip()
         if len(title) < 5 or href in seen:
             continue
         around = raw[max(0, match.start()-280):min(len(raw), match.end()+520)]
