@@ -162,8 +162,8 @@ class NaqliatOcr(BaseModel):
 
 def _save(payload: NaqliatLoad):
     phone = _clean_phone(payload.owner_phone)
-    origin = origin
-    destination = destination
+    origin = payload.origin.strip()
+    destination = payload.destination.strip()
     if payload.raw_text and (
         not origin or origin == "غير محدد" or
         not destination or destination == "غير محدد"
@@ -227,7 +227,10 @@ def _save(payload: NaqliatLoad):
         return load_id, created, shipment["id"]
 
 
-_repair_missing_routes()\n\n\n@router.get("/naqliat", response_class=HTMLResponse)
+_repair_missing_routes()
+
+
+@router.get("/naqliat", response_class=HTMLResponse)
 def naqliat_home(request: Request):
     session = _session(request)
     data = rows("""SELECT n.*,s.id shipment_id,s.reference shipment_reference
@@ -284,10 +287,12 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: 
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(401, "Connector authorization failed")
     raw = payload.raw_text.replace("\u00a0", " ")
-    origin, destination = _extract_route(raw)\n    phone = re.search(r"(?:\+|00)?966\s*5(?:[\s-]*\d){8}", raw)
+    origin, destination = _extract_route(raw)
+    phone = re.search(r"(?:\+|00)?966\s*5(?:[\s-]*\d){8}", raw)
     weight = re.search(r"([0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)\s*(?:\+\s*)?طن", raw)
     digits = lambda value: str(value).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
-    item = NaqliatLoad(origin=origin or "غير محدد",\n        destination=destination or "غير محدد",
+    item = NaqliatLoad(origin=origin or "غير محدد",
+        destination=destination or "غير محدد",
         weight_tons=float(digits(weight.group(1)).replace(",", ".")) if weight else None,
         description=raw[:3000], owner_phone=phone.group(0) if phone else "", raw_text=raw,
         capture_method="android_ocr")
