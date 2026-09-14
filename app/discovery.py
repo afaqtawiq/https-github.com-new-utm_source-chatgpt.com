@@ -352,7 +352,7 @@ def _scan_external_search():
 
 def _activate_customer_pilot(limit=10):
     """Select exactly ten real contacts for the controlled sales pilot."""
-    from app.storage import rows, one, execute
+    from app.storage import rows, one, execute, utcnow
 
     pilot_owner = "حملة تجريبية — 10 فرص"
     active = one("SELECT COUNT(*) n FROM opportunities WHERE owner=?", (pilot_owner,))["n"]
@@ -380,7 +380,7 @@ def _activate_customer_pilot(limit=10):
                 continue
             execute(
                 "UPDATE opportunities SET owner=?,stage='qualified',updated_at=? WHERE id=?",
-                (pilot_owner, __import__("app.storage", fromlist=["utcnow"]).utcnow(), opportunity["id"]),
+                (pilot_owner, utcnow(), opportunity["id"]),
             )
             activated += 1
             if activated >= needed:
