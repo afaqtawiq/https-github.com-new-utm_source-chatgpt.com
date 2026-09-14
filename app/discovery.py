@@ -1,4 +1,4 @@
-import re, socket, ipaddress, hashlib
+import re, socket, ipaddress, hashlib, os, threading, time
 from urllib.parse import urlparse, urljoin
 import httpx
 
@@ -61,3 +61,175 @@ def fetch_public(url):
     return {'title':title or urlparse(url).hostname,'url':str(r.url),'excerpt':excerpt,'score':score,'matched_terms':matched}
 
 def fingerprint(url):return hashlib.sha256(url.strip().encode()).hexdigest()
+
+
+DEFAULT_SOURCES = [
+    ("منصة اعتماد — المنافسات والمشتريات", "https://etimad.sa/LandingPage/CompetationContent", "government"),
+    ("زاتكا — المنافسات والمشتريات", "https://zatca.gov.sa/ar/AboutUs/Pages/Procurement-and-Tenders.aspx", "government"),
+    ("زاتكا — خطة المشتريات 2026", "https://zatca.gov.sa/ar/MediaCenter/Elan/Pages/Procurement-and-Tenders-for-the-Fiscal-Year-2026.aspx", "government"),
+    ("الهيئة العامة للموانئ", "https://mawani.gov.sa/", "government"),
+]
+
+_worker_started = False
+
+
+def ensure_default_sources():
+    from app.storage import execute, one, utcnow
+    for name, url, source_type in DEFAULT_SOURCES:
+        if not one("SELECT id FROM source_watches WHERE url=?", (url,)):
+            execute(
+                "INSERT INTO source_watches(name,url,source_type,enabled,last_status,last_checked_at,created_at) VALUES(?,?,?,?,?,?,?)",
+                (name, url, source_type, 1, "جاهز للفحص", None, utcnow()),
+            )
+
+
+def _promote_signal(signal_id, source_name, result):
+    from app.storage import execute, one, utcnow
+    signal = one("SELECT * FROM discovered_signals WHERE id=?", (signal_id,))
+    if not signal or signal.get("opportunity_id"):
+        return signal.get("opportunity_id") if signal else None
+    now = utcnow()
+    opportunity_id = execute(
+        """INSERT INTO opportunities(company_name,source_url,signal,score,stage,estimated_value,currency,owner,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            source_name,
+            result["url"],
+            result["excerpt"][:1400],
+            result["score"],
+            "qualified",
+            0,
+            "SAR",
+            "محرك الفرص الآلي",
+            now,
+            now,
+        ),
+    )
+    execute("UPDATE discovered_signals SET status='promoted',opportunity_id=? WHERE id=?", (opportunity_id, signal_id))
+    services = []
+    matched = " ".join(result.get("matched_terms") or []).lower()
+    if any(x in matched for x in ("تخليص", "جمرك", "customs", "clearance", "broker")):
+        services.append("التخليص الجمركي")
+    if any(x in matched for x in ("نقل", "شاحن", "transport", "trucking", "fleet")):
+        services.append("النقل")
+    if any(x in matched for x in ("مستودع", "تخزين", "warehouse", "storage", "warehousing")):
+        services.append("التخزين")
+    service_text = "، ".join(services) or "الخدمات اللوجستية"
+    proposal = (
+        "مسودة آلية — غير مرسلة\n\n"
+        f"السادة/ {source_name}،\n"
+        f"اطلعنا على الفرصة المنشورة المتعلقة بخدمات {service_text}. "
+        "تقدم آفاق طويق خدمات التخليص الجمركي والنقل والتخزين عبر المنافذ الجمركية السعودية، "
+        "ونرغب في مراجعة نطاق العمل والمتطلبات لتقديم عرض فني وتجاري مناسب.\n\n"
+        "يجب مراجعة المصدر والمتطلبات وبيانات التواصل قبل اعتماد الإرسال."
+    )
+    intelligence_id = execute(
+        """INSERT INTO opportunity_intelligence(opportunity_id,priority,intent,services,evidence,next_action,proposal_draft,follow_up_status,generated_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            opportunity_id,
+            "P1" if result["score"] >= 80 else "P2",
+            "High" if result["score"] >= 70 else "Medium",
+            service_text,
+            result["excerpt"][:1400],
+            "مراجعة رابط المصدر والموعد والمتطلبات ثم اعتماد مسودة التواصل.",
+            proposal,
+            "draft",
+            now,
+            now,
+        ),
+    )
+    message_id = execute(
+        """INSERT INTO outbound_messages(opportunity_id,channel,recipient,subject,body,proposal_text,status,provider,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            opportunity_id,
+            "email",
+            "",
+            "طلب تفاصيل فرصة خدمات لوجستية — آفاق طويق",
+            proposal,
+            proposal,
+            "draft",
+            "pending_channel",
+            now,
+            now,
+        ),
+    )
+    approval_id = execute(
+        """INSERT INTO approvals(kind,entity_type,entity_id,status,notes,created_at)
+           VALUES(?,?,?,?,?,?)""",
+        (
+            "outreach",
+            "outbound_message",
+            message_id,
+            "pending",
+            f"فرصة آلية #{opportunity_id}: راجع المصدر وبيانات التواصل قبل الإرسال.",
+            now,
+        ),
+    )
+    execute("UPDATE outbound_messages SET approval_id=? WHERE id=?", (approval_id, message_id))
+    return opportunity_id
+
+
+def run_discovery_cycle():
+    from app.storage import rows, one, execute, utcnow
+    ensure_default_sources()
+    stats = {"checked": 0, "signals": 0, "opportunities": 0, "errors": 0}
+    for source in rows("SELECT * FROM source_watches WHERE enabled=1 ORDER BY id"):
+        stats["checked"] += 1
+        try:
+            result = fetch_public(source["url"])
+            digest = hashlib.sha256(
+                (result["title"] + "|" + result["excerpt"]).encode("utf-8")
+            ).hexdigest()[:20]
+            signal_url = result["url"].split("#", 1)[0] + "#signal-" + digest
+            signal = one("SELECT id,opportunity_id FROM discovered_signals WHERE url=?", (signal_url,))
+            if not signal and result["score"] >= 25:
+                signal_id = execute(
+                    """INSERT INTO discovered_signals(source_watch_id,title,url,company_name,excerpt,score,matched_terms,status,discovered_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        source["id"],
+                        result["title"][:500],
+                        signal_url,
+                        source["name"],
+                        result["excerpt"],
+                        result["score"],
+                        "، ".join(result["matched_terms"]),
+                        "new",
+                        utcnow(),
+                    ),
+                )
+                stats["signals"] += 1
+                if result["score"] >= 50:
+                    _promote_signal(signal_id, source["name"], result)
+                    stats["opportunities"] += 1
+            execute(
+                "UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?",
+                (f"تم الفحص — درجة {result['score']}", utcnow(), source["id"]),
+            )
+        except Exception as exc:
+            stats["errors"] += 1
+            execute(
+                "UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?",
+                ("تعذر الفحص: " + str(exc)[:180], utcnow(), source["id"]),
+            )
+    return stats
+
+
+def start_discovery_worker():
+    global _worker_started
+    if _worker_started or os.getenv("DISCOVERY_AUTO_ENABLED", "1") != "1":
+        return
+    _worker_started = True
+
+    def loop():
+        time.sleep(20)
+        while True:
+            try:
+                run_discovery_cycle()
+            except Exception:
+                pass
+            time.sleep(max(900, int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "21600"))))
+
+    threading.Thread(target=loop, name="afaaq-discovery", daemon=True).start()
