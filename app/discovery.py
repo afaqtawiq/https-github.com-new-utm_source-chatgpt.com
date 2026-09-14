@@ -2,6 +2,8 @@ import re, socket, ipaddress, hashlib, os, threading, time
 from urllib.parse import urlparse, urljoin
 import httpx
 
+from app.search_connectors import external_search_candidates
+
 TERMS={
  'customs':['تخليص جمركي','مخلص جمركي','التخليص الجمركي','customs clearance','customs broker','clearance services'],
  'transport':['نقل بري','خدمات النقل','ناقلة','شاحنات','transport services','road transport','trucking','fleet'],
@@ -300,12 +302,62 @@ def _scan_registered_customers():
             stats["customer_opportunities"] += 1
     return stats
 
+
+def _scan_external_search():
+    from app.storage import one, execute, utcnow
+    items, statuses = external_search_candidates()
+    connector_urls = {
+        "google_maps": ("Google Maps — بحث الشركات", "https://places.googleapis.com/v1/places:searchText"),
+        "web_search": ("محرك البحث — فرص السوق", "https://api.search.brave.com/res/v1/web/search"),
+    }
+    source_ids = {}
+    for key, (name, url) in connector_urls.items():
+        source = one("SELECT id FROM source_watches WHERE url=?", (url,))
+        if source:
+            source_ids[key] = source["id"]
+            execute("UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?",
+                    (statuses.get(key, "غير معروف"), utcnow(), source["id"]))
+        else:
+            source_ids[key] = execute(
+                "INSERT INTO source_watches(name,url,source_type,enabled,last_status,last_checked_at,created_at) VALUES(?,?,?,?,?,?,?)",
+                (name, url, "api_connector", 0, statuses.get(key, "غير معروف"), utcnow(), utcnow()),
+            )
+    stats = {"external_checked": len(items), "external_signals": 0, "external_opportunities": 0}
+    for item in items:
+        source_key = "google_maps" if "google.com/maps" in item["url"] else "web_search"
+        digest = hashlib.sha256((item["url"] + "|" + item["title"]).encode("utf-8")).hexdigest()[:20]
+        signal_url = item["url"].split("#", 1)[0] + "#external-" + digest
+        if one("SELECT id FROM discovered_signals WHERE url=?", (signal_url,)):
+            continue
+        signal_id = execute(
+            """INSERT INTO discovered_signals(source_watch_id,title,url,company_name,excerpt,score,matched_terms,status,discovered_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                source_ids.get(source_key),
+                item["title"],
+                signal_url,
+                item.get("company_name") or item["title"],
+                item["excerpt"],
+                item["score"],
+                "، ".join(item["matched_terms"]),
+                "new",
+                utcnow(),
+            ),
+        )
+        stats["external_signals"] += 1
+        if item["score"] >= 60:
+            _promote_signal(signal_id, item.get("company_name") or item["title"], item)
+            stats["external_opportunities"] += 1
+    return stats
+
 def run_discovery_cycle():
     from app.storage import rows, one, execute, utcnow
     ensure_default_sources()
     stats = {"checked": 0, "signals": 0, "opportunities": 0, "errors": 0}
     customer_stats = _scan_registered_customers()
     stats.update(customer_stats)
+    external_stats = _scan_external_search()
+    stats.update(external_stats)
     for source in rows("SELECT * FROM source_watches WHERE enabled=1 ORDER BY id"):
         stats["checked"] += 1
         try:
