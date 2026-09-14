@@ -351,53 +351,40 @@ def _scan_external_search():
     return stats
 
 def _activate_customer_pilot(limit=10):
-    """Promote up to ten real registered customers into a controlled sales pilot."""
-    from app.storage import rows, one
+    """Select exactly ten real contacts for the controlled sales pilot."""
+    from app.storage import rows, one, execute
 
-    active = one(
-        "SELECT COUNT(*) n FROM opportunities WHERE source_url LIKE 'internal://customer/%%'"
-    )["n"]
+    pilot_owner = "حملة تجريبية — 10 فرص"
+    active = one("SELECT COUNT(*) n FROM opportunities WHERE owner=?", (pilot_owner,))["n"]
     needed = max(0, limit - active)
     activated = 0
-    if not needed:
-        return {"pilot_target": limit, "pilot_active": active, "pilot_activated": 0}
-
-    candidates = rows(
-        """SELECT * FROM discovered_signals
-           WHERE url LIKE 'internal://customer/%%' AND opportunity_id IS NULL
-           ORDER BY score DESC,id ASC LIMIT ?""",
-        (needed * 5,),
-    )
-    for signal in candidates:
-        parts = signal["url"].split("/")
-        if len(parts) < 2:
-            continue
-        kind, raw_id = parts[-2], parts[-1]
-        if kind not in ("account", "directory") or not raw_id.isdigit():
-            continue
-        table = "accounts" if kind == "account" else "customer_directory"
-        contact = one(
-            f"SELECT COALESCE(phone,'') phone,COALESCE(email,'') email FROM {table} WHERE id=?",
-            (int(raw_id),),
+    if needed:
+        candidates = rows(
+            """SELECT id,company_name,source_url,score FROM opportunities
+               WHERE source_url LIKE 'internal://customer/%%'
+                 AND COALESCE(owner,'')<>?
+               ORDER BY score DESC,id ASC LIMIT ?""",
+            (pilot_owner, needed * 8),
         )
-        if not contact or not (contact.get("phone") or contact.get("email")):
-            continue
-        result = {
-            "title": signal["title"],
-            "url": signal["url"],
-            "excerpt": signal["excerpt"],
-            "score": max(65, signal["score"]),
-            "matched_terms": [
-                x.strip() for x in (signal.get("matched_terms") or "").split("،") if x.strip()
-            ],
-            "phone": (contact.get("phone") or "").strip(),
-            "email": (contact.get("email") or "").strip(),
-            "recipient": (contact.get("email") or contact.get("phone") or "").strip(),
-        }
-        _promote_signal(signal["id"], signal["company_name"], result)
-        activated += 1
-        if activated >= needed:
-            break
+        for opportunity in candidates:
+            parts = opportunity["source_url"].split("/")
+            kind, raw_id = parts[-2], parts[-1]
+            if kind not in ("account", "directory") or not raw_id.isdigit():
+                continue
+            table = "accounts" if kind == "account" else "customer_directory"
+            contact = one(
+                f"SELECT COALESCE(phone,'') phone,COALESCE(email,'') email FROM {table} WHERE id=?",
+                (int(raw_id),),
+            )
+            if not contact or not (contact.get("phone") or contact.get("email")):
+                continue
+            execute(
+                "UPDATE opportunities SET owner=?,stage='qualified',updated_at=? WHERE id=?",
+                (pilot_owner, __import__("app.storage", fromlist=["utcnow"]).utcnow(), opportunity["id"]),
+            )
+            activated += 1
+            if activated >= needed:
+                break
     return {
         "pilot_target": limit,
         "pilot_active": active + activated,
