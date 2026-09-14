@@ -43,6 +43,44 @@ def score_text(text):
     if any(x.lower() in t for x in NEGATIVE):score=max(0,score-35)
     return score,matched[:20]
 
+
+def extract_candidates(raw, base_url):
+    candidates = []
+    seen = set()
+    directory_mode = any(host in base_url.lower() for host in (
+        "saudiexports.gov.sa", "investindubai.gov.ae"
+    ))
+    for match in re.finditer(r'(?is)<a\\b[^>]*href=["\\\']([^"\\\']+)["\\\'][^>]*>(.*?)</a>', raw):
+        href = urljoin(base_url, match.group(1).strip())
+        parsed = urlparse(href)
+        if parsed.scheme not in ("http", "https") or parsed.hostname != urlparse(base_url).hostname:
+            continue
+        title = re.sub(r"(?s)<[^>]+>", " ", match.group(2))
+        title = re.sub(r"\\s+", " ", title).strip()
+        if len(title) < 5 or href in seen:
+            continue
+        around = raw[max(0, match.start()-280):min(len(raw), match.end()+520)]
+        _, context = strip_html(around)
+        score, matched = score_text(title + " " + context)
+        if directory_mode and (
+            "company" in context.lower() or "city" in context.lower() or
+            "شركة" in context or "مؤسسة" in context or "مصنع" in context
+        ):
+            score = max(score, 62)
+            matched = list(dict.fromkeys(matched + ["شركة تجارية محتملة"]))
+        if score < 30:
+            continue
+        seen.add(href)
+        candidates.append({
+            "title": title[:500],
+            "url": href,
+            "excerpt": context[:900],
+            "score": score,
+            "matched_terms": matched,
+        })
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    return candidates[:40]
+
 def fetch_public(url):
     if not safe_url(url): raise ValueError('URL is not allowed')
     headers={'User-Agent':'GulfLogisticsAI/1.0 (+public-source-monitor; contact=admin)'}
@@ -58,7 +96,8 @@ def fetch_public(url):
         raw=r.text[:500000]
     title,text=strip_html(raw); score,matched=score_text(title+' '+text)
     excerpt=text[:900]
-    return {'title':title or urlparse(url).hostname,'url':str(r.url),'excerpt':excerpt,'score':score,'matched_terms':matched}
+    return {'title':title or urlparse(url).hostname,'url':str(r.url),'excerpt':excerpt,'score':score,'matched_terms':matched,
+            'candidates':extract_candidates(raw,str(r.url))}
 
 def fingerprint(url):return hashlib.sha256(url.strip().encode()).hexdigest()
 
@@ -68,6 +107,12 @@ DEFAULT_SOURCES = [
     ("زاتكا — المنافسات والمشتريات", "https://zatca.gov.sa/ar/AboutUs/Pages/Procurement-and-Tenders.aspx", "government"),
     ("زاتكا — خطة المشتريات 2026", "https://zatca.gov.sa/ar/MediaCenter/Elan/Pages/Procurement-and-Tenders-for-the-Fiscal-Year-2026.aspx", "government"),
     ("الهيئة العامة للموانئ", "https://mawani.gov.sa/", "government"),
+    ("دليل المصدرين السعوديين", "https://www.saudiexports.gov.sa/en/ExportersDirectory?Source=%2Fen%2FExportersDirectory%2FPages%2F", "company_directory"),
+    ("الإمارات — التحقق من الرخص والشركات", "https://u.ae/en/information-and-services/business/important-digital-services/inquire-about-licences-names-and-activities", "company_directory"),
+    ("دليل شركات دبي", "https://www.investindubai.gov.ae/ar/dubai-business-directory-search", "company_directory"),
+    ("حراج — مطلوب تخليص جمركي", "https://haraj.com.sa/search/%D9%85%D8%B7%D9%84%D9%88%D8%A8%2B%D8%AA%D8%AE%D9%84%D9%8A%D8%B5%2B%D8%AC%D9%85%D8%B1%D9%83%D9%8A/", "marketplace"),
+    ("حراج — مطلوب نقل بضائع", "https://haraj.com.sa/search/%D9%85%D8%B7%D9%84%D9%88%D8%A8%2B%D9%86%D9%82%D9%84%2B%D8%A8%D8%B6%D8%A7%D8%A6%D8%B9/", "marketplace"),
+    ("حراج — مطلوب مستودع أو تخزين", "https://haraj.com.sa/search/%D9%85%D8%B7%D9%84%D9%88%D8%A8%2B%D9%85%D8%B3%D8%AA%D9%88%D8%AF%D8%B9%2B%D8%AA%D8%AE%D8%B2%D9%8A%D9%86/", "marketplace"),
 ]
 
 _worker_started = False
@@ -265,34 +310,40 @@ def run_discovery_cycle():
         stats["checked"] += 1
         try:
             result = fetch_public(source["url"])
-            digest = hashlib.sha256(
-                (result["title"] + "|" + result["excerpt"]).encode("utf-8")
-            ).hexdigest()[:20]
-            signal_url = result["url"].split("#", 1)[0] + "#signal-" + digest
-            signal = one("SELECT id,opportunity_id FROM discovered_signals WHERE url=?", (signal_url,))
-            if not signal and result["score"] >= 25:
+            scan_results = result.get("candidates") or [result]
+            highest_score = 0
+            for candidate in scan_results:
+                highest_score = max(highest_score, candidate["score"])
+                digest = hashlib.sha256(
+                    (candidate["title"] + "|" + candidate["excerpt"]).encode("utf-8")
+                ).hexdigest()[:20]
+                candidate_url = candidate["url"].split("#", 1)[0]
+                signal_url = candidate_url + "#signal-" + digest
+                signal = one("SELECT id,opportunity_id FROM discovered_signals WHERE url=?", (signal_url,))
+                if signal or candidate["score"] < 25:
+                    continue
                 signal_id = execute(
                     """INSERT INTO discovered_signals(source_watch_id,title,url,company_name,excerpt,score,matched_terms,status,discovered_at)
                        VALUES(?,?,?,?,?,?,?,?,?)""",
                     (
                         source["id"],
-                        result["title"][:500],
+                        candidate["title"][:500],
                         signal_url,
                         source["name"],
-                        result["excerpt"],
-                        result["score"],
-                        "، ".join(result["matched_terms"]),
+                        candidate["excerpt"],
+                        candidate["score"],
+                        "، ".join(candidate["matched_terms"]),
                         "new",
                         utcnow(),
                     ),
                 )
                 stats["signals"] += 1
-                if result["score"] >= 50:
-                    _promote_signal(signal_id, source["name"], result)
+                if candidate["score"] >= 50:
+                    _promote_signal(signal_id, source["name"], candidate)
                     stats["opportunities"] += 1
             execute(
                 "UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?",
-                (f"تم الفحص — درجة {result['score']}", utcnow(), source["id"]),
+                (f"تم الفحص — {len(scan_results)} نتيجة — أعلى درجة {highest_score}", utcnow(), source["id"]),
             )
         except Exception as exc:
             stats["errors"] += 1
