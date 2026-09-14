@@ -75,18 +75,31 @@ def normalize_text(value):
 def parse_command(raw):
     text = normalize_text(raw).strip(" .،؟!")
     text = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
-    add_driver = re.match(
-        r"^(?:اضف|سجل|احفظ)\\s+(?:السائق|سائق)\\s+(.+?)\\s+(?:ورقمه|ورقم|رقمه|رقم|جواله|جوال|هاتفه|هاتف)\\s*([+0-9\\s()\\-]{8,22})(?:\\s+(?:ومركبته|مركبته|نوع المركبة|المركبة)\\s+(.+))?$",
-        text, flags=re.IGNORECASE,
-    )
-    if add_driver:
-        return {
-            "action_type": "add_driver",
-            "target": add_driver.group(1).strip(" ،,."),
-            "phone": add_driver.group(2).strip(),
-            "vehicle_type": (add_driver.group(3) or "غير محدد").strip(),
-            "content": "",
-        }
+    if any(word in text for word in ("سائق", "السائق", "سايق", "السايق")):
+        phone_match = re.search(r"(?:\\+?966|00966|0)?5[0-9\\s()\\-]{8,13}", text)
+        add_intent = any(word in text for word in (
+            "اضف", "سجل", "احفظ", "اسم السائق", "اسم السايق", "بيانات السائق", "بيانات السايق"
+        ))
+        if phone_match and add_intent:
+            phone = phone_match.group(0).strip()
+            prefix = text[:phone_match.start()]
+            name = re.sub(
+                r"^(?:اضف|سجل|احفظ)?\\s*(?:اسم\\s+)?(?:السائق|سائق|السايق|سايق)\\s*",
+                "", prefix,
+            )
+            name = re.sub(
+                r"\\s*(?:ورقمه|ورقم|رقمه|رقم|رقم جواله|رقم جوال|جواله|جوال|هاتفه|هاتف)\\s*$",
+                "", name,
+            ).strip(" :،,.")
+            vehicle_match = re.search(r"(?:ومركبته|مركبته|نوع المركبة|المركبة)\\s+(.+)$", text[phone_match.end():])
+            if name:
+                return {
+                    "action_type": "add_driver",
+                    "target": name,
+                    "phone": phone,
+                    "vehicle_type": (vehicle_match.group(1) if vehicle_match else "غير محدد").strip(),
+                    "content": "",
+                }
     broadcast = re.match(r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:واتساب|واتس)?\\s*(?:الى|ل)?\\s*(?:جميع|كل)\\s+السائقين\\s*(.*)$", text, flags=re.IGNORECASE)
     if broadcast:
         content = re.sub(r"^(?:بخصوص|محتوى|وقل|برسالة)\\s+", "", broadcast.group(1).strip())
@@ -192,7 +205,9 @@ def action_label(kind):
 
 @router.get("/commands", response_class=HTMLResponse)
 def commands_page(request: Request):
-    current = session(request)
+    current = get_session(request.cookies.get("gla_session"))
+    if not current:
+        return RedirectResponse("/login", 303)
     items = rows("""SELECT a.*,c.name contact_name,o.company_name FROM command_actions a
         LEFT JOIN sales_contacts c ON c.id=a.contact_id
         LEFT JOIN opportunities o ON o.id=a.opportunity_id ORDER BY a.id DESC LIMIT 50""")
@@ -212,7 +227,10 @@ def commands_page(request: Request):
 
 @router.post("/commands")
 async def create_command(request: Request):
-    current = session(request); data = form(await request.body())
+    current = get_session(request.cookies.get("gla_session"))
+    if not current:
+        return RedirectResponse("/login", 303)
+    data = form(await request.body())
     if data.get("csrf") != current["csrf"]: raise HTTPException(403)
     raw = (data.get("command") or "").strip()
     if not raw or len(raw) > 1000: raise HTTPException(400, "Command must contain 1-1000 characters")
@@ -228,7 +246,7 @@ async def create_command(request: Request):
         response.background = tasks
         return response
     if parsed["action_type"] == "unknown":
-        return HTMLResponse("<html lang=ar dir=rtl><meta charset=utf-8><body style='font-family:Arial;padding:30px'><h2>لم أفهم الأمر.</h2><p>ابدأ بـ: اتصل على، أرسل واتساب إلى، أرسل بريدًا إلى، أو افتح.</p><a href=/commands>عودة</a></body></html>", 400)
+        return HTMLResponse("<html lang=ar dir=rtl><meta charset=utf-8><body style='font-family:Arial;padding:30px'><h2>لم أفهم الأمر.</h2><p>جرّب: أضف السائق محمد ورقمه 0501234567، تواصل مع العميل شركة النور، شغّل البحث، أو افتح الشحنات.</p><a href=/commands>عودة</a></body></html>", 400)
     if parsed["action_type"] == "add_driver":
         if current.get("role") != "admin":
             raise HTTPException(403, "إضافة السائقين تتطلب صلاحية الإدارة")
@@ -279,23 +297,25 @@ async def create_command(request: Request):
         reason = "لم نجد جهة اتصال مطابقة" if not matches else "وجدنا أكثر من جهة مطابقة؛ اكتب الاسم بشكل أدق"
         return HTMLResponse(f"<html lang=ar dir=rtl><meta charset=utf-8><body style='font-family:Arial;padding:30px'><h2>{e(reason)}</h2><p>الهدف: {e(parsed['target'])}</p><a href=/commands>عودة</a></body></html>", 409)
     contact = matches[0]
-    if parsed["action_type"] == "auto_contact":
+    auto_selected = parsed["action_type"] == "auto_contact"
+    if auto_selected:
         if contact.get("verified") and contact.get("phone"):
             parsed["action_type"] = "whatsapp"
         elif contact.get("email"):
             parsed["action_type"] = "email"
         elif contact.get("phone"):
-            raise HTTPException(409, "رقم العميل موجود لكنه يحتاج تحقق قبل تجهيز تواصل واتساب")
+            parsed["action_type"] = "whatsapp"
+            parsed["requires_phone_verification"] = True
         else:
             raise HTTPException(409, "العميل مسجل لكن لا توجد له وسيلة تواصل")
     recipient = contact.get("email") if parsed["action_type"] == "email" else contact.get("phone")
     if not recipient: raise HTTPException(409, "Selected contact has no recipient for this channel")
-    if parsed["action_type"] in ("call", "whatsapp") and not contact.get("verified"):
-        raise HTTPException(409, "Phone contact must be verified before preparing external communication")
+    if parsed["action_type"] in ("call", "whatsapp") and not contact.get("verified") and not auto_selected:
+        raise HTTPException(409, "رقم العميل يحتاج تحقق قبل تجهيز الاتصال المباشر")
     content = parsed["content"] or ("مناقشة احتياج العميل وتحديد الخدمة المناسبة دون تقديم التزام أو سعر نهائي." if parsed["action_type"] == "call" else "مرحبًا، معك فريق آفاق طويق. نرغب في مناقشة احتياجكم اللوجستي وإعداد عرض مناسب بعد تأكيد التفاصيل.")
     now = utcnow()
     action_id = execute("""INSERT INTO command_actions(raw_command,action_type,target_name,contact_id,opportunity_id,recipient,content,status,parsed_payload,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (raw, parsed["action_type"], parsed["target"], contact["id"], contact["opportunity_id"], recipient, content, "draft", json.dumps(parsed, ensure_ascii=False), current["user_id"], now, now))
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (raw, parsed["action_type"], parsed["target"], contact["id"], contact["opportunity_id"], recipient, content, ("needs_verification" if parsed.get("requires_phone_verification") else "draft"), json.dumps(parsed, ensure_ascii=False), current["user_id"], now, now))
     log(current["user_id"], "command_draft_created", "command_action", action_id, f"{parsed['action_type']} draft prepared; no external action")
     return RedirectResponse(f"/commands/{action_id}", 303)
 
