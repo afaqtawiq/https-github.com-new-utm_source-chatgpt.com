@@ -1,5 +1,6 @@
 import hashlib
 import os
+import urllib.parse
 
 import httpx
 
@@ -28,10 +29,39 @@ WEB_QUERIES = [
 ]
 
 
+def _manual_search_candidates(queries, channel):
+    """Expose safe one-click searches until API credentials are connected."""
+    items = []
+    for query in queries:
+        encoded = urllib.parse.quote_plus(query)
+        if channel == "google_maps":
+            url = "https://www.google.com/maps/search/?api=1&query=" + encoded
+            title = "بحث خرائط Google — " + query
+            matched = ["Google Maps", "بحث جاهز للمراجعة"]
+        else:
+            url = "https://www.google.com/search?q=" + encoded
+            title = "بحث الويب — " + query
+            matched = ["محرك البحث", "بحث جاهز للمراجعة"]
+        items.append({
+            "title": title[:500],
+            "url": url,
+            "excerpt": (
+                "رابط بحث مباشر أعده النظام للاستخدام الفوري. "
+                "تظهر النتائج داخل المصدر للمراجعة، ولا تتحول إلى فرصة آلية "
+                "حتى يتم ربط مفتاح API والتحقق من بيانات الشركة."
+            ),
+            "score": 35,
+            "matched_terms": matched,
+            "company_name": "بحث سوق جاهز",
+        })
+    return items
+
+
 def google_places_candidates(limit=30):
     key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     if not key:
-        return [], "بانتظار GOOGLE_MAPS_API_KEY"
+        items = _manual_search_candidates(MAP_QUERIES, "google_maps")
+        return items[:limit], f"وضع روابط مباشرة — {min(len(items), limit)} عمليات بحث جاهزة"
     results = []
     seen = set()
     field_mask = "places.id,places.displayName,places.formattedAddress,places.googleMapsUri,places.types"
@@ -64,14 +94,15 @@ def google_places_candidates(limit=30):
                     "company_name": name,
                 })
                 if len(results) >= limit:
-                    return results, f"متصل — {len(results)} نتيجة"
-    return results, f"متصل — {len(results)} نتيجة"
+                    return results, f"متصل آليا — {len(results)} نتيجة"
+    return results, f"متصل آليا — {len(results)} نتيجة"
 
 
 def brave_search_candidates(limit=40):
     key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
     if not key:
-        return [], "بانتظار BRAVE_SEARCH_API_KEY"
+        items = _manual_search_candidates(WEB_QUERIES, "web_search")
+        return items[:limit], f"وضع روابط مباشرة — {min(len(items), limit)} عمليات بحث جاهزة"
     results = []
     seen = set()
     headers = {"Accept": "application/json", "X-Subscription-Token": key}
@@ -108,8 +139,8 @@ def brave_search_candidates(limit=40):
                     "company_name": title[:200],
                 })
                 if len(results) >= limit:
-                    return results, f"متصل — {len(results)} نتيجة"
-    return results, f"متصل — {len(results)} نتيجة"
+                    return results, f"متصل آليا — {len(results)} نتيجة"
+    return results, f"متصل آليا — {len(results)} نتيجة"
 
 
 def external_search_candidates():
