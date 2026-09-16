@@ -193,3 +193,23 @@ def requests_page(request: Request):
             history = "".join("<details><summary>"+escape(str(m["created_at"]))+" — "+escape(m["state"] or "pending")+"</summary><pre>"+escape(m["body"])+"</pre><pre>"+escape(m["reply"])+"</pre></details>" for m in reversed(messages))
             cards.append("<section><h2>"+ref+" — "+escape(item["agent"])+"</h2><p>"+escape(item["status"])+"</p><pre>"+escape(json.dumps(item["fields"],ensure_ascii=False,indent=2))+"</pre>"+history+"</section>")
     return HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>طلبات واتساب</title><style>body{font:17px Tahoma;background:#0b2031;color:#fff;padding:24px}a{color:#ffd978;margin:12px}section{padding:20px;border:1px solid #496071;border-radius:12px;margin:16px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere}details{padding:8px}</style><h1>طلبات واتساب — شواهد وآفاق</h1><p>جمع متطلبات ومراجعة فقط؛ لا تأكيد دفع أو تنفيذ تجاري. آخر 100 طلب و50 رسالة لكل طلب.</p><nav><a href="/dashboard">الرئيسية</a><a href="?agent=shawahid">شواهد</a><a href="?agent=afaaq">آفاق</a><a href="/whatsapp-requests">الجميع</a></nav>'+("".join(cards) or "<p>لا توجد طلبات بعد. تُسجل الرسائل الجديدة بعد تفعيل هذه النسخة.</p>")+"</html>",headers={"Cache-Control":"no-store"})
+
+@router.get("/api/shawahid/intake-feed")
+def intake_feed(request: Request):
+    import time
+    stamp = request.headers.get("x-intake-time", "")
+    signature = request.headers.get("x-intake-signature", "")
+    after = request.query_params.get("after", "0")
+    secret = os.getenv("SHAWAHID_INTAKE_SECRET", "")
+    try:
+        fresh = abs(time.time() - int(stamp)) <= 120
+        cursor = max(0, int(after))
+    except ValueError:
+        return JSONResponse({"error":"Invalid request"},status_code=401)
+    signed = ("shawahid-intake-v1:" + stamp + ":" + str(cursor)).encode()
+    if not fresh or not valid_signature(signed, signature, secret):
+        return JSONResponse({"error":"Invalid signature"},status_code=401)
+    ensure_intake_tables()
+    with db() as c:
+        rows = c.execute("SELECT id,fields,status,updated_at FROM zernio_requests WHERE agent='shawahid' AND id>%s ORDER BY id LIMIT 100",(cursor,)).fetchall()
+    return JSONResponse({"requests":[{"id":r["id"],"fields":r["fields"],"status":r["status"],"updatedAt":str(r["updated_at"])} for r in rows]},headers={"Cache-Control":"no-store"})
