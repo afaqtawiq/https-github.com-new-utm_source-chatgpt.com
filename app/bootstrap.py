@@ -1,5 +1,6 @@
 from fastapi.responses import JSONResponse,RedirectResponse
 from app.main import app
+from app.zernio_receiver import router as zernio_receiver_router
 from app.verification import router as verification_router
 from app.intelligence_ui import router as intelligence_router
 from app.sales_copilot import router as sales_copilot_router
@@ -57,7 +58,7 @@ def sensitive_permission(request):
  return None
 @app.middleware('http')
 async def enterprise_security_guard(request,call_next):
- if request.url.path not in ('/webhooks/retell','/webhooks/whatsapp','/webhooks/twilio/whatsapp') and not csrf_guard(request):
+ if request.url.path not in ('/webhooks/retell','/webhooks/whatsapp','/webhooks/twilio/whatsapp','/webhooks/zernio') and not csrf_guard(request):
   code=429 if request.url.path=='/login' else 403;return JSONResponse({'detail':'Too many login requests' if code==429 else 'Cross-site mutation blocked'},status_code=code)
  sess=get_session(request.cookies.get('gla_session'))
  if sess:
@@ -83,3 +84,5 @@ app.include_router(freight_workflow_router)
 app.include_router(shipping_agents_router)
 app.include_router(saber_workflow_router)
 app.include_router(social_content_router)
+
+app.include_router(zernio_receiver_router)
