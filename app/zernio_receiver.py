@@ -18,13 +18,31 @@ def valid_signature(raw, signature, secret):
     return bool(secret and signature and hmac.compare_digest(
         hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest(), signature))
 
-def choose_agent(text, interactive="", previous=None):
+def control_text(text):
+    text = re.sub(r"[\u064b-\u065f\u0670ـ]", "", text.casefold())
+    return " ".join(re.sub(r"[^\w\s]", " ", text).split())
+
+def is_menu_request(text):
+    return control_text(text) in {
+        "hi", "hello", "hey", "start", "menu", "restart", "back",
+        "مرحبا", "اهلا", "أهلا", "السلام عليكم", "السلام عليكم ورحمة الله وبركاته",
+        "القائمة", "القائمة الرئيسية", "البداية", "ابدأ", "ابدا", "رجوع"}
+
+def explicit_agent(text, interactive=""):
     if interactive == "route_afaaq": return "afaaq"
     if interactive == "route_shawahid": return "shawahid"
-    if previous and not re.search(r"آفاق|افاق|طويق|شواهد|shawahid|afaaq", text, re.I): return previous
-    if re.search(r"آفاق|افاق|طويق|تخليص|جمرك|شحن|نقل|تخزين|customs|clearance|shipping|freight|logistics", text, re.I): return "afaaq"
-    if re.search(r"شواهد|تسويق|محتوى|أفلييت|shawahid|marketing|content|affiliate|automation", text, re.I): return "shawahid"
-    return previous
+    value = control_text(text)
+    if value in {"آفاق طويق", "افاق طويق", "آفاق", "افاق", "afaaq", "afaaq tuwaiq"}:
+        return "afaaq"
+    if value in {"شواهد الهدف", "شواهد", "shawahid", "shawahid alhadaf", "shawahid al hadaf"}:
+        return "shawahid"
+    return None
+
+def choose_agent(text, interactive="", previous=None):
+    selected = explicit_agent(text, interactive)
+    if selected: return selected
+    if is_menu_request(text): return None
+    return previous if previous in ("afaaq", "shawahid") else None
 
 def response_body(agent):
     if agent == "afaaq":
@@ -47,7 +65,7 @@ def ensure_tables():
 
 @router.get("/webhooks/zernio")
 async def health():
-    return {"receiver":"zernio", "requires_signature":True,
+    return {"receiver":"zernio", "routing_version":"team-menu-v2", "requires_signature":True,
             "configured":bool(os.getenv("ZERNIO_API_KEY") and os.getenv("ZERNIO_WEBHOOK_SECRET"))}
 
 @router.post("/webhooks/zernio")
@@ -92,10 +110,15 @@ async def receive(request: Request):
         claim = c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'sending') ON CONFLICT DO NOTHING RETURNING event_id",(event_id,conversation_id)).fetchone()
         if not claim: return {"ok":True,"duplicate":True}
         previous = c.execute("SELECT agent FROM zernio_conversation_agents WHERE conversation_id=%s",(conversation_id,)).fetchone()
-        agent = choose_agent(str(message.get("text") or ""), str(metadata.get("interactiveId") or ""), previous["agent"] if previous else None)
+        text = str(message.get("text") or "")
+        interactive = str(metadata.get("interactiveId") or "")
+        selection = explicit_agent(text, interactive) is not None
+        agent = choose_agent(text, interactive, previous["agent"] if previous else None)
         if agent:
             c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
-        reply = intake_reply(c, agent, conversation_id, event_id, str(message.get("text") or ""), bool(metadata.get("interactiveId")), message)
+        else:
+            c.execute("DELETE FROM zernio_conversation_agents WHERE conversation_id=%s", (conversation_id,))
+        reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",
@@ -138,7 +161,7 @@ def next_reply(agent, fields, pending, text, selection=False):
     normalized = text.strip()
     control = normalized.casefold()
     status_query = control in ("status", "حالة الطلب", "متابعة", "الحالة")
-    if pending and normalized and not selection and not status_query:
+    if pending and normalized and not selection and not status_query and not is_menu_request(text):
         fields[pending] = normalized[:12000]
     missing = [(key, question) for key, question in FIELDS[agent] if not fields.get(key)]
     if missing:
