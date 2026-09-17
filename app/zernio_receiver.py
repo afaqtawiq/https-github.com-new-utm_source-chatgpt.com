@@ -65,7 +65,9 @@ def ensure_tables():
 
 @router.get("/webhooks/zernio")
 async def health():
-    return {"receiver":"zernio", "routing_version":"team-menu-v2", "requires_signature":True,
+    return {"receiver":"zernio", "routing_version":"owner-commands-v1", "requires_signature":True,
+            "owner_commands_configured":bool(os.getenv("WHATSAPP_COMMAND_OWNER") and os.getenv("WHATSAPP_COMMAND_ACCOUNT_ID")),
+            "voice_commands_configured":bool(os.getenv("OPENAI_API_KEY")),
             "configured":bool(os.getenv("ZERNIO_API_KEY") and os.getenv("ZERNIO_WEBHOOK_SECRET"))}
 
 @router.post("/webhooks/zernio")
@@ -105,20 +107,26 @@ async def receive(request: Request):
         return JSONResponse({"error":"Missing event or conversation identifiers"}, status_code=400)
     ensure_tables()
     ensure_intake_tables()
+    from app.whatsapp_admin import owner_sender, admin_reply
+    sender = owner_sender(p)
     with db() as c:
         c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
         claim = c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'sending') ON CONFLICT DO NOTHING RETURNING event_id",(event_id,conversation_id)).fetchone()
         if not claim: return {"ok":True,"duplicate":True}
-        previous = c.execute("SELECT agent FROM zernio_conversation_agents WHERE conversation_id=%s",(conversation_id,)).fetchone()
-        text = str(message.get("text") or "")
-        interactive = str(metadata.get("interactiveId") or "")
-        selection = explicit_agent(text, interactive) is not None
-        agent = choose_agent(text, interactive, previous["agent"] if previous else None)
-        if agent:
-            c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
+        if sender:
+            agent = "owner"
+            reply = await admin_reply(c, p, sender)
         else:
-            c.execute("DELETE FROM zernio_conversation_agents WHERE conversation_id=%s", (conversation_id,))
-        reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message)
+            previous = c.execute("SELECT agent FROM zernio_conversation_agents WHERE conversation_id=%s",(conversation_id,)).fetchone()
+            text = str(message.get("text") or "")
+            interactive = str(metadata.get("interactiveId") or "")
+            selection = explicit_agent(text, interactive) is not None
+            agent = choose_agent(text, interactive, previous["agent"] if previous else None)
+            if agent:
+                c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
+            else:
+                c.execute("DELETE FROM zernio_conversation_agents WHERE conversation_id=%s", (conversation_id,))
+            reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",
