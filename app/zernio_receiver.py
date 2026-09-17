@@ -1,4 +1,5 @@
 """Signed Zernio WhatsApp intake. Separate from browser/session authentication."""
+import asyncio
 import hashlib
 import hmac
 import json
@@ -7,6 +8,7 @@ import re
 from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Request
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from app.storage import db, get_session
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -109,24 +111,30 @@ async def receive(request: Request):
     ensure_intake_tables()
     from app.whatsapp_admin import owner_sender, admin_reply
     sender = owner_sender(p)
-    with db() as c:
-        c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
-        claim = c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'sending') ON CONFLICT DO NOTHING RETURNING event_id",(event_id,conversation_id)).fetchone()
-        if not claim: return {"ok":True,"duplicate":True}
-        if sender:
-            agent = "owner"
-            reply = await admin_reply(c, p, sender)
-        else:
-            previous = c.execute("SELECT agent FROM zernio_conversation_agents WHERE conversation_id=%s",(conversation_id,)).fetchone()
-            text = str(message.get("text") or "")
-            interactive = str(metadata.get("interactiveId") or "")
-            selection = explicit_agent(text, interactive) is not None
-            agent = choose_agent(text, interactive, previous["agent"] if previous else None)
-            if agent:
-                c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
+    def prepare_reply():
+        with db() as c:
+            c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
+            claim = c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'sending') ON CONFLICT DO NOTHING RETURNING event_id",(event_id,conversation_id)).fetchone()
+            if not claim: return None
+            if sender:
+                agent = "owner"
+                reply = asyncio.run(admin_reply(c, p, sender))
             else:
-                c.execute("DELETE FROM zernio_conversation_agents WHERE conversation_id=%s", (conversation_id,))
-            reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message)
+                previous = c.execute("SELECT agent FROM zernio_conversation_agents WHERE conversation_id=%s",(conversation_id,)).fetchone()
+                text = str(message.get("text") or "")
+                interactive = str(metadata.get("interactiveId") or "")
+                selection = explicit_agent(text, interactive) is not None
+                agent = choose_agent(text, interactive, previous["agent"] if previous else None)
+                if agent:
+                    c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
+                else:
+                    c.execute("DELETE FROM zernio_conversation_agents WHERE conversation_id=%s", (conversation_id,))
+                reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message)
+        return agent, reply
+    prepared = await run_in_threadpool(prepare_reply)
+    if prepared is None:
+        return {"ok":True,"duplicate":True}
+    agent, reply = prepared
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",

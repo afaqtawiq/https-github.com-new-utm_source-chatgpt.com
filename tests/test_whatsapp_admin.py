@@ -45,7 +45,7 @@ class Cursor:
 
 class Connection:
     def __init__(self):
-        self.db = sqlite3.connect(':memory:')
+        self.db = sqlite3.connect(':memory:', check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
             CREATE TABLE drivers(id INTEGER PRIMARY KEY,driver_name TEXT,whatsapp_phone TEXT UNIQUE,
