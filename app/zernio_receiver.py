@@ -225,6 +225,11 @@ def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
             VALUES(%s,%s,%s,%s)""", (event_id,row["id"],text[:20000],reply))
         return {"message": reply}
     fields, pending, status, reply = next_reply(agent, row["fields"], row["pending_field"], text, selection)
+    if agent == "shawahid" and not selection and explicit_updates(agent, text).get("revision"):
+        from app.material_bridge import material_reply
+        reply = material_reply(c, row["id"], event_id, fields["revision"])
+        if explicit_updates(agent, text).get("budget"):
+            reply = "Budget updated: " + fields["budget"] + "\n\n" + reply
     if not text.strip() and not selection:
         reply = ("يرجى إرسال التفاصيل كتابةً؛ المرفقات لم تُحلّل تلقائيًا. " if agent=="afaaq"
                  else "Please send the details as text; attachments are not automatically analyzed. ") + reply
@@ -278,3 +283,6 @@ def intake_feed(request: Request):
     with db() as c:
         rows = c.execute("SELECT id,fields,status,updated_at FROM zernio_requests WHERE agent='shawahid' AND id>%s ORDER BY id LIMIT 100",(cursor,)).fetchall()
     return JSONResponse({"requests":[{"id":r["id"],"fields":r["fields"],"status":r["status"],"updatedAt":str(r["updated_at"])} for r in rows]},headers={"Cache-Control":"no-store"})
+
+from app.material_bridge import router as material_router
+router.include_router(material_router)
