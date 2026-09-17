@@ -156,17 +156,50 @@ def ensure_intake_tables():
             body TEXT NOT NULL, reply TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
 
+def explicit_updates(agent, text):
+    """Only labelled customer fields are updates; prose is never a budget."""
+    labels = {key: key for key, _ in FIELDS[agent]}
+    labels.update({"الميزانية": "budget", "الموعد": "deadline",
+                   "الخدمة": "service", "النشاط": "business", "التعديل": "revision",
+                   "revision": "revision"})
+    allowed = {key for key, _ in FIELDS[agent]} | {"revision"}
+    pattern = r"(?im)^\s*(" + "|".join(map(re.escape, labels)) + r")\s*:\s*"
+    matches = list(re.finditer(pattern, text))
+    updates = {}
+    for index, match in enumerate(matches):
+        key = labels[match.group(1).casefold()]
+        value = text[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(text)].strip()
+        if key in allowed and value:
+            updates[key] = value[:12000]
+    return updates
+
+
 def next_reply(agent, fields, pending, text, selection=False):
     fields = dict(fields)
     normalized = text.strip()
     control = normalized.casefold()
     status_query = control in ("status", "حالة الطلب", "متابعة", "الحالة")
-    if pending and normalized and not selection and not status_query and not is_menu_request(text):
+    updates = explicit_updates(agent, normalized) if not selection and not status_query else {}
+    if updates:
+        fields.update(updates)
+    elif pending and normalized and not selection and not status_query and not is_menu_request(text):
         fields[pending] = normalized[:12000]
     missing = [(key, question) for key, question in FIELDS[agent] if not fields.get(key)]
     if missing:
         key, question = missing[0]
         return fields, key, "collecting", question
+    if normalized and not selection and not status_query and not pending:
+        if updates:
+            changes = "\n".join(key + ": " + value for key, value in updates.items())
+            reply = (("تم تحديث طلبك الحالي:\n" if agent == "afaaq" else "Your existing request has been updated:\n") + changes)
+        else:
+            fields["latest_follow_up"] = normalized[:12000]
+            reply = ("تم حفظ رسالتك الإضافية مع طلبك الحالي للمراجعة." if agent == "afaaq"
+                     else "Your follow-up has been saved with your existing request for review.")
+        reply += ("\nلم يتم النشر أو تأكيد دفع أو حجز. التعديلات على المواد تحتاج مراجعة."
+                  if agent == "afaaq" else
+                  "\nNo publishing, payment or booking has been authorized by this update. Creative revisions are recorded for review; revised materials are not yet generated.")
+        return fields, None, "ready_for_review", reply
     summary = "\n".join(key + ": " + str(fields[key]) for key, _ in FIELDS[agent])
     if agent == "afaaq":
         reply = "تم حفظ تفاصيل طلبك للمراجعة:\n" + summary + "\nلم يتم تأكيد سعر أو حجز أو دفع. أي تفاصيل إضافية ترسلها ستُحفظ مع الطلب."
@@ -182,6 +215,15 @@ def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
     row = c.execute("""SELECT * FROM zernio_requests WHERE conversation_id=%s
         AND agent=%s FOR UPDATE""", (conversation_id,agent)).fetchone()
     # All initial context is retained, but not incorrectly assigned to an unasked field.
+    ref = ("AF-" if agent == "afaaq" else "SH-") + str(row["id"])
+    references = re.findall(r"(?i)\b(?:SH|AF)-\d+\b", text)
+    if any(value.upper() != ref for value in references):
+        reply = ref + "\n" + ("رقم الطلب المذكور لا يطابق طلبك الحالي؛ لم يتم إجراء تعديلات."
+                               if agent == "afaaq" else
+                               "The request reference does not match your current request. No changes were made.")
+        c.execute("""INSERT INTO zernio_request_messages(event_id,request_id,body,reply)
+            VALUES(%s,%s,%s,%s)""", (event_id,row["id"],text[:20000],reply))
+        return {"message": reply}
     fields, pending, status, reply = next_reply(agent, row["fields"], row["pending_field"], text, selection)
     if not text.strip() and not selection:
         reply = ("يرجى إرسال التفاصيل كتابةً؛ المرفقات لم تُحلّل تلقائيًا. " if agent=="afaaq"
