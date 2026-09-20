@@ -149,13 +149,13 @@ def extract_document_text(path, media_type):
     if media_type == "application/pdf" or suffix == ".pdf":
         direct = subprocess.run(["pdftotext", "-layout", str(path), "-"], capture_output=True, text=True, timeout=30)
         text = direct.stdout.strip() if direct.returncode == 0 else ""
-        if len(text) >= 80:
+        if len(text) >= 80 and document_metadata(text)[1]:
             return text
         prefix = path.parent / "bill-page"
         rendered = subprocess.run(["pdftoppm", "-f", "1", "-l", "3", "-jpeg", "-r", "180", str(path), str(prefix)], capture_output=True, timeout=45)
         if rendered.returncode != 0:
             raise RuntimeError("تعذر قراءة ملف PDF")
-        parts = []
+        parts = [text] if text else []
         for image_path in sorted(path.parent.glob("bill-page-*.jpg")):
             parts.append(ocr_image(image_path))
         return "\n".join(parts).strip()
@@ -185,29 +185,7 @@ def identify_agent(text):
     return agent, scores[name], "، ".join(dict.fromkeys(evidence[name]))
 
 
-def document_metadata(text, agent_name=""):
-    upper = text.upper()
-    normalized = re.sub(r"[ \t]+", " ", upper)
-    reference_patterns = [
-        r"(?:BILL\s+OF\s+LAD[I1!]NG|BILL\s+NO|B[\s./-]*L)\s*(?:NO\.?|N[O0]\.?|NUMBER|NUM8ER|REF(?:ERENCE)?|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
-        r"(?:MASTER|HOUSE)\s+B/?L\s*(?:NO\.?|NUMBER|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
-        r"(?:SEA\s+WAYBILL|WAYBILL)\s*(?:NO\.?|N[O0]\.?|NUMBER|#)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
-        r"(?:BOOKING|DOCUMENT)\s*(?:NO\.?|NUMBER|#)\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{5,29})",
-    ]
-    references = []
-    for pattern in reference_patterns:
-        references.extend(re.findall(pattern, normalized))
-    containers = sorted(set(re.findall(r"\b[A-Z]{4}\s?\d{7}\b", upper)))
-    container_set = {x.replace(" ", "") for x in containers}
-    references = [x.strip("-./") for x in references if not re.fullmatch(r"(?:NUMBER|ORIGINAL|COPY|DATE|SHIPPER|CONSIGNEE)", x)]
-    references = [x for x in references if x.replace(" ", "") not in container_set]
-    if not references:
-        carrier_prefixes = {"MSC": ("MEDU", "MSC"), "Maersk Line": ("MAEU",), "CMA CGM": ("CMDU",), "COSCO Line": ("COSU",), "Hapag-Lloyd": ("HLCU",), "Evergreen": ("EGLV",), "OOCL Line": ("OOLU",), "ONE Line": ("ONEY",), "PIL": ("PIL",)}
-        prefixes = carrier_prefixes.get(agent_name, ())
-        candidates = re.findall(r"\b[A-Z]{3,5}[A-Z0-9/-]{4,25}\b", normalized)
-        references = [x for x in candidates if x not in container_set and any(x.startswith(prefix) for prefix in prefixes)]
-    doc_type = "بوليصة شحن" if "BILL OF LADING" in upper or re.search(r"\bB/?L\b", upper) else "مستند شحن"
-    return doc_type, (references[0] if references else ""), ", ".join(x.replace(" ", "") for x in containers[:20])
+from app.document_parsing import document_metadata
 
 
 @router.get("/shipping-agents/identify", response_class=HTMLResponse)

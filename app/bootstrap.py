@@ -25,9 +25,9 @@ from app.security_governance import router as security_governance_router,csrf_gu
 from app.team_rbac import router as team_rbac_router
 from app.identity_hardening import router as identity_hardening_router
 from app.fine_permissions import router as fine_permissions_router,has_permission
+from app.mfa_stepup import router as mfa_stepup_router,mfa_state,recent_stepup
 from app import mfa_schema_compat
 from app import mfa_recovery  # initialize MFA attempt storage; recovery routes stay disabled
-from app.mfa_stepup import router as mfa_stepup_router,mfa_state,recent_stepup
 from app.security_operations import router as security_operations_router
 from app.incident_response import router as incident_response_router
 from app.retell_integration import router as retell_integration_router
@@ -42,6 +42,7 @@ from app.freight_workflow import router as freight_workflow_router
 from app.shipping_agents import router as shipping_agents_router
 from app.saber_workflow import router as saber_workflow_router
 from app.social_content import router as social_content_router
+from app.readiness import router as readiness_router
 from app.storage import get_session,one,execute,utcnow
 ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/soc','/incidents','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'viewer':()}
 SENSITIVE=[('send_email','POST','/outbound/','/send'),('send_email','POST','/shipping-agent-messages/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('make_phone_call','POST','/freight-workflow/','/contact-owner'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
@@ -86,3 +87,4 @@ app.include_router(saber_workflow_router)
 app.include_router(social_content_router)
 
 app.include_router(zernio_receiver_router)
+app.include_router(readiness_router)

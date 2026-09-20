@@ -66,53 +66,7 @@ def _nav():
     return '<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/naqliat">شحنات نقليات</a><a href="/drivers">السائقون</a><a href="/commands">مساعد الأوامر</a></div>'
 
 
-def _clean_phone(value):
-    digits = re.sub(r"\D", "", value or "")
-    if digits.startswith("00"):
-        digits = digits[2:]
-    if digits.startswith("0") and len(digits) == 10:
-        digits = "966" + digits[1:]
-    return "+" + digits if digits else ""
-
-
-SAUDI_CITIES = (
-    "الرياض","جدة","مكة","مكة المكرمة","المدينة","المدينة المنورة","الدمام","الخبر","الظهران",
-    "الجبيل","ينبع","رابغ","الطائف","تبوك","أبها","خميس مشيط","جازان","نجران","حائل",
-    "بريدة","عنيزة","الهفوف","الأحساء","الخرج","القصيم","عرعر","سكاكا","القريات",
-    "البطحاء","الحديثة","الخفجي","ضباء","رأس تنورة"
-)
-
-
-def _clean_location(value):
-    value = re.sub(r"\s+", " ", str(value or "")).strip(" :،,|.-–—>←→")
-    value = re.split(r"\s+(?:الحمولة|نوع الشاحنة|الشاحنة|الوزن|السعر|الدفع|التواصل|جوال|رقم|قبل)\s*:", value, 1)[0]
-    return value.strip(" :،,|.-–—>←→")[:120]
-
-
-def _extract_route(raw):
-    text = str(raw or "").replace("\u00a0", " ")
-    flat = re.sub(r"[\t\r]+", " ", text)
-    stop = r"(?=\s+(?:الحمولة|نوع الشاحنة|الشاحنة|الوزن|السعر|طريقة الدفع|الدفع|التواصل|جوال|رقم)\s*:|[\n،|]|$)"
-    patterns = [
-        r"(?:موقع|مدينة|مكان|نقطة)?\s*(?:التحميل|الاستلام|الانطلاق)\s*:?\s*(.+?)\s+(?:موقع|مدينة|مكان|نقطة)?\s*(?:التنزيل|التسليم|الوصول|الوجهة)\s*:?\s*(.+?)"+stop,
-        r"(?:المسار|خط السير|الطريق)\s*:?\s*(.+?)\s*(?:→|->|–|—|-|إلى|الى|إلي|الي)\s*(.+?)"+stop,
-        r"(?:مطلوب\s+من|من)\s*:?\s*(.+?)\s+(?:إلى|الى|إلي|الي)\s*:?\s*(.+?)"+stop,
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, flat, re.I)
-        if match:
-            origin, destination = _clean_location(match.group(1)), _clean_location(match.group(2))
-            if len(origin) >= 2 and len(destination) >= 2 and origin != destination:
-                return origin, destination
-    found = []
-    for city in sorted(SAUDI_CITIES, key=len, reverse=True):
-        match = re.search(r"(?<![\w])"+re.escape(city)+r"(?![\w])", flat)
-        if match and not any(city in old[1] or old[1] in city for old in found):
-            found.append((match.start(), city))
-    found.sort()
-    if len(found) >= 2:
-        return found[0][1], found[1][1]
-    return "", ""
+from app.logistics_parsing import phone as _clean_phone, extract_route as _extract_route, extract_phone, digits
 
 
 def _repair_missing_routes():
@@ -288,13 +242,12 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: 
         raise HTTPException(401, "Connector authorization failed")
     raw = payload.raw_text.replace("\u00a0", " ")
     origin, destination = _extract_route(raw)
-    phone = re.search(r"(?:\+|00)?966\s*5(?:[\s-]*\d){8}", raw)
+    owner_phone = extract_phone(raw)
     weight = re.search(r"([0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)\s*(?:\+\s*)?طن", raw)
-    digits = lambda value: str(value).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
     item = NaqliatLoad(origin=origin or "غير محدد",
         destination=destination or "غير محدد",
         weight_tons=float(digits(weight.group(1)).replace(",", ".")) if weight else None,
-        description=raw[:3000], owner_phone=phone.group(0) if phone else "", raw_text=raw,
+        description=raw[:3000], owner_phone=owner_phone, raw_text=raw,
         capture_method="android_ocr")
     saved = _save(item)
     if saved:

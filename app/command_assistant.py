@@ -1,12 +1,13 @@
 import html
 import json
+import os
 import re
 import urllib.parse
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.storage import execute, get_session, log, one, rows, utcnow
+from app.storage import db, execute, get_session, log, one, rows, utcnow
 from app.discovery import run_discovery_cycle
 from app.data_import import _phone
 from app.whatsapp_integration import send_text_message
@@ -74,9 +75,10 @@ def normalize_text(value):
 
 def parse_command(raw):
     text = normalize_text(raw).strip(" .،؟!")
+    text = re.sub(r"^(?:افاق(?: طويق)?)\s+", "", text)
     text = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
     if any(word in text for word in ("سائق", "السائق", "سايق", "السايق")):
-        phone_match = re.search(r"(?:\\+?966|00966|0)?5[0-9\\s()\\-]{8,13}", text)
+        phone_match = re.search(r"(?:\+?966|00966|0)?5[0-9\s()\-]{8,13}", text)
         add_intent = any(word in text for word in (
             "اضف", "سجل", "احفظ", "اسم السائق", "اسم السايق", "بيانات السائق", "بيانات السايق"
         ))
@@ -84,14 +86,14 @@ def parse_command(raw):
             phone = phone_match.group(0).strip()
             prefix = text[:phone_match.start()]
             name = re.sub(
-                r"^(?:اضف|سجل|احفظ)?\\s*(?:اسم\\s+)?(?:السائق|سائق|السايق|سايق)\\s*",
+                r"^(?:اضف|سجل|احفظ)?\s*(?:اسم\s+)?(?:السائق|سائق|السايق|سايق)\s*",
                 "", prefix,
             )
             name = re.sub(
-                r"\\s*(?:ورقمه|ورقم|رقمه|رقم|رقم جواله|رقم جوال|جواله|جوال|هاتفه|هاتف)\\s*$",
+                r"\s*(?:و?رقم\s+جواله|و?رقم\s+جوال|ورقمه|ورقم|رقمه|رقم|و?جواله|جوال|هاتفه|هاتف)\s*$",
                 "", name,
             ).strip(" :،,.")
-            vehicle_match = re.search(r"(?:ومركبته|مركبته|نوع المركبة|المركبة)\\s+(.+)$", text[phone_match.end():])
+            vehicle_match = re.search(r"(?:ومركبته|مركبته|نوع المركبة|المركبة)\s+(.+)$", text[phone_match.end():])
             if name:
                 return {
                     "action_type": "add_driver",
@@ -100,20 +102,20 @@ def parse_command(raw):
                     "vehicle_type": (vehicle_match.group(1) if vehicle_match else "غير محدد").strip(),
                     "content": "",
                 }
-    broadcast = re.match(r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:واتساب|واتس)?\\s*(?:الى|ل)?\\s*(?:جميع|كل)\\s+السائقين\\s*(.*)$", text, flags=re.IGNORECASE)
+    broadcast = re.match(r"^(?:ارسل|ابعث)\s+(?:رسالة\s+)?(?:واتساب|واتس)?\s*(?:الى|ل)?\s*(?:جميع|كل)\s+السائقين\s*(.*)$", text, flags=re.IGNORECASE)
     if broadcast:
-        content = re.sub(r"^(?:بخصوص|محتوى|وقل|برسالة)\\s+", "", broadcast.group(1).strip())
+        content = re.sub(r"^(?:بخصوص|محتوى|وقل|برسالة)\s+", "", broadcast.group(1).strip())
         return {"action_type": "driver_broadcast", "target": "جميع السائقين", "content": content}
     patterns = (
-        ("call", r"^(?:اتصل|اتصال|كلم)\\s+(?:على|ب)?\\s*(.+)$"),
-        ("whatsapp", r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:واتساب|واتس)\\s+(?:الى|ل)?\\s*(.+)$"),
-        ("email", r"^(?:ارسل|ابعث)\\s+(?:رسالة\\s+)?(?:ايميل|ايميلًا|بريد(?:ا\\s+الكترونيا)?)\\s+(?:الى|ل)?\\s*(.+)$"),
+        ("call", r"^(?:اتصل|اتصال|كلم)\s+(?:على|ب)?\s*(.+)$"),
+        ("whatsapp", r"^(?:ارسل|ابعث)\s+(?:رسالة\s+)?(?:واتساب|واتس)\s+(?:الى|ل)?\s*(.+)$"),
+        ("email", r"^(?:ارسل|ابعث)\s+(?:رسالة\s+)?(?:ايميل|ايميلًا|بريد(?:ا\s+الكترونيا)?)\s+(?:الى|ل)?\s*(.+)$"),
     )
     for action_type, pattern in patterns:
         match = re.match(pattern, text, flags=re.IGNORECASE)
         if match:
             remainder = match.group(1).strip()
-            parts = re.split(r"\\s+(?:وقل|وقولي|برسالة|بخصوص|محتوى)\\s+", remainder, maxsplit=1)
+            parts = re.split(r"\s+(?:وقل|وقولي|برسالة|بخصوص|محتوى)\s+", remainder, maxsplit=1)
             return {"action_type": action_type, "target": parts[0].strip(" ،,."), "content": parts[1].strip() if len(parts) > 1 else ""}
     if any(phrase in text for phrase in (
         "شغل البحث", "شغل اكتشاف الفرص", "ابحث عن فرص", "اكتشف فرص",
@@ -121,7 +123,7 @@ def parse_command(raw):
     )):
         return {"action_type": "run_discovery", "target": "محرك اكتشاف الفرص", "content": ""}
     contact_request = re.match(
-        r"^(?:تواصل|راسل)\\s+(?:مع\\s+)?(?:العميل\\s+)?(.+?)(?:\\s+(?:بخصوص|وقل|محتوى)\\s+(.+))?$",
+        r"^(?:تواصل|راسل)\s+(?:مع\s+)?(?:العميل\s+)?(.+?)(?:\s+(?:بخصوص|وقل|محتوى)\s+(.+))?$",
         text, flags=re.IGNORECASE,
     )
     if contact_request:
@@ -358,21 +360,32 @@ async def deliver_driver_broadcast(broadcast_id):
     if not campaign or campaign["status"] != "sending":
         return
     recipients = rows("SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? AND status='pending' ORDER BY id", (broadcast_id,))
-    sent = failed = 0
     for recipient in recipients:
+        with db() as c:
+            claim = c.execute("""UPDATE driver_broadcast_recipients SET status='sending'
+                WHERE id=%s AND status='pending' AND EXISTS(
+                SELECT 1 FROM driver_broadcasts WHERE id=%s AND status='sending') RETURNING id""",
+                (recipient['id'], broadcast_id)).fetchone()
+        if not claim:
+            continue
         try:
             result = await send_text_message(recipient["phone"], campaign["message"])
             messages = result.get("messages") or []
             provider_id = str(messages[0].get("id") or "") if messages else ""
-            execute("UPDATE driver_broadcast_recipients SET status='sent',provider_message_id=?,sent_at=? WHERE id=?", (provider_id, utcnow(), recipient["id"]))
-            sent += 1
+            if not provider_id:
+                raise RuntimeError('لم يرجع مزود الرسائل معرفًا؛ يلزم التحقق قبل إعادة المحاولة')
+            execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN status='sending' THEN 'sent' ELSE status END,provider_message_id=?,sent_at=? WHERE id=?", (provider_id, utcnow(), recipient["id"]))
         except Exception as exc:
-            execute("UPDATE driver_broadcast_recipients SET status='failed',last_error=? WHERE id=?", (str(exc)[:300], recipient["id"]))
-            failed += 1
-        execute("UPDATE driver_broadcasts SET sent_count=?,failed_count=?,updated_at=? WHERE id=?", (sent, failed, utcnow(), broadcast_id))
-    final_status = ("awaiting_driver" if campaign.get("shipment_id") and sent else
-                    ("completed" if not failed else "completed_with_errors"))
-    execute("UPDATE driver_broadcasts SET status=?,completed_at=?,updated_at=? WHERE id=?", (final_status, utcnow(), utcnow(), broadcast_id))
+            execute("UPDATE driver_broadcast_recipients SET status='uncertain',last_error=? WHERE id=? AND status='sending'", (str(exc)[:300], recipient["id"]))
+    counts = one("""SELECT COUNT(*) FILTER (WHERE provider_message_id IS NOT NULL AND provider_message_id<>'') sent,
+        COUNT(*) FILTER (WHERE status IN ('failed','uncertain')) failed,
+        COUNT(*) FILTER (WHERE status IN ('pending','sending')) pending FROM driver_broadcast_recipients WHERE broadcast_id=?""", (broadcast_id,))
+    final_status = ('sending' if counts['pending'] else
+                    ('completed_with_errors' if counts['failed'] else
+                     ('awaiting_driver' if campaign.get('shipment_id') else 'completed')))
+    execute("""UPDATE driver_broadcasts SET status=CASE WHEN status='sending' THEN ? ELSE status END,
+        sent_count=?,failed_count=?,completed_at=?,updated_at=? WHERE id=?""",
+        (final_status, counts['sent'], counts['failed'], None if counts['pending'] else utcnow(), utcnow(), broadcast_id))
 
 
 @router.post("/commands/broadcast/{broadcast_id}/send")
@@ -385,11 +398,17 @@ async def send_broadcast(broadcast_id: int, request: Request, background_tasks: 
         raise HTTPException(403)
     if data.get("confirmed") != "yes":
         raise HTTPException(400, "Single final confirmation is required")
+    if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
+        raise HTTPException(409, 'الإرسال الخارجي غير مفعّل؛ بقي العرض مسودة')
     campaign = one("SELECT * FROM driver_broadcasts WHERE id=?", (broadcast_id,))
     if not campaign or campaign["status"] != "draft":
         raise HTTPException(409, "Campaign is not ready for confirmation")
     now = utcnow()
-    execute("UPDATE driver_broadcasts SET status='sending',confirmed_by=?,confirmed_at=?,updated_at=? WHERE id=?", (current["user_id"], now, now, broadcast_id))
+    with db() as c:
+        claim = c.execute("""UPDATE driver_broadcasts SET status='sending',confirmed_by=%s,confirmed_at=%s,updated_at=%s
+            WHERE id=%s AND status='draft' RETURNING id""", (current['user_id'], now, now, broadcast_id)).fetchone()
+    if not claim:
+        raise HTTPException(409, 'تم اعتماد هذا العرض مسبقًا')
     log(current["user_id"], "driver_broadcast_confirmed", "driver_broadcast", broadcast_id, f"Single confirmation accepted for {campaign['recipient_count']} recipients")
     background_tasks.add_task(deliver_driver_broadcast, broadcast_id)
     return RedirectResponse(f"/commands/broadcast/{broadcast_id}", 303)

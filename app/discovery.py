@@ -144,7 +144,7 @@ def _promote_signal(signal_id, source_name, result):
             result["url"],
             result["excerpt"][:1400],
             result["score"],
-            "qualified",
+            "new",
             0,
             "SAR",
             "محرك الفرص الآلي",
@@ -324,6 +324,8 @@ def _scan_external_search():
             )
     stats = {"external_checked": len(items), "external_signals": 0, "external_opportunities": 0}
     for item in items:
+        if item.get('manual_search'):
+            continue
         source_key = "google_maps" if "google.com/maps" in item["url"] else "web_search"
         digest = hashlib.sha256((item["url"] + "|" + item["title"]).encode("utf-8")).hexdigest()[:20]
         signal_url = item["url"].split("#", 1)[0] + "#external-" + digest
@@ -393,6 +395,15 @@ def _activate_customer_pilot(limit=10):
 
 
 def run_discovery_cycle():
+    # Shared across web process and the scheduled worker, without persistent flags.
+    from app.storage import db
+    with db() as connection:
+        if not connection.execute('SELECT pg_try_advisory_xact_lock(73002026) acquired').fetchone()['acquired']:
+            return {'skipped': 'cycle_already_running'}
+        return _run_discovery_cycle()
+
+
+def _run_discovery_cycle():
     from app.storage import rows, one, execute, utcnow
     ensure_default_sources()
     stats = {"checked": 0, "signals": 0, "opportunities": 0, "errors": 0}
@@ -415,7 +426,7 @@ def run_discovery_cycle():
                 ).hexdigest()[:20]
                 candidate_url = candidate["url"].split("#", 1)[0]
                 signal_url = candidate_url + "#signal-" + digest
-                signal = one("SELECT id,opportunity_id FROM discovered_signals WHERE url=?", (signal_url,))
+                signal = one("SELECT id,opportunity_id FROM discovered_signals WHERE split_part(url,'#',1)=? LIMIT 1", (candidate_url,))
                 if signal or candidate["score"] < 25:
                     continue
                 signal_id = execute(
