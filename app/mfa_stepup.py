@@ -110,7 +110,7 @@ async def stepup_post(r:Request):
  if blocked(s['user_id']):raise HTTPException(429,'Too many MFA attempts; try again later')
  m=mfa_state(s['user_id']);ok=bool(m and m['mfa_enabled'] and valid_totp(dec(m['secret_enc']),d.get('code','')));guard_attempt(s,'stepup',ok,r)
  if not ok:raise HTTPException(400,'Invalid MFA code')
- now=utcnow();exp=now+datetime.timedelta(minutes=STEPUP_MINUTES);execute('INSERT INTO stepup_auth(session_id,user_id,verified_at,expires_at) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET verified_at=excluded.verified_at,expires_at=excluded.expires_at',(s['id'],s['user_id'],now,exp));log(s['user_id'],'mfa_stepup','session',None,'Step-up authentication completed');n=d.get('next','/dashboard');return RedirectResponse(n if n.startswith('/') and not n.startswith('//') else '/dashboard',303)
+ now=utcnow();exp=now+datetime.timedelta(minutes=STEPUP_MINUTES);execute('INSERT INTO stepup_auth(session_id,user_id,verified_at,expires_at) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET verified_at=excluded.verified_at,expires_at=excluded.expires_at RETURNING session_id AS id',(s['id'],s['user_id'],now,exp));log(s['user_id'],'mfa_stepup','session',None,'Step-up authentication completed');n=d.get('next','/dashboard');return RedirectResponse(n if n.startswith('/') and not n.startswith('//') else '/dashboard',303)
 @router.get('/api/v7/mfa/status')
 def status(r:Request):
  s=sess(r);m=mfa_state(s['user_id']);p=pending_enrollment(s['user_id'],s['id']);return {'enabled':bool(m and m['mfa_enabled']),'reenrollment_pending':bool(p),'recent_stepup':recent_stepup(s['id']),'stepup_window_minutes':STEPUP_MINUTES,'recovery_code_login_enabled':False}

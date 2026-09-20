@@ -31,7 +31,7 @@ def snapshot(request):
     session = get_session(request.cookies.get('gla_session'))
     if not session:
         raise HTTPException(401, 'Login required')
-    return {'release': '7.4.0-social-publishing', 'live_acceptance': 'pending',
+    return {'release': '7.4.1-social-publishing', 'live_acceptance': 'pending',
             'external_actions_enabled': os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') == '1',
             'integrations': configuration_status(),
             'gmail_connected': bool(one("SELECT id FROM email_connections WHERE user_id=? AND status='connected'", (session['user_id'],))),
