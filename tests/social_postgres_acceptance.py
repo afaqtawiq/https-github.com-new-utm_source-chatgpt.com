@@ -22,7 +22,6 @@ def run(client, app):
     assert client.post('/settings/social', data={'csrf': csrf, 'api_key': key}, follow_redirects=False).status_code == 428
     # Exercise the real verification endpoints, not a prefilled step-up record.
     from app.mfa_stepup import gen_secret, enc, hotp
-    from app.mfa_recovery import generate_codes
     totp_secret = gen_secret()
     now = utcnow()
     with db() as c:
@@ -35,14 +34,9 @@ def run(client, app):
                                'next': '/settings/social'}, follow_redirects=False)
         assert response.status_code == 303 and response.headers['location'] == '/settings/social', response.text
         assert one('SELECT * FROM stepup_auth WHERE session_id=?', (session['id'],))['expires_at'] > utcnow()
-    recovery_code = generate_codes(session['user_id'])[0]
-    with db() as c:
-        c.execute('DELETE FROM stepup_auth WHERE session_id=%s', (session['id'],))
-    response = client.post('/mfa/recovery/step-up', data={'csrf': csrf, 'code': recovery_code, 'next': '/settings/social'}, follow_redirects=False)
-    assert response.status_code == 303 and response.headers['location'] == '/settings/social', response.text
-    assert one('SELECT * FROM stepup_auth WHERE session_id=?', (session['id'],))['expires_at'] > utcnow()
-    assert client.post('/mfa/recovery/step-up', data={'csrf': csrf, 'code': recovery_code}, follow_redirects=False).status_code == 400
-    print('PASS: real TOTP verification persists step-up (insert and update); recovery code creates step-up once; invalid codes remain blocked.')
+    # Recovery endpoints are intentionally disabled; keep that boundary intact.
+    assert client.post('/mfa/recovery/step-up', data={'csrf': csrf, 'code': 'unused'}, follow_redirects=False).status_code == 404
+    print('PASS: real TOTP verification persists step-up (insert and update); invalid codes are blocked; recovery routes remain disabled.')
     assert client.post('/settings/social', data={'csrf': 'bad', 'api_key': key}, follow_redirects=False).status_code == 403
     accounts = {'youtube': {'accountId': 'a' * 24, 'username': 'afaqtaw'},
                 'tiktok': {'accountId': 'b' * 24, 'username': 'afaqtawaiq6'}}
