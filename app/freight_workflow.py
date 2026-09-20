@@ -1,5 +1,6 @@
 import html
 import json
+import math
 import os
 import re
 import urllib.parse
@@ -10,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.storage import db, execute, get_session, log, one, rows, utcnow
 from app.whatsapp_integration import send_text_message
+from app.logistics_parsing import phone as normalize_phone, accepts_offer
 
 
 router = APIRouter()
@@ -90,10 +92,12 @@ def ensure_negotiation(shipment_id, load_id=None, owner_phone="", weight_tons=No
 
 
 def _owner_message(item):
+    missing = _shipment_requirements(item)
+    route = (f"من {item['origin']} إلى {item['destination']}" if not missing else
+             "ونحتاج تأكيد مدينة التحميل ومدينة التنزيل")
     return (
         "السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n"
-        f"وصلنا طلب الحمولة رقم {item['reference']} من {item.get('origin') or 'المنشأ'} "
-        f"إلى {item.get('destination') or 'الوجهة'}.\n"
+        f"وصلنا طلب الحمولة رقم {item['reference']} {route}.\n"
         "نرجو تأكيد: السعر المطلوب، الوزن النهائي، موقع التحميل، موقع التنزيل، موعد التحميل وطريقة الدفع."
     )
 
@@ -106,22 +110,40 @@ def _whatsapp_link(phone, message):
     return "https://wa.me/" + normalized.lstrip("+") + "?text=" + urllib.parse.quote(message)
 
 
-async def contact_owner(shipment_id):
-    item = one("""SELECT s.*,n.owner_phone,n.status negotiation_status FROM shipments s
+async def contact_owner(shipment_id, approved=False, user_id=None):
+    item = one("""SELECT s.*,n.owner_phone,n.status negotiation_status,n.provider_call_id,n.provider_message_id FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
-    if not item or not item.get("owner_phone"):
+    if not item:
+        return
+    terminal = {'contacting', 'contact_uncertain', 'awaiting_owner', 'owner_agreed',
+                'driver_offer_pending_approval', 'driver_accepted', 'delivered', 'closed'}
+    if item['negotiation_status'] in terminal or item.get('provider_call_id') or item.get('provider_message_id'):
+        return
+    item['owner_phone'] = _valid_phone(item.get('owner_phone'))
+    if not item['owner_phone']:
         execute("UPDATE freight_negotiations SET status='missing_owner_phone',last_error=?,updated_at=? WHERE shipment_id=?",
                 ("رقم صاحب الشحنة غير متوفر", utcnow(), shipment_id))
         return
     missing = _shipment_requirements(item)
-    if missing:
-        execute("UPDATE freight_negotiations SET status='needs_manual_data',last_error=?,updated_at=? WHERE shipment_id=?",
-                ("أكمل البيانات أولًا: " + "، ".join(missing), utcnow(), shipment_id))
+    if not approved:
+        status = 'needs_contact_approval' if missing else 'contact_ready'
+        execute("UPDATE freight_negotiations SET status=?,last_error=?,updated_at=? WHERE shipment_id=?",
+                (status, "رسالة استكمال البيانات جاهزة لاعتماد التواصل" if missing else "التواصل جاهز للاعتماد", utcnow(), shipment_id))
         return
-    if os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") != "1":
-        execute("UPDATE freight_negotiations SET status='contact_ready',updated_at=? WHERE shipment_id=?", (utcnow(), shipment_id))
+    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1" or os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") != "1":
+        execute("UPDATE freight_negotiations SET status='contact_blocked',last_error=?,updated_at=? WHERE shipment_id=?",
+                ("قناة التواصل الخارجي غير مفعلة؛ المسودة محفوظة ولم تُرسل", utcnow(), shipment_id))
+        return
+    # Claim before any network request. Concurrent invocations cannot send twice.
+    with db() as c:
+        claimed = c.execute("""UPDATE freight_negotiations SET status='contacting',last_error=NULL,updated_at=%s
+            WHERE shipment_id=%s AND status IN ('ready_to_contact','contact_ready','needs_contact_approval','contact_blocked','contact_failed','needs_manual_data')
+              AND COALESCE(provider_call_id,'')='' AND COALESCE(provider_message_id,'')='' RETURNING id""",
+            (utcnow(), shipment_id)).fetchone()
+    if not claimed:
         return
     channel = os.getenv("FREIGHT_OWNER_CONTACT_CHANNEL", "retell").lower()
+    attempted = False
     try:
         if channel == "retell":
             api_key = os.getenv("RETELL_API_KEY", "")
@@ -149,24 +171,36 @@ async def contact_owner(shipment_id):
                            "shipment_reference": item["reference"], "origin": item.get("origin") or "",
                            "destination": item.get("destination") or ""}}
             async with httpx.AsyncClient(timeout=20) as client:
+                attempted = True
                 response = await client.post("https://api.retellai.com/v2/create-phone-call",
                     headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}, json=payload)
             if response.status_code >= 300:
                 raise RuntimeError("Retell HTTP " + str(response.status_code))
             call_id = str((response.json() or {}).get("call_id") or "")
+            if not call_id:
+                raise RuntimeError("لم يرجع مزود الاتصال معرفًا؛ يلزم التحقق قبل إعادة المحاولة")
             execute("""UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='retell',
                 provider_call_id=?,contacted_at=?,last_error=NULL,updated_at=? WHERE shipment_id=?""",
                 (call_id, utcnow(), utcnow(), shipment_id))
+            log(user_id, "freight_owner_contact_submitted", "shipment", shipment_id, "Provider accepted call: " + call_id)
             return
+        if channel != 'whatsapp':
+            raise RuntimeError("قناة التواصل المحددة غير مدعومة")
+        attempted = True
         result = await send_text_message(item["owner_phone"], _owner_message(item))
         messages = result.get("messages") or []
         provider_id = str(messages[0].get("id") or "") if messages else ""
+        if not provider_id:
+            raise RuntimeError("لم يرجع مزود الرسائل معرفًا؛ يلزم التحقق قبل إعادة المحاولة")
         execute("""UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='whatsapp',
             provider_message_id=?,contacted_at=?,last_error=NULL,updated_at=? WHERE shipment_id=?""",
             (provider_id, utcnow(), utcnow(), shipment_id))
+        log(user_id, "freight_owner_contact_submitted", "shipment", shipment_id, "Provider accepted message: " + provider_id)
     except Exception as exc:
-        execute("UPDATE freight_negotiations SET status='contact_failed',last_error=?,updated_at=? WHERE shipment_id=?",
-                (str(exc)[:500], utcnow(), shipment_id))
+        status = 'contact_uncertain' if attempted else 'contact_failed'
+        execute("UPDATE freight_negotiations SET status=?,last_error=?,updated_at=? WHERE shipment_id=?",
+                (status, str(exc)[:500], utcnow(), shipment_id))
+        log(user_id, status, "shipment", shipment_id, "Contact not verified; automatic retry disabled" if attempted else "Contact configuration needs review")
 
 
 def sync_retell_negotiation(metadata, custom, summary=""):
@@ -202,10 +236,7 @@ def sync_retell_negotiation(metadata, custom, summary=""):
 
 
 def _valid_phone(value):
-    phone = re.sub(r"[\s\-()]", "", str(value or ""))
-    if phone.startswith("00"):
-        phone = "+" + phone[2:]
-    return phone if re.fullmatch(r"\+[1-9]\d{7,14}", phone) else ""
+    return normalize_phone(value)
 
 
 def _usable_text(value):
@@ -223,7 +254,7 @@ def _shipment_requirements(item, agreement=False):
     if not _valid_phone(item.get("owner_phone")):
         missing.append("رقم صاحب الشحنة بصيغة دولية")
     if agreement:
-        if not item.get("weight_tons") or float(item["weight_tons"]) <= 0:
+        if not item.get("weight_tons") or not math.isfinite(float(item["weight_tons"])) or float(item["weight_tons"]) <= 0:
             missing.append("الوزن")
         if not _usable_text(item.get("unloading_location") or item.get("destination")):
             missing.append("مكان التنزيل")
@@ -239,48 +270,57 @@ def _require_complete(item, agreement=False):
 
 
 def prepare_driver_offer(shipment_id, user_id):
-    item = one("""SELECT s.*,n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.payment_method,
-        n.unloading_location FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
-    if not item or item.get("agreed_owner_price") is None:
-        raise HTTPException(409, "يجب تسجيل اتفاق صاحب الشحنة أولًا")
-    _require_complete(item, agreement=True)
-    existing = one("SELECT id FROM driver_broadcasts WHERE shipment_id=? AND status NOT IN ('cancelled','rejected') ORDER BY id DESC LIMIT 1", (shipment_id,))
-    if existing:
-        return existing["id"]
-    drivers = rows("""SELECT id,driver_name,whatsapp_phone FROM drivers
-        WHERE offer_consent=1 AND availability<>'غير متاح' AND whatsapp_phone IS NOT NULL ORDER BY id""")
-    valid, seen = [], set()
-    for driver in drivers:
-        phone = _valid_phone(driver.get("whatsapp_phone"))
-        if phone and phone not in seen:
-            seen.add(phone); valid.append((driver, phone))
-    if not valid:
-        raise HTTPException(409, "لا يوجد سائقون متاحون لديهم موافقة استقبال العروض")
-    price = float(item["driver_offer_price"])
-    message = (
-        f"عرض حمولة من آفاق طويق — {item['reference']}\n"
-        f"المسار: {item.get('origin') or '—'} → {item.get('destination') or '—'}\n"
-        f"الوزن: {item.get('weight_tons') or 'غير محدد'} طن\n"
-        f"سعر السائق: {price:,.0f} ريال\n"
-        f"التنزيل: {item.get('unloading_location') or item.get('destination') or 'يحدد لاحقًا'}\n"
-        f"الدفع: {item.get('payment_method') or 'يحدد لاحقًا'}\n"
-        "للرغبة اكتب: موافق " + item["reference"]
-    )
-    now = utcnow()
-    bid = execute("""INSERT INTO driver_broadcasts(raw_command,message,status,recipient_count,created_by,created_at,updated_at,shipment_id)
-        VALUES(?,?,?,?,?,?,?,?)""", ("عرض آلي للشحنة " + item["reference"], message, "draft", len(valid), user_id, now, now, shipment_id))
-    for driver, phone in valid:
-        execute("""INSERT INTO driver_broadcast_recipients(broadcast_id,driver_id,driver_name,phone,status)
-            VALUES(?,?,?,?,?) ON CONFLICT(broadcast_id,phone) DO NOTHING""", (bid, driver["id"], driver["driver_name"], phone, "pending"))
-    execute("UPDATE freight_negotiations SET status='driver_offer_pending_approval',updated_at=? WHERE shipment_id=?", (now, shipment_id))
-    log(user_id, "freight_driver_offer_prepared", "shipment", shipment_id, f"Single-confirmation offer prepared for {len(valid)} drivers")
+    # Lock the shipment so simultaneous agreement submissions share one draft.
+    with db() as c:
+        item = c.execute("""SELECT s.*,n.owner_phone,n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.payment_method,
+            n.unloading_location FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
+            WHERE s.id=%s FOR UPDATE OF s,n""", (shipment_id,)).fetchone()
+        if not item or item.get("agreed_owner_price") is None:
+            raise HTTPException(409, "يجب تسجيل اتفاق صاحب الشحنة أولًا")
+        _require_complete(item, agreement=True)
+        agreed = float(item["agreed_owner_price"])
+        if not math.isfinite(agreed) or agreed <= 150:
+            raise HTTPException(409, "قيمة الاتفاق غير صالحة لتجهيز العرض")
+        existing = c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') ORDER BY id DESC LIMIT 1", (shipment_id,)).fetchone()
+        if existing:
+            return existing["id"]
+        drivers = c.execute("""SELECT id,driver_name,whatsapp_phone FROM drivers
+            WHERE offer_consent=1 AND availability<>'غير متاح' AND whatsapp_phone IS NOT NULL ORDER BY id""").fetchall()
+        valid, seen = [], set()
+        for driver in drivers:
+            phone = _valid_phone(driver.get("whatsapp_phone"))
+            if phone and phone not in seen:
+                seen.add(phone); valid.append((driver, phone))
+        if not valid:
+            raise HTTPException(409, "تم حفظ الاتفاق، ولا يوجد سائقون متاحون لديهم موافقة استقبال العروض")
+        price = round(agreed - 150, 2)
+        message = (
+            f"عرض حمولة من آفاق طويق — {item['reference']}\n"
+            f"المسار: {item['origin']} → {item['destination']}\n"
+            f"الوزن: {item['weight_tons']} طن\n"
+            f"سعر السائق: {price:,.2f} ريال\n"
+            f"التنزيل: {item.get('unloading_location') or item['destination']}\n"
+            f"الدفع: {item['payment_method']}\n"
+            "للرغبة اكتب: موافق " + item['reference']
+        )
+        now = utcnow()
+        bid = c.execute("""INSERT INTO driver_broadcasts(raw_command,message,status,recipient_count,created_by,created_at,updated_at,shipment_id)
+            VALUES(%s,%s,'draft',%s,%s,%s,%s,%s) RETURNING id""",
+            ("عرض للشحنة " + item['reference'], message, len(valid), user_id, now, now, shipment_id)).fetchone()['id']
+        for driver, phone in valid:
+            c.execute("""INSERT INTO driver_broadcast_recipients(broadcast_id,driver_id,driver_name,phone,status)
+                VALUES(%s,%s,%s,%s,'pending') ON CONFLICT(broadcast_id,phone) DO NOTHING""", (bid, driver['id'], driver['driver_name'], phone))
+        c.execute("UPDATE freight_negotiations SET status='driver_offer_pending_approval',driver_offer_price=%s,updated_at=%s WHERE shipment_id=%s", (price, now, shipment_id))
+        c.execute("INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at,created_by) VALUES(%s,%s,%s,%s,%s,%s)",
+                  (shipment_id, 'driver_offer_prepared', f"Draft {bid}; margin 150 SAR; {len(valid)} recipients", 'driver_offer_pending_approval', now, user_id))
+    log(user_id, 'freight_driver_offer_prepared', 'shipment', shipment_id, f'Draft {bid}; not sent')
     return bid
 
 
 def accept_driver_reply(phone, text):
     normalized = _valid_phone(phone)
     match = re.search(r"NQ-\d+", (text or "").upper())
-    if not normalized or not match or not re.search(r"(?:موافق|اقبل|جاهز|نعم)", text or "", re.I):
+    if not normalized or not match or not accepts_offer(text):
         return False
     reference = match.group(0)
     with db() as c:
@@ -330,19 +370,20 @@ def workflow_detail(shipment_id: int, request: Request):
     missing_contact = _shipment_requirements(item)
     readiness = ("<p class=good>بيانات المسار والتواصل مكتملة.</p>" if not missing_contact else
                  "<p class=warn>يلزم استكمال: " + esc("، ".join(missing_contact)) + "</p>")
-    owner_link = _whatsapp_link(item.get("owner_phone"), _owner_message(item)) if not missing_contact else ""
+    owner_link = _whatsapp_link(item.get("owner_phone"), _owner_message(item))
     manual_contact = (f"<a class=manual href='{esc(owner_link)}' target='_blank' rel='noopener'>فتح واتساب لصاحب الشحنة برسالة جاهزة</a>"
                       "<p class=warn>هذا الزر يفتح المحادثة فقط؛ راجع الرسالة واضغط إرسال داخل واتساب بنفسك.</p>"
                       if owner_link else "")
     controls = f"""<h2>الاستخراج والتصحيح اليدوي</h2>
-    <p>راجع نتيجة OCR وصحح أي حقل قبل بدء التواصل.</p>
+    <p>راجع نتيجة الاستخراج. عند نقص المسار يمكنك تجهيز طلب استكمال لصاحب الشحنة إذا كان رقمه صحيحًا.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
     <input name=origin required placeholder='مدينة أو موقع التحميل' value='{esc(item.get('origin'))}'>
     <input name=destination required placeholder='مدينة أو موقع التنزيل' value='{esc(item.get('destination'))}'>
     <input name=owner_phone required dir=ltr placeholder='+9665xxxxxxxx' value='{esc(item.get('owner_phone'))}'>
     <input name=weight_tons type=number min=.01 step=.01 placeholder='الوزن بالطن' value='{esc(item.get('weight_tons'))}'>
     </div><button>حفظ البيانات المصححة يدويًا</button></form>{readiness}{manual_contact}<hr>
-    <form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>التواصل مع صاحب الشحنة الآن</button></form>
+    <div class=card><h3>رسالة التواصل المقترحة</h3><p style='white-space:pre-wrap'>{esc(_owner_message(item))}</p></div>
+    <form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>اعتماد التواصل مع صاحب الشحنة</button></form>
     <form method=post action='/freight-workflow/{shipment_id}/agreement'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid><input name=asking_price type=number step=.01 placeholder='السعر المطلوب' value='{esc(item.get('asking_price'))}'><input name=agreed_owner_price type=number step=.01 required placeholder='السعر المتفق مع صاحب الشحنة' value='{esc(item.get('agreed_owner_price'))}'><input name=weight_tons type=number step=.01 placeholder='الوزن طن' value='{esc(item.get('weight_tons'))}'><input name=unloading_location placeholder='مكان التنزيل' value='{esc(item.get('unloading_location'))}'><input name=payment_method placeholder='طريقة الدفع' value='{esc(item.get('payment_method'))}'></div><textarea name=notes placeholder='ملخص التفاوض'>{esc(item.get('notes'))}</textarea><button>حفظ الاتفاق وتجهيز عرض السائقين ناقص 150 ريال</button></form>"""
     if broadcast:
         controls += f"<p><a href='/commands/broadcast/{broadcast['id']}'>مراجعة العرض وتأكيد الإرسال الجماعي مرة واحدة</a> — الحالة: {esc(broadcast['status'])}</p>"
@@ -366,7 +407,7 @@ async def save_manual_data(shipment_id: int, request: Request):
         weight = float(data["weight_tons"]) if data.get("weight_tons") else None
     except ValueError:
         raise HTTPException(400, "الوزن غير صحيح")
-    if weight is not None and weight <= 0:
+    if weight is not None and (not math.isfinite(weight) or weight <= 0):
         raise HTTPException(400, "الوزن يجب أن يكون أكبر من صفر")
     now = utcnow()
     with db() as c:
@@ -389,8 +430,9 @@ async def contact_owner_now(shipment_id: int, request: Request, background_tasks
     item = one("""SELECT s.origin,s.destination,n.owner_phone FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404, "الشحنة غير موجودة")
-    _require_complete(item)
-    background_tasks.add_task(contact_owner, shipment_id)
+    if not _valid_phone(item.get('owner_phone')):
+        raise HTTPException(409, "يلزم رقم صحيح لصاحب الشحنة لتجهيز التواصل")
+    background_tasks.add_task(contact_owner, shipment_id, approved=True, user_id=current['user_id'])
     return RedirectResponse(f"/freight-workflow/{shipment_id}", 303)
 
 
@@ -404,14 +446,19 @@ async def save_agreement(shipment_id: int, request: Request):
         weight = float(data["weight_tons"]) if data.get("weight_tons") else None
     except ValueError:
         raise HTTPException(400, "تحقق من السعر والوزن")
-    if agreed <= 150: raise HTTPException(400, "سعر صاحب الشحنة يجب أن يكون أكبر من 150 ريال")
+    if not math.isfinite(agreed) or agreed <= 150: raise HTTPException(400, "سعر صاحب الشحنة يجب أن يكون رقمًا أكبر من 150 ريال")
+    if (weight is not None and (not math.isfinite(weight) or weight <= 0)) or (asking is not None and (not math.isfinite(asking) or asking < 0)):
+        raise HTTPException(400, "تحقق من السعر والوزن")
     item = one("""SELECT s.origin,s.destination,n.owner_phone FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404, "الشحنة غير موجودة")
     item.update({"weight_tons": weight, "unloading_location": data.get("unloading_location"),
                  "payment_method": data.get("payment_method")})
     _require_complete(item, agreement=True)
-    driver_price = agreed - 150
+    existing = one("SELECT id,status FROM driver_broadcasts WHERE shipment_id=? AND status NOT IN ('cancelled','rejected') ORDER BY id DESC LIMIT 1", (shipment_id,))
+    if existing:
+        raise HTTPException(409, "يوجد عرض لهذه الشحنة؛ راجع العرض الحالي قبل تعديل الاتفاق")
+    driver_price = round(agreed - 150, 2)
     now = utcnow()
     execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=?,agreed_owner_price=?,driver_offer_price=?,
         weight_tons=?,unloading_location=?,payment_method=?,notes=?,agreed_at=?,updated_at=?,last_error=NULL WHERE shipment_id=?""",

@@ -43,6 +43,7 @@ def _manual_search_candidates(queries, channel):
             title = "بحث الويب — " + query
             matched = ["محرك البحث", "بحث جاهز للمراجعة"]
         items.append({
+            "manual_search": True,
             "title": title[:500],
             "url": url,
             "excerpt": (

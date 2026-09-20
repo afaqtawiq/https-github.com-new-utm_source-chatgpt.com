@@ -140,6 +140,8 @@ def whatsapp_status():
 
 
 async def send_text_message(recipient: str, message: str) -> dict:
+    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1":
+        raise RuntimeError("الإرسال الخارجي غير مفعّل؛ لم تُرسل الرسالة")
     if os.getenv("WHATSAPP_PROVIDER", "meta").lower() == "twilio":
         return await _send_twilio_message(recipient, message)
     token = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
