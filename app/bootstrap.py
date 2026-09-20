@@ -25,9 +25,9 @@ from app.security_governance import router as security_governance_router,csrf_gu
 from app.team_rbac import router as team_rbac_router
 from app.identity_hardening import router as identity_hardening_router
 from app.fine_permissions import router as fine_permissions_router,has_permission
+from app.mfa_stepup import router as mfa_stepup_router,mfa_state,recent_stepup
 from app import mfa_schema_compat
 from app import mfa_recovery  # initialize MFA attempt storage; recovery routes stay disabled
-from app.mfa_stepup import router as mfa_stepup_router,mfa_state,recent_stepup
 from app.security_operations import router as security_operations_router
 from app.incident_response import router as incident_response_router
 from app.retell_integration import router as retell_integration_router

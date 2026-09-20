@@ -21,7 +21,7 @@ os.environ.update(DATABASE_URL=database_url, DISCOVERY_AUTO_ENABLED='0',
 from fastapi.testclient import TestClient
 from app.bootstrap import app
 from app.storage import one, execute, get_session
-from app.freight_workflow import prepare_driver_offer, accept_driver_reply
+from app.freight_workflow import prepare_driver_offer, accept_driver_reply, sync_retell_negotiation
 from app.command_assistant import deliver_driver_broadcast
 
 client = TestClient(app, base_url='http://testserver', headers={'accept': 'text/html', 'origin': 'http://testserver'})
@@ -64,6 +64,11 @@ bid = bids[0]
 offer = one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
 assert '1,850.00' in offer['message'] and offer['status'] == 'draft'
 assert one('SELECT COUNT(*) n FROM driver_broadcasts WHERE shipment_id=?', (sid,))['n'] == 1
+assert client.post(f'/freight-workflow/{sid}/agreement', data={
+    'csrf': csrf, 'agreed_owner_price': '3000', 'weight_tons': '20', 'payment_method': 'عند التسليم',
+    'unloading_location': 'جدة'}, follow_redirects=False).status_code == 409
+assert sync_retell_negotiation({'shipment_id': sid, 'freight_negotiation': True}, {'agreed_owner_price': 3000})
+assert one('SELECT revenue,cost FROM shipments WHERE id=?', (sid,)) == {'revenue': 2000, 'cost': 1850}
 assert client.get(f'/commands/broadcast/{bid}').status_code == 200
 assert client.get(f'/freight-workflow/{sid}').status_code == 200
 assert client.post(f'/commands/broadcast/{bid}/send', data={'csrf': csrf, 'confirmed': 'yes'}, follow_redirects=False).status_code == 428

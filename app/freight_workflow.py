@@ -217,21 +217,27 @@ def sync_retell_negotiation(metadata, custom, summary=""):
     asking = number(custom.get("asking_price"))
     weight = number(custom.get("weight_tons") or custom.get("weight"))
     if agreed and agreed > 150:
-        now = utcnow(); driver_price = agreed - 150
-        execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=COALESCE(?,asking_price),
-            agreed_owner_price=?,driver_offer_price=?,weight_tons=COALESCE(?,weight_tons),
-            unloading_location=COALESCE(NULLIF(?,''),unloading_location),payment_method=COALESCE(NULLIF(?,''),payment_method),
-            notes=COALESCE(NULLIF(?,''),notes),agreed_at=?,updated_at=?,last_error=NULL WHERE shipment_id=?""",
-            (asking, agreed, driver_price, weight, str(custom.get("unloading_location") or "")[:300],
-             str(custom.get("payment_method") or "")[:200], summary[:3000], now, now, shipment_id))
-        execute("UPDATE shipments SET revenue=?,cost=?,updated_at=? WHERE id=?", (agreed, driver_price, now, shipment_id))
+        now = utcnow(); driver_price = round(agreed - 150, 2)
+        with db() as c:
+            if not c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone():
+                return False
+            if c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone():
+                return True
+            c.execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=COALESCE(%s,asking_price),
+                agreed_owner_price=%s,driver_offer_price=%s,weight_tons=COALESCE(%s,weight_tons),
+                unloading_location=COALESCE(NULLIF(%s,''),unloading_location),payment_method=COALESCE(NULLIF(%s,''),payment_method),
+                notes=COALESCE(NULLIF(%s,''),notes),agreed_at=%s,updated_at=%s,last_error=NULL WHERE shipment_id=%s""",
+                (asking, agreed, driver_price, weight, str(custom.get("unloading_location") or "")[:300],
+                 str(custom.get("payment_method") or "")[:200], summary[:3000], now, now, shipment_id))
+            c.execute("UPDATE shipments SET revenue=%s,cost=%s,updated_at=%s WHERE id=%s", (agreed, driver_price, now, shipment_id))
         try:
             prepare_driver_offer(shipment_id, None)
         except HTTPException as exc:
             execute("UPDATE freight_negotiations SET last_error=?,updated_at=? WHERE shipment_id=?", (str(exc.detail)[:500], utcnow(), shipment_id))
         return True
-    execute("UPDATE freight_negotiations SET status='needs_review',notes=COALESCE(NULLIF(?,''),notes),updated_at=? WHERE shipment_id=?",
-            (summary[:3000], utcnow(), shipment_id))
+    execute("""UPDATE freight_negotiations SET status='needs_review',notes=COALESCE(NULLIF(?,''),notes),updated_at=? WHERE shipment_id=?
+        AND status NOT IN ('driver_offer_pending_approval','driver_accepted','delivered','closed')""",
+        (summary[:3000], utcnow(), shipment_id))
     return True
 
 
@@ -411,6 +417,9 @@ async def save_manual_data(shipment_id: int, request: Request):
         raise HTTPException(400, "الوزن يجب أن يكون أكبر من صفر")
     now = utcnow()
     with db() as c:
+        c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        if c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone():
+            raise HTTPException(409, "يوجد عرض لهذه الشحنة؛ راجع العرض قبل تعديل بيانات الحمولة")
         c.execute("UPDATE shipments SET origin=%s,destination=%s,updated_at=%s WHERE id=%s",
                   (origin, destination, now, shipment_id))
         c.execute("""UPDATE freight_negotiations SET owner_phone=%s,weight_tons=%s,status='ready_to_contact',
@@ -455,15 +464,17 @@ async def save_agreement(shipment_id: int, request: Request):
     item.update({"weight_tons": weight, "unloading_location": data.get("unloading_location"),
                  "payment_method": data.get("payment_method")})
     _require_complete(item, agreement=True)
-    existing = one("SELECT id,status FROM driver_broadcasts WHERE shipment_id=? AND status NOT IN ('cancelled','rejected') ORDER BY id DESC LIMIT 1", (shipment_id,))
-    if existing:
-        raise HTTPException(409, "يوجد عرض لهذه الشحنة؛ راجع العرض الحالي قبل تعديل الاتفاق")
     driver_price = round(agreed - 150, 2)
     now = utcnow()
-    execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=?,agreed_owner_price=?,driver_offer_price=?,
-        weight_tons=?,unloading_location=?,payment_method=?,notes=?,agreed_at=?,updated_at=?,last_error=NULL WHERE shipment_id=?""",
-        (asking, agreed, driver_price, weight, data.get("unloading_location"), data.get("payment_method"), data.get("notes"), now, now, shipment_id))
-    execute("UPDATE shipments SET revenue=?,cost=?,updated_at=? WHERE id=?", (agreed, driver_price, now, shipment_id))
+    with db() as c:
+        c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        existing = c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone()
+        if existing:
+            raise HTTPException(409, "يوجد عرض لهذه الشحنة؛ راجع العرض الحالي قبل تعديل الاتفاق")
+        c.execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=%s,agreed_owner_price=%s,driver_offer_price=%s,
+            weight_tons=%s,unloading_location=%s,payment_method=%s,notes=%s,agreed_at=%s,updated_at=%s,last_error=NULL WHERE shipment_id=%s""",
+            (asking, agreed, driver_price, weight, data.get("unloading_location"), data.get("payment_method"), data.get("notes"), now, now, shipment_id))
+        c.execute("UPDATE shipments SET revenue=%s,cost=%s,updated_at=%s WHERE id=%s", (agreed, driver_price, now, shipment_id))
     bid = prepare_driver_offer(shipment_id, current["user_id"])
     return RedirectResponse(f"/commands/broadcast/{bid}", 303)
 
