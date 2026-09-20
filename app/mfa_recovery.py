@@ -53,7 +53,7 @@ async def recovery_post(r:Request):
  ok=use_recovery(s['user_id'],d.get('code',''));attempt(s,'recovery',ok,ip)
  if not ok:raise HTTPException(400,'Invalid or already used recovery code')
  from app.mfa_stepup import STEPUP_MINUTES
- now=utcnow();exp=now+datetime.timedelta(minutes=STEPUP_MINUTES);execute('INSERT INTO stepup_auth(session_id,user_id,verified_at,expires_at) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET verified_at=excluded.verified_at,expires_at=excluded.expires_at',(s['id'],s['user_id'],now,exp));log(s['user_id'],'mfa_recovery_used','session',None,'Recovery code used for step-up');n=d.get('next','/dashboard');return RedirectResponse(n if n.startswith('/') and not n.startswith('//') else '/dashboard',303)
+ now=utcnow();exp=now+datetime.timedelta(minutes=STEPUP_MINUTES);execute('INSERT INTO stepup_auth(session_id,user_id,verified_at,expires_at) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET verified_at=excluded.verified_at,expires_at=excluded.expires_at RETURNING session_id AS id',(s['id'],s['user_id'],now,exp));log(s['user_id'],'mfa_recovery_used','session',None,'Recovery code used for step-up');n=d.get('next','/dashboard');return RedirectResponse(n if n.startswith('/') and not n.startswith('//') else '/dashboard',303)
 @router.post('/team/{uid}/reset-mfa')
 async def admin_reset(uid:int,r:Request):
  s=sess(r);d=parse(await r.body())

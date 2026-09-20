@@ -4,6 +4,7 @@ import copy
 import datetime as dt
 import json
 import os
+import time
 from unittest.mock import patch
 
 
@@ -19,12 +20,29 @@ def run(client, app):
     os.environ['ZERNIO_API_KEY'] = 'local-ci-whatsapp-key-untouched'
     os.environ['TOKEN_ENCRYPTION_KEY'] = Fernet.generate_key().decode()
     assert client.post('/settings/social', data={'csrf': csrf, 'api_key': key}, follow_redirects=False).status_code == 428
-    # Set up a recently verified admin in the disposable fixture only.
+    # Exercise the real verification endpoints, not a prefilled step-up record.
+    from app.mfa_stepup import gen_secret, enc, hotp
+    from app.mfa_recovery import generate_codes
+    totp_secret = gen_secret()
     now = utcnow()
     with db() as c:
-        c.execute('INSERT INTO user_mfa(user_id,mfa_enabled,updated_at) VALUES(%s,1,%s)', (session['user_id'], now))
-        c.execute('INSERT INTO stepup_auth(session_id,user_id,verified_at,expires_at) VALUES(%s,%s,%s,%s)',
-                  (session['id'], session['user_id'], now, now + dt.timedelta(minutes=10)))
+        c.execute('INSERT INTO user_mfa(user_id,secret_enc,mfa_enabled,updated_at) VALUES(%s,%s,1,%s)',
+                  (session['user_id'], enc(totp_secret), now))
+    assert client.post('/mfa/step-up', data={'csrf': csrf, 'code': 'invalid'}, follow_redirects=False).status_code == 400
+    assert not one('SELECT * FROM stepup_auth WHERE session_id=?', (session['id'],))
+    for _ in range(2):  # Both INSERT and ON CONFLICT paths must persist successfully.
+        response = client.post('/mfa/step-up', data={'csrf': csrf, 'code': hotp(totp_secret, int(time.time()) // 30),
+                               'next': '/settings/social'}, follow_redirects=False)
+        assert response.status_code == 303 and response.headers['location'] == '/settings/social', response.text
+        assert one('SELECT * FROM stepup_auth WHERE session_id=?', (session['id'],))['expires_at'] > utcnow()
+    recovery_code = generate_codes(session['user_id'])[0]
+    with db() as c:
+        c.execute('DELETE FROM stepup_auth WHERE session_id=%s', (session['id'],))
+    response = client.post('/mfa/recovery/step-up', data={'csrf': csrf, 'code': recovery_code, 'next': '/settings/social'}, follow_redirects=False)
+    assert response.status_code == 303 and response.headers['location'] == '/settings/social', response.text
+    assert one('SELECT * FROM stepup_auth WHERE session_id=?', (session['id'],))['expires_at'] > utcnow()
+    assert client.post('/mfa/recovery/step-up', data={'csrf': csrf, 'code': recovery_code}, follow_redirects=False).status_code == 400
+    print('PASS: real TOTP verification persists step-up (insert and update); recovery code creates step-up once; invalid codes remain blocked.')
     assert client.post('/settings/social', data={'csrf': 'bad', 'api_key': key}, follow_redirects=False).status_code == 403
     accounts = {'youtube': {'accountId': 'a' * 24, 'username': 'afaqtaw'},
                 'tiktok': {'accountId': 'b' * 24, 'username': 'afaqtawaiq6'}}
