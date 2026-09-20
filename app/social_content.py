@@ -1,5 +1,7 @@
 import html
 import urllib.parse
+import datetime as dt
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -38,6 +40,7 @@ def init_social_content():
         created_by BIGINT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
         published_at TIMESTAMPTZ)""")
     now = utcnow()
+    execute("UPDATE social_channels SET status='superseded' WHERE platform='TikTok' AND profile_url='https://www.tiktok.com/@afaqt79' AND created_by IS NULL")
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
         ("YouTube","آفاق طويق — @afaqtaw","https://www.youtube.com/@afaqtaw","linked",None,now,now))
@@ -46,7 +49,7 @@ def init_social_content():
         ("Instagram","آفاق طويق — @afaqwaiq","https://www.instagram.com/afaqwaiq/","linked",None,now,now))
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
-        ("TikTok","آفاق طويق — @afaqt79","https://www.tiktok.com/@afaqt79","linked",None,now,now))
+        ("TikTok","آفاق طويق — @afaqtawaiq6","https://www.tiktok.com/@afaqtawaiq6","saved",None,now,now))
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
         ("LinkedIn","آفاق طويق — Afaq Tuwaiq","https://www.linkedin.com/in/%D8%A7%D9%81%D8%A7%D9%82-%D8%B7%D9%88%D9%8A%D9%82-afaqtawiq-8096bb434/","linked",None,now,now))
@@ -76,7 +79,7 @@ def safe_url(value):
 @router.get("/content-center", response_class=HTMLResponse)
 def content_center(request: Request):
     session = auth(request)
-    channels = rows("SELECT * FROM social_channels ORDER BY platform, id DESC")
+    channels = rows("SELECT * FROM social_channels WHERE status!='superseded' ORDER BY platform, id DESC")
     items = rows("""SELECT c.*,a.status approval_status FROM social_content c
         LEFT JOIN approvals a ON a.id=c.approval_id ORDER BY c.id DESC LIMIT 100""")
     draft_count = one("SELECT COUNT(*) n FROM social_content WHERE status='draft'")["n"]
@@ -87,12 +90,12 @@ def content_center(request: Request):
     for item in items:
         actions = '<a class="btn" href="/content-center/'+str(item['id'])+'">فتح</a>'
         content_rows += '<tr><td>'+str(item['id'])+'</td><td>'+e(item['title'])+'</td><td>'+e(item['platform'])+'</td><td><span class="pill">'+e(item['status'])+'</span></td><td>'+e(item.get('scheduled_at') or 'غير محدد')+'</td><td>'+actions+'</td></tr>'
-    body = '<div class="nav"><a href="/dashboard">⌂ الرئيسية</a><a href="/content-center">مركز المحتوى</a><a href="/approvals">الموافقات</a></div>'
+    body = '<div class="nav"><a href="/dashboard">⌂ الرئيسية</a><a href="/content-center">مركز المحتوى</a><a href="/approvals">الموافقات</a>' + ('<a href="/settings/social">إعدادات النشر</a>' if session.get('role') == 'admin' else '') + '</div>'
     body += '<div class="hero"><h1>مركز صناعة ونشر المحتوى</h1><p class="muted">أنشئ المحتوى واحفظ حسابات المنصات وحدد موعد النشر. لن يتم أي نشر خارجي قبل موافقة الإدارة وربط واجهة المنصة.</p></div>'
-    body += '<div class="grid"><div class="k">القنوات المرتبطة<b>'+str(len(channels))+'</b></div><div class="k">مسودات<b>'+str(draft_count)+'</b></div><div class="k">بانتظار الموافقة<b>'+str(review_count)+'</b></div><div class="k">جاهزة للنشر<b>'+str(approved_count)+'</b></div></div>'
+    body += '<div class="grid"><div class="k">روابط الحسابات المحفوظة<b>'+str(len(channels))+'</b></div><div class="k">مسودات<b>'+str(draft_count)+'</b></div><div class="k">بانتظار الموافقة<b>'+str(review_count)+'</b></div><div class="k">جاهزة للمراجعة والجدولة<b>'+str(approved_count)+'</b></div></div>'
     body += '<div class="card"><h2>إضافة حساب تواصل اجتماعي</h2><form method="post" action="/social-channels"><div class="formgrid"><select name="platform"><option>Instagram</option><option>TikTok</option><option>Facebook</option><option>YouTube</option><option>Snapchat</option><option>LinkedIn</option><option>X</option></select><input name="account_name" placeholder="اسم الحساب" required><input name="profile_url" type="url" placeholder="https://..." required></div><button class="btn">حفظ رابط الحساب</button></form></div>'
     body += '<div class="grid">'+(channel_cards or '<div class="card muted">لم تتم إضافة روابط الحسابات بعد.</div>')+'</div>'
-    body += '<div class="card"><h2>إنشاء مسودة محتوى</h2><form method="post" action="/content-center"><div class="formgrid"><input name="title" placeholder="عنوان داخلي للمحتوى" required><select name="platform"><option>All</option><option>Instagram</option><option>TikTok</option><option>Facebook</option><option>YouTube</option><option>Snapchat</option><option>LinkedIn</option><option>X</option></select><select name="content_type"><option value="post">منشور</option><option value="reel">ريلز / فيديو قصير</option><option value="story">ستوري</option><option value="video">فيديو</option></select><input name="scheduled_at" type="datetime-local"></div><textarea name="body" placeholder="اكتب نص المحتوى، الفكرة، الدعوة لاتخاذ إجراء والوسوم..." required></textarea><input name="media_url" type="url" placeholder="رابط الصورة أو الفيديو — اختياري"><button class="btn">حفظ المسودة</button></form></div>'
+    body += '<div class="card"><h2>إنشاء مسودة محتوى</h2><form method="post" action="/content-center"><div class="formgrid"><input name="title" placeholder="عنوان داخلي للمحتوى" required><select name="platform"><option value="YouTube+TikTok">YouTube + TikTok — آفاق طويق</option><option>All</option><option>Instagram</option><option>TikTok</option><option>Facebook</option><option>YouTube</option><option>Snapchat</option><option>LinkedIn</option><option>X</option></select><select name="content_type"><option value="post">منشور</option><option value="reel">ريلز / فيديو قصير</option><option value="story">ستوري</option><option value="video">فيديو</option></select><label>موعد مقترح — بتوقيت الرياض<input name="scheduled_at" type="datetime-local"></label></div><textarea name="body" placeholder="اكتب نص المحتوى، الفكرة، الدعوة لاتخاذ إجراء والوسوم..." required></textarea><input name="media_url" type="url" placeholder="رابط الصورة أو الفيديو — اختياري"><button class="btn">حفظ المسودة</button></form></div>'
     body += '<div class="card scroll"><h2>تقويم ومسودات المحتوى</h2><table><tr><th>#</th><th>العنوان</th><th>المنصة</th><th>الحالة</th><th>موعد النشر</th><th></th></tr>'+(content_rows or '<tr><td colspan="6" class="muted">لا توجد مسودات بعد.</td></tr>')+'</table></div>'
     return HTMLResponse(page(body))
 
@@ -112,7 +115,13 @@ async def add_social_channel(request: Request):
 @router.post("/content-center")
 async def create_content(request: Request):
     session = auth(request); data = parse(await request.body()); now = utcnow()
-    content_id = execute("INSERT INTO social_content(title,platform,content_type,body,media_url,scheduled_at,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (data.get("title"),data.get("platform"),data.get("content_type"),data.get("body"),data.get("media_url") or None,data.get("scheduled_at") or None,"draft",session["user_id"],now,now))
+    scheduled = None
+    if data.get('scheduled_at'):
+        try:
+            scheduled = dt.datetime.fromisoformat(data['scheduled_at'])
+            if scheduled.tzinfo is None: scheduled = scheduled.replace(tzinfo=ZoneInfo('Asia/Riyadh'))
+        except ValueError: raise HTTPException(400, 'موعد غير صحيح')
+    content_id = execute("INSERT INTO social_content(title,platform,content_type,body,media_url,scheduled_at,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (data.get("title"),data.get("platform"),data.get("content_type"),data.get("body"),data.get("media_url") or None,scheduled,"draft",session["user_id"],now,now))
     log(session["user_id"],"social_content_created","social_content",content_id,data.get("title"))
     return RedirectResponse("/content-center/"+str(content_id),303)
 
@@ -129,9 +138,13 @@ def content_detail(content_id: int, request: Request):
     elif item['status'] == 'approved':
         open_link = '<a class="btn" target="_blank" rel="noopener" href="'+e(channel['profile_url'])+'">فتح '+e(item['platform'])+' للنشر</a>' if channel else '<span class="muted">أضف رابط حساب المنصة أولًا.</span>'
         controls = open_link+'<form method="post" action="/content-center/'+str(content_id)+'/mark-published"><button class="btn">تأكيد أنه تم النشر</button></form>'
+        if session.get('role') == 'admin' and item['platform'] in ('YouTube', 'TikTok', 'YouTube+TikTok') and item['content_type'] in ('video', 'reel'):
+            controls = '<a class="btn" href="/content-center/'+str(content_id)+'/schedule">مراجعة وجدولة النشر التلقائي</a>'
     body = '<div class="nav"><a href="/content-center">← مركز المحتوى</a><a href="/dashboard">الرئيسية</a></div><div class="hero"><span class="pill">'+e(item['platform'])+'</span><h1>'+e(item['title'])+'</h1><p class="muted">'+e(item['content_type'])+' · '+e(item['status'])+' · '+e(item.get('scheduled_at') or 'بلا موعد')+'</p></div><div class="card"><h2>النص الجاهز</h2><div style="white-space:pre-wrap">'+e(item['body'])+'</div></div>'
     if item.get('media_url'): body += '<div class="card"><a class="btn" target="_blank" rel="noopener" href="'+e(item['media_url'])+'">فتح ملف الوسائط</a></div>'
     body += '<div class="card actions">'+controls+'</div>'
+    from app.social_publishing import publication_panel
+    body += publication_panel(content_id, session)
     return HTMLResponse(page(body))
 
 
@@ -158,5 +171,7 @@ def approve_content(content_id: int, request: Request):
 def mark_published(content_id: int, request: Request):
     session=auth(request); item=one("SELECT * FROM social_content WHERE id=?",(content_id,))
     if not item or item['status'] != 'approved': raise HTTPException(409)
+    if item['platform'] in ('YouTube', 'TikTok', 'YouTube+TikTok') and item['content_type'] in ('video', 'reel'):
+        raise HTTPException(409, 'جدول الفيديو ثم حدّث نتيجة النشر من Zernio لإثبات نشره.')
     now=utcnow(); execute("UPDATE social_content SET status='published',published_at=?,updated_at=? WHERE id=?",(now,now,content_id)); log(session['user_id'],"social_content_published","social_content",content_id,item['title'])
     return RedirectResponse("/content-center/"+str(content_id),303)

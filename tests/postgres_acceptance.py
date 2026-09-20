@@ -88,3 +88,6 @@ assert accept_driver_reply('+966500000002', 'موافق ' + shipment['reference'
 assert not accept_driver_reply('+966500000002', 'موافق ' + shipment['reference'])
 assert one('SELECT status FROM shipments WHERE id=?', (sid,))['status'] == 'driver_assigned'
 print('PASS: PostgreSQL startup, protected pages, Arabic command persistence, OCR intake, duplicate intake, agreement, concurrent offer creation, guarded sends, driver assignment. External sends: 0.')
+
+from social_postgres_acceptance import run as run_social_acceptance
+run_social_acceptance(client, app)
