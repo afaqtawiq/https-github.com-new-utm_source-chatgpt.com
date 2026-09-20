@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt pytest
-      - run: python -m pytest tests/test_operational_repair.py tests/test_whatsapp_admin.py -q
+      - run: python -m pytest tests/test_operational_repair.py tests/test_whatsapp_admin.py tests/test_social_publishing.py -q
       - run: python tests/postgres_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
