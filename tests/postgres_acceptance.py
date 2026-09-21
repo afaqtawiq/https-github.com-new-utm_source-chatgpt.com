@@ -100,3 +100,6 @@ run_media_studio_acceptance(client, app)
 
 from advert_acceptance import run as run_advert_acceptance
 run_advert_acceptance(client, app)
+
+from production_monitor_acceptance import run as run_production_monitor_acceptance
+run_production_monitor_acceptance(client, app)

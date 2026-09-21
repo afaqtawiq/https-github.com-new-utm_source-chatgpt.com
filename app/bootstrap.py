@@ -46,6 +46,7 @@ from app.social_publishing import router as social_publishing_router
 from app.media_settings import router as media_settings_router
 from app.media_studio import router as media_studio_router,register_worker as register_media_worker
 from app.advert_studio import router as advert_studio_router,register_worker as register_advert_worker
+from app.production_monitor import router as production_monitor_router,register_worker as register_monitor_worker
 from app.readiness import router as readiness_router
 from app.storage import get_session,one,execute,utcnow
 ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/soc','/incidents','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'viewer':()}
@@ -58,6 +59,7 @@ def role_allowed(request,s):
  return not any(path==p or path.startswith(p+'/') for p in ROLE_PREFIX.get(role,()))
 def sensitive_permission(request):
  path=request.url.path
+ if request.method=='POST' and (path=='/production-monitor/settings' or (path.startswith('/production-monitor/') and path.endswith('/send-support'))):return 'send_email'
  if request.method=='POST' and path.startswith('/advert-studio/') and path.endswith('/run'):return 'manage_media'
  for perm,method,prefix,suffix in SENSITIVE:
   if request.method==method and path.startswith(prefix) and (not suffix or path.endswith(suffix)):return perm
@@ -96,6 +98,8 @@ app.include_router(media_studio_router)
 register_media_worker(app)
 app.include_router(advert_studio_router)
 register_advert_worker(app)
+app.include_router(production_monitor_router)
+register_monitor_worker(app)
 
 app.include_router(zernio_receiver_router)
 app.include_router(readiness_router)
