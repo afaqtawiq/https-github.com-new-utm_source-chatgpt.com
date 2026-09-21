@@ -17,8 +17,10 @@ from app.advert_spec import BRAND, TAGLINE
 from app.media_fal import MediaError, asset_url
 
 MAX_EXPORT = 14 * 1024 * 1024
-FONT_PATHS = ('/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf',
-              '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
+# DejaVu includes Arabic shaping and the punctuation in the brand service list.
+# Noto Sans Arabic alone lacks some general punctuation glyphs on Debian.
+FONT_PATHS = ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+              '/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf')
 SIZES = {'9:16': (1080, 1920), '16:9': (1920, 1080)}
 NAVY = (9, 28, 43)
 GOLD = (235, 193, 103)
