@@ -18,10 +18,10 @@ def run(client,app):
     calls=[]
     def send(*args):
         calls.append(args);return '<report@example.invalid>'
-    with patch('app.production_monitor.sender_ready',lambda *a:True),patch.object(reports.spacemail,'send',send),patch('app.social_publishing.connection',lambda:('fake',[])),patch('app.social_publishing.provider_request',return_value={}) as get,patch('app.social_publishing.publication_result',return_value=('valid-test-post-id','published',results)):
+    with patch('app.production_monitor.sender_ready',lambda *a:True),patch.object(reports.spacemail,'send',send),patch('app.social_publishing.connection',lambda:('fake',[])),patch('app.social_publishing.provider_request',return_value={}) as get,patch('app.social_publishing.publication_result',return_value=('abcdefabcdefabcdefabcdef','published',results)):
         reports.tick();assert calls==[]
         with db() as c:
-            c.execute("UPDATE social_publications SET status='scheduled',provider_post_id='valid-test-post-id',scheduled_at=%s,payload_json=%s WHERE content_id=%s",(utcnow()-dt.timedelta(minutes=1),json.dumps({'platforms':[]}),cid))
+            c.execute("UPDATE social_publications SET status='scheduled',provider_post_id='abcdefabcdefabcdefabcdef',scheduled_at=%s,payload_json=%s WHERE content_id=%s",(utcnow()-dt.timedelta(minutes=1),json.dumps({'platforms':[]}),cid))
         reports.tick()
         assert get.call_count==1 and get.call_args.args[1]=='GET'
         with ThreadPoolExecutor(max_workers=4) as pool:
