@@ -51,11 +51,18 @@ def prices(key):
         if len(matches) != 1 or matches[0].get('currency') != 'USD':
             raise MediaError('تعذر التحقق من تكلفة الإنتاج بالدولار. لم يبدأ التوليد.')
         entry = matches[0]
-        units = {'image': 1} if stage == 'image' else {'second': 5, 'video': 1}
-        if entry.get('unit') not in units:
-            raise MediaError('تغيرت وحدة تسعير النموذج. يلزم مراجعة التكلفة قبل التشغيل.')
+        raw_unit = entry.get('unit')
+        unit = re.sub(r'[_-]+', ' ', raw_unit.strip().lower()) if isinstance(raw_unit, str) else ''
+        unit = ' '.join(unit.split())
+        units = ({'image': 1, 'images': 1} if stage == 'image' else
+                 {'second': 5, 'seconds': 5, 'sec': 5, 's': 5,
+                  'video second': 5, 'video seconds': 5, 'video': 1, 'videos': 1})
+        if unit not in units:
+            # Only a short billing-unit label is safe to show, never the provider body.
+            detail = unit if re.fullmatch(r'[a-z0-9 ]{1,40}', unit) else 'unknown'
+            raise MediaError('تغيرت وحدة تسعير النموذج (' + stage + ': ' + detail + '). يلزم مراجعة التكلفة قبل التشغيل.')
         try:
-            amount = Decimal(str(entry['unit_price'])) * units[entry['unit']]
+            amount = Decimal(str(entry['unit_price'])) * units[unit]
             if not amount.is_finite() or amount <= 0 or amount > 20:
                 raise ValueError()
             result[stage] = amount.quantize(Decimal('.000001'), rounding=ROUND_UP)
