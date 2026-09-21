@@ -7,7 +7,7 @@ from app.intelligence import analyze
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.http_errors import operational_http_error, safe_next
 
-app=FastAPI(title='Gulf Logistics AI',version='7.4.1-social-publishing')
+app=FastAPI(title='Gulf Logistics AI',version='7.4.2-media-settings')
 app.add_exception_handler(StarletteHTTPException, operational_http_error)
 ADMIN_EMAIL=os.getenv('ADMIN_EMAIL','admin@afaaqtuwaiq.local'); ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD','ChangeMe-Now-2026!')
 init_db(ADMIN_EMAIL,ADMIN_PASSWORD)
@@ -29,7 +29,7 @@ def head(s,t): return '<div class="top"><div class="brand"><div class="brandmark
 def parse(raw): return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def rl(): return RedirectResponse('/login',303)
 @app.get('/api/v50/health')
-def health(): return {'ok':True,'version':'7.4.1-social-publishing','database':'postgresql','shared_storage':True,'sales_copilot':True,'external_actions':os.getenv('ENABLE_EXTERNAL_ACTIONS','0')=='1'}
+def health(): return {'ok':True,'version':'7.4.2-media-settings','database':'postgresql','shared_storage':True,'sales_copilot':True,'external_actions':os.getenv('ENABLE_EXTERNAL_ACTIONS','0')=='1'}
 @app.get('/')
 def root(): return RedirectResponse('/dashboard')
 @app.get('/login',response_class=HTMLResponse)

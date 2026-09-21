@@ -121,7 +121,7 @@ def select(name, label, options):
 def settings_page(request: Request):
     session = admin(request)
     status = connection_status()
-    body = '<div class="nav"><a href="/content-center">مركز المحتوى</a></div><div class="hero"><h1>ربط النشر لآفاق طويق</h1>'
+    body = '<div class="nav"><a href="/content-center">مركز المحتوى</a><a href="/settings/media">إعدادات الإنتاج</a></div><div class="hero"><h1>ربط النشر لآفاق طويق</h1>'
     body += '<p>YouTube: <b dir="ltr">@afaqtaw</b> · TikTok: <b dir="ltr">@afaqtawaiq6</b></p></div>'
     if status['configured']:
         body += '<div class="card"><b class="ok">مفتاح الربط محفوظ ومشفّر</b><p>آخر تحقق: ' + e(status['verified_at']) + '</p></div>'

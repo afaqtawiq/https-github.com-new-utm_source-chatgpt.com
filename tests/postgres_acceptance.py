@@ -91,3 +91,6 @@ print('PASS: PostgreSQL startup, protected pages, Arabic command persistence, OC
 
 from social_postgres_acceptance import run as run_social_acceptance
 run_social_acceptance(client, app)
+
+from media_settings_acceptance import run as run_media_settings_acceptance
+run_media_settings_acceptance(client, app)
