@@ -285,10 +285,22 @@ def register_worker(app):
             await app.state.spacemail_worker
 
 
+def smtp_starttls_probe():
+    client = smtplib.SMTP(HOST,587,timeout=8)
+    try:
+        client.ehlo()
+        client.starttls(context=ssl.create_default_context())
+        return client
+    except Exception:
+        client.close()
+        raise
+
+
 def probe_network():
     result = []
     for name, factory in (
         ('SMTP 465', lambda: smtplib.SMTP_SSL(HOST,465,timeout=8,context=ssl.create_default_context())),
+        ('SMTP 587 STARTTLS', smtp_starttls_probe),
         ('IMAP 993', lambda: imaplib.IMAP4_SSL(HOST,993,timeout=8,ssl_context=ssl.create_default_context())),
     ):
         try:
