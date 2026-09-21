@@ -183,6 +183,7 @@ def render(session, error=None):
     body += '<p>الحالة: ' + ('متصل — تم اختبار الدخول للإرسال والاستقبال' if row and row['enabled'] else 'لم يكتمل الربط') + '</p>'
     body += '<p>مزامنة الوارد كل دقيقة، دون حذف الرسائل أو تعليمها كمقروءة. أول مزامنة تجلب أحدث 50 رسالة. إرسال الردود يتم عبر اعتماد الرسائل، وتنبيهات الإنتاج حسب إعداداتها.</p>'
     body += '<a href="/official-inbox">صندوق الوارد الرسمي</a> · <a href="/production-monitor">متابعة الإنتاج</a>'
+    body += '<form method="post" action="' + PATH + '/network">' + hidden_csrf(session) + '<button>فحص الوصول إلى خوادم البريد دون كلمة مرور</button></form>'
     if recent_stepup(session['id']):
         body += '<form method="post" action="' + PATH + '">' + hidden_csrf(session)
         body += '<label>البريد<input type="email" name="email" value="' + ADDRESS + '" readonly autocomplete="username"></label><label>كلمة مرور البريد<input type="password" name="password" autocomplete="current-password" required maxlength="1024"></label><button>اختبار الاتصال وحفظ الربط</button></form>'
@@ -210,8 +211,14 @@ async def save(request: Request):
     try:
         encrypted = cipher().encrypt(secret.encode()).decode()
         await run_in_threadpool(validate, secret)
+    except smtplib.SMTPAuthenticationError:
+        return render(s, 'رفض خادم SMTP بيانات الدخول. تحقق من كلمة مرور صندوق البريد وتفعيل SMTP. لم يتغير الربط.')
+    except imaplib.IMAP4.error:
+        return render(s, 'لم يقبل خادم IMAP تسجيل الدخول أو فتح الوارد. تحقق من صلاحية الوصول. لم يتغير الربط.')
+    except (TimeoutError, OSError):
+        return render(s, 'تعذر الاتصال الشبكي بخادم البريد أو انتهت مهلة الاتصال. لم تُحفظ كلمة المرور. استخدم فحص الوصول إلى الخوادم.')
     except Exception:
-        return render(s, 'لم ينجح اختبار SMTP وIMAP. تحقق من كلمة مرور صندوق البريد وتفعيل الوصول من إعدادات Spacemail. لم يتغير الربط.')
+        return render(s, 'لم ينجح اختبار اتصال البريد. لم تتغير الإعدادات ولم تُحفظ كلمة المرور.')
     with db() as c:
         c.execute('''INSERT INTO spacemail_connections(user_id,password_enc,updated_at) VALUES(%s,%s,%s)
             ON CONFLICT(user_id) DO UPDATE SET password_enc=EXCLUDED.password_enc,enabled=TRUE,updated_at=EXCLUDED.updated_at''', (s['user_id'],encrypted,utcnow()))
@@ -276,3 +283,47 @@ def register_worker(app):
         app.state.spacemail_worker.cancel()
         with suppress(asyncio.CancelledError):
             await app.state.spacemail_worker
+
+
+def smtp_starttls_probe():
+    client = smtplib.SMTP(HOST,587,timeout=8)
+    try:
+        client.ehlo()
+        client.starttls(context=ssl.create_default_context())
+        return client
+    except Exception:
+        client.close()
+        raise
+
+
+def probe_network():
+    result = []
+    for name, factory in (
+        ('SMTP 465', lambda: smtplib.SMTP_SSL(HOST,465,timeout=8,context=ssl.create_default_context())),
+        ('SMTP 587 STARTTLS', smtp_starttls_probe),
+        ('IMAP 993', lambda: imaplib.IMAP4_SSL(HOST,993,timeout=8,ssl_context=ssl.create_default_context())),
+    ):
+        try:
+            client = factory()
+            if name.startswith('SMTP'):
+                client.close()
+            else:
+                with suppress(Exception):
+                    client.logout()
+            result.append(name + ': نجح الاتصال المشفّر بالخادم')
+        except TimeoutError:
+            result.append(name + ': انتهت مهلة الوصول إلى الخادم قبل تسجيل الدخول')
+        except ssl.SSLError:
+            result.append(name + ': تعذر التحقق من الاتصال المشفّر')
+        except OSError:
+            result.append(name + ': تعذر الوصول الشبكي إلى الخادم')
+        except Exception:
+            result.append(name + ': لم يكتمل فحص الاتصال')
+    return ' · '.join(result)
+
+
+@router.post(PATH + '/network')
+async def network(request: Request):
+    s = admin(request)
+    await form(request, s)
+    return render(s, await run_in_threadpool(probe_network))
