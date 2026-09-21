@@ -74,11 +74,14 @@ def test_logo_validation_and_both_arabic_cards():
         assert Image.open(io.BytesIO(card)).size == dimensions
 
 
-def test_real_montage_two_formats_has_voice_video_and_bounded_duration(tmp_path):
+@pytest.mark.parametrize('long_voice', [False, True])
+def test_real_montage_two_formats_has_voice_video_and_bounded_duration(tmp_path, long_voice):
     """Real FFmpeg integration using local synthetic fixtures, no generation or spending."""
     plan = default_plan()
     voice = tmp_path/'voice.mp3'
     subprocess.run(['ffmpeg','-loglevel','error','-y','-f','lavfi','-i','sine=frequency=220:duration=2',str(voice)],check=True)
+    longer = tmp_path/'longer.mp3'
+    subprocess.run(['ffmpeg','-loglevel','error','-y','-f','lavfi','-i','sine=frequency=220:duration=7.1',str(longer)],check=True)
     paths = {}
     for ratio, (w,h) in r.SIZES.items():
         clip = tmp_path/('vertical.mp4' if ratio == '9:16' else 'horizontal.mp4')
@@ -86,15 +89,17 @@ def test_real_montage_two_formats_has_voice_video_and_bounded_duration(tmp_path)
                         '-c:v','libx264','-preset','ultrafast','-threads','2',str(clip)],check=True)
         paths[ratio] = clip
     outputs = {f'voice-{i}':'https://v3.fal.media/test.mp3' for i in range(5)}
+    if long_voice:
+        outputs['voice-1'] = 'https://v3.fal.media/longer.mp3'
     outputs.update({f'video-{ratio}-{i}':ratio for ratio in plan['ratios'] for i in range(4)})
     def fetch(url, stage, path):
-        shutil.copyfile(voice if stage == 'voice' else paths[url],path)
+        shutil.copyfile((longer if url.endswith('longer.mp3') else voice) if stage == 'voice' else paths[url],path)
     rendered = r.render(plan,outputs,fetch=fetch)
     for ratio, item in rendered.items():
         final = tmp_path/('final-'+ratio.replace(':','-')+'.mp4')
         final.write_bytes(item['data'])
         meta = r.probe(final)
-        assert 24.8 <= item['duration'] <= 25.2
+        assert (27.2 <= item['duration'] <= 27.6) if long_voice else (24.8 <= item['duration'] <= 25.2)
         assert any(s['codec_type']=='audio' and s['codec_name']=='aac' for s in meta['streams'])
         assert len(item['data']) < r.MAX_EXPORT
         assert (item['width'],item['height']) == r.SIZES[ratio]

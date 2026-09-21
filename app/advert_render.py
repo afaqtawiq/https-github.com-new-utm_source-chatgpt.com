@@ -168,7 +168,7 @@ def render(plan, outputs, *, logo=None, fetch=download):
                 seconds = float(probe(audio)['format']['duration'])
             except (KeyError, ValueError, TypeError):
                 raise MediaError('تعذر قراءة مدة التعليق الصوتي.') from None
-            if not .3 <= seconds <= 6.2:
+            if not .3 <= seconds <= 8.0:
                 raise MediaError('مدة تعليق اللقطة ' + str(i+1) + ' لا تناسب الإعلان؛ يلزم مراجعة النص قبل إنتاج جديد.')
             durations.append(max(5.0, seconds+.25))
         if sum(durations) > 30.5:
@@ -195,7 +195,10 @@ def render(plan, outputs, *, logo=None, fetch=download):
                     if abs(aspect - w/h) > .08:
                         raise MediaError('مقاس المشهد لا يطابق المقاس المعتمد؛ لم يُقصّ المشهد تلقائيًا.')
                     inputs = ['-protocol_whitelist', 'file,pipe', '-i', str(clip), '-loop', '1', '-i', str(overlay)]
-                    vf = f'[0:v]scale={w}:{h},setsar=1,fps=25,tpad=stop_mode=clone:stop_duration=2[bg];[bg][1:v]overlay=0:0[v]'
+                    # Preserve the full narration and smoothly extend native motion,
+                    # instead of rejecting normal 7-second speech or cutting words.
+                    stretch = max(1.0, duration / float(meta['format']['duration']))
+                    vf = f'[0:v]setpts={stretch}*(PTS-STARTPTS),scale={w}:{h},setsar=1,fps=25,tpad=stop_mode=clone:stop_duration=0.25[bg];[bg][1:v]overlay=0:0[v]'
                     ai = 2
                 else:
                     inputs = ['-loop', '1', '-i', str(overlay)]
