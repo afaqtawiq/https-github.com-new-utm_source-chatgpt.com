@@ -11,6 +11,21 @@ with db() as c:
 
 def tick():
     from app.production_monitor import sender_ready
+    from app import social_publishing as publishing
+    # Read existing provider receipts only; never create or repeat a post.
+    for pending in rows("""SELECT p.* FROM social_publications p JOIN spacemail_connections m ON m.user_id=p.approved_by
+        WHERE p.status IN ('scheduled','publishing') AND p.provider_post_id IS NOT NULL
+        AND m.enabled=TRUE AND p.scheduled_at<=? ORDER BY p.id LIMIT 10""", (utcnow(),)):
+        if not sender_ready(pending['approved_by'],spacemail.ADDRESS):
+            continue
+        try:
+            key,_=publishing.connection()
+            result=publishing.provider_request(key,'GET','/posts/'+publishing.identifier(pending['provider_post_id']))
+            pid,state,results=publishing.publication_result(result,json.loads(pending['payload_json'])['platforms'])
+            if pid==pending['provider_post_id']:
+                publishing.save_result(pending['content_id'],pid,state,results)
+        except publishing.PublishingError:
+            continue
     for row in rows('''SELECT p.content_id,p.approved_by,p.results_json,c.title FROM social_publications p
         JOIN social_content c ON c.id=p.content_id
         JOIN spacemail_connections m ON m.user_id=p.approved_by
