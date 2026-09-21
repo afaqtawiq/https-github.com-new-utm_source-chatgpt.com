@@ -313,7 +313,7 @@ def register_worker(app):
 def studio(request: Request):
     session = media_admin(request)
     plan = default_plan()
-    body = '<div class="nav"><a href="/media-studio">استوديو الإنتاج</a><a href="/content-center">مركز المحتوى</a></div>'
+    body = '<div class="nav"><a href="/production-monitor">متابعة الإنتاج والتنبيهات</a><a href="/media-studio">استوديو الإنتاج</a><a href="/content-center">مركز المحتوى</a></div>'
     body += '<div class="hero"><h1>إعلان آفاق طويق المتكامل</h1><p>أربع لقطات سينمائية وخاتمة · 25–30 ثانية · تعليق عربي رجالي ونصوص وهوية</p></div>'
     body += '<div class="card"><h2>هوية الإعلان</h2>'
     if one('SELECT id FROM advert_brand WHERE id=1'):
@@ -401,7 +401,7 @@ def detail(job_id: int, request: Request):
     job = job_record(job_id)
     plan = json.loads(job['plan_json'])
     steps = rows('SELECT step_key,status,cost_limit,spec_json FROM advert_steps WHERE job_id=? ORDER BY ordinal', (job_id,))
-    body = '<div class="nav"><a href="/advert-studio">استوديو الإعلان</a><a href="/content-center">مركز المحتوى</a></div>'
+    body = '<div class="nav"><a href="/production-monitor">متابعة الإنتاج والتنبيهات</a><a href="/advert-studio">استوديو الإعلان</a><a href="/content-center">مركز المحتوى</a></div>'
     body += '<div class="hero"><h1>' + e(plan['title']) + '</h1><p>' + e(LABELS.get(job['status'], job['status'])) + '</p></div>'
     body += '<div class="card"><p>25–30 ثانية · ' + e(' + '.join(plan['ratios'])) + ' · تعليق عربي رجالي</p><p>' + ('شعار محفوظ مع الإعلان.' if job['logo'] else 'هوية نصية باسم آفاق طويق؛ لم يُرفق ملف شعار.') + '</p>'
     if plan.get('reuse_job_id'):
