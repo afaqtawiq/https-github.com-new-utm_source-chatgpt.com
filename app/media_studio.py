@@ -96,7 +96,8 @@ async def form_data(request, session):
 def studio_page(request: Request):
     session = media_admin(request)
     body = '<div class="nav"><a href="/content-center">مركز المحتوى</a><a href="/settings/media">إعدادات الإنتاج</a><a href="/settings/social">إعدادات النشر</a></div>'
-    body += '<div class="hero"><h1>استوديو آفاق طويق</h1><p>إنتاج صورة أو مشهد فيديو من خمس ثوانٍ. تُعرض التكلفة قبل التشغيل.</p></div>'
+    body += '<div class="hero"><h1>استوديو آفاق طويق</h1><p>اختر إعلانًا متكاملًا أو صورة أو مشهدًا قصيرًا. تُعرض التكلفة قبل التشغيل.</p></div>'
+    body += '<div class="card"><h2>إعلان متكامل بالصوت والهوية</h2><p>أربع لقطات وخاتمة خلال 25–30 ثانية، تعليق عربي رجالي، نصوص وشعار، ومقاسان عمودي وأفقي.</p><a class="btn" href="/advert-studio">تجهيز إعلان ومراجعة تكلفته</a></div>'
     body += '<div class="card"><p>المشهد التجريبي بلا تعليق صوتي أو شعار. راجع النتيجة قبل اعتمادها للنشر.</p>'
     body += '<form method="post" action="/media-studio/prepare">' + hidden_csrf(session)
     body += '<label>عنوان المحتوى<input name="title" maxlength="150" required value="آفاق طويق — كل شحنة تحمل فرصة"></label>'

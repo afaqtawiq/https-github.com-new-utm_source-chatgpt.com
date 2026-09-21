@@ -9,6 +9,7 @@ import httpx
 IMAGE_MODEL = 'fal-ai/bytedance/seedream/v4/text-to-image'
 VIDEO_MODEL = 'fal-ai/kling-video/v2.5-turbo/pro/image-to-video'
 MODELS = {'image': IMAGE_MODEL, 'video': VIDEO_MODEL}
+VOICE_MODEL = 'fal-ai/minimax/speech-02-hd'
 QUEUE = 'https://queue.fal.run/'
 PRICING = 'https://api.fal.ai/v1/models/pricing'
 
@@ -26,6 +27,8 @@ def call(key, method, url, *, payload=None, params=None):
         with httpx.Client(timeout=40, follow_redirects=False) as client:
             response = client.request(method, url, headers=headers, json=payload, params=params)
         if response.status_code not in (200, 201, 202):
+            if response.status_code in (402, 403) and any(term in response.text.lower() for term in ('balance', 'credit', 'payment method', 'insufficient')):
+                raise MediaError('الرصيد غير كافٍ أو الدفع غير مهيأ لدى fal.ai. راجع رصيد الحساب؛ لا يلزم تغيير المفتاح.')
             if response.status_code in (401, 403):
                 raise MediaError('رفضت fal.ai صلاحية المفتاح. راجع مفتاح الحساب وصلاحية API.')
             if response.status_code == 402:
@@ -83,7 +86,8 @@ def asset_url(value, stage):
         allowed |= host == 'storage.googleapis.com' and u.path.startswith('/falserverless/')
         if not allowed or '..' in u.path or '%' in u.path:
             raise ValueError()
-        extensions = ('.mp4', '.mov', '.webm') if stage == 'video' else ('.png', '.jpg', '.jpeg', '.webp')
+        extensions = {'video': ('.mp4', '.mov', '.webm'), 'voice': ('.mp3', '.wav', '.m4a'),
+                      'image': ('.png', '.jpg', '.jpeg', '.webp')}[stage]
         if not u.path.lower().endswith(extensions):
             raise ValueError()
     except ValueError:
