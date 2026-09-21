@@ -51,7 +51,10 @@ def eligible_message(msg):
     if spacemail.ADDRESS not in recipients:
         return None
     try:
-        date=parsedate_to_datetime(str(msg.get('Date','')))
+        raw_date=str(msg.get('Date',''))
+        date=parsedate_to_datetime(raw_date)
+        if date.tzinfo is None and raw_date.rstrip().endswith('-0000'):
+            date=date.replace(tzinfo=dt.timezone.utc)
         if date.tzinfo is None or not utcnow()-dt.timedelta(hours=24) <= date <= utcnow()+dt.timedelta(minutes=10):
             return None
     except (TypeError,ValueError,OverflowError):

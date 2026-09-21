@@ -12,6 +12,8 @@ def run(client,app):
     msg['Date']=formatdate(usegmt=True);msg['Message-ID']='<new-customer@example.com>'
     msg['Subject']='طلب شحن';msg.set_content('أريد شحن بضاعة من جدة إلى الرياض')
     assert r.eligible_message(msg)=='customer@example.com'
+    msg.replace_header('Date',formatdate())
+    assert r.eligible_message(msg)=='customer@example.com'
     msg['Auto-Submitted']='auto-replied'
     assert r.eligible_message(msg) is None
     del msg['Auto-Submitted'];msg['List-Id']='mailing-list'
