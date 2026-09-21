@@ -45,6 +45,7 @@ def run(client, app):
         with db() as c:
             c.execute('UPDATE stepup_auth SET expires_at=%s WHERE session_id=%s', (utcnow() - dt.timedelta(minutes=1), session['id']))
         assert run_job(jid).status_code == 428
+        assert prepare('image')  # Free quote preparation does not need another MFA step-up.
         with db() as c:
             c.execute('UPDATE stepup_auth SET expires_at=%s WHERE session_id=%s', (utcnow() + dt.timedelta(minutes=10), session['id']))
         with patch.dict('os.environ', {'ENABLE_EXTERNAL_ACTIONS': '0'}):
