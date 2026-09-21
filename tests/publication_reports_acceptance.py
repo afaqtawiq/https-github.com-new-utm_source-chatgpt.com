@@ -22,8 +22,14 @@ def run(client,app):
         reports.tick();assert calls==[]
         with db() as c:
             c.execute("UPDATE social_publications SET status='scheduled',provider_post_id='abcdefabcdefabcdefabcdef',scheduled_at=%s,payload_json=%s WHERE content_id=%s",(utcnow()-dt.timedelta(minutes=1),json.dumps({'platforms':[]}),cid))
+        # TikTok can confirm publication before its public URL is available.
+        incomplete=[dict(results[0],url='')]
+        with patch('app.social_publishing.publication_result',return_value=('abcdefabcdefabcdefabcdef','published',incomplete)):
+            reports.tick()
+        assert get.call_count==1 and calls==[]
+        assert one('SELECT status FROM social_publications WHERE content_id=?',(cid,))['status']=='published'
         reports.tick()
-        assert get.call_count==1 and get.call_args.args[1]=='GET'
+        assert get.call_count==2 and get.call_args.args[1]=='GET'
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda _:reports.tick(),range(4)))
     assert len(calls)==1 and calls[0][1]==reports.spacemail.ADDRESS

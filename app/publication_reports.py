@@ -14,7 +14,9 @@ def tick():
     from app import social_publishing as publishing
     # Read existing provider receipts only; never create or repeat a post.
     for pending in rows("""SELECT p.* FROM social_publications p JOIN spacemail_connections m ON m.user_id=p.approved_by
-        WHERE p.status IN ('scheduled','publishing') AND p.provider_post_id IS NOT NULL
+        WHERE (p.status IN ('scheduled','publishing') OR (p.status='published' AND p.updated_at>=m.updated_at
+            AND NOT EXISTS(SELECT 1 FROM publication_mail_reports r WHERE r.content_id=p.content_id)))
+        AND p.provider_post_id IS NOT NULL
         AND m.enabled=TRUE AND p.scheduled_at<=? ORDER BY p.id LIMIT 10""", (utcnow(),)):
         if not sender_ready(pending['approved_by'],spacemail.ADDRESS):
             continue
