@@ -9,7 +9,7 @@ def run(client,app):
     from app.storage import db,one,utcnow,get_session
     msg=EmailMessage()
     msg['From']='customer@example.com';msg['To']=r.spacemail.ADDRESS
-    msg['Date']=formatdate();msg['Message-ID']='<new-customer@example.com>'
+    msg['Date']=formatdate(usegmt=True);msg['Message-ID']='<new-customer@example.com>'
     msg['Subject']='طلب شحن';msg.set_content('أريد شحن بضاعة من جدة إلى الرياض')
     assert r.eligible_message(msg)=='customer@example.com'
     msg['Auto-Submitted']='auto-replied'
