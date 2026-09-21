@@ -18,6 +18,7 @@ def configuration_status():
     social = connection_status()
     return [
         {'name': 'نشر فيديوهات آفاق على YouTube وTikTok', 'configured': social['configured'], 'detail': 'حفظ الربط والتحقق من صلاحيات الحسابين ثم مراجعة كل فيديو وجدولته؛ لا يُعتبر الاتصال اختبار نشر حي'},
+        {'name': 'إنتاج الصور والفيديو عبر fal.ai', 'configured': bool(one('SELECT id FROM media_provider_settings WHERE id=1')), 'detail': 'استوديو الإنتاج يطلب اعتماد التكلفة ثم ينتج الوسائط ويجهز مسودة؛ نجاح الحفظ لا يثبت نجاح توليد حي'},
         {'name': 'أوامر واتساب الإدارية', 'configured': present('ZERNIO_API_KEY', 'ZERNIO_WEBHOOK_SECRET', 'WHATSAPP_COMMAND_OWNER', 'WHATSAPP_COMMAND_ACCOUNT_ID'), 'detail': 'تحتاج اختبار رسالة واردة وتنفيذ موثق من رقم الإدارة'},
         {'name': 'تفريغ الرسائل الصوتية', 'configured': present('OPENAI_API_KEY'), 'detail': 'يحتاج مفتاح تفريغ صوتي ثم اختبار رسالة صوتية'},
         {'name': 'إرسال عروض النقل عبر واتساب', 'configured': direct, 'detail': 'يحتاج إعداد مزود الإرسال واعتماد العرض قبل إرساله'},
@@ -31,7 +32,7 @@ def snapshot(request):
     session = get_session(request.cookies.get('gla_session'))
     if not session:
         raise HTTPException(401, 'Login required')
-    return {'release': '7.4.1-social-publishing', 'live_acceptance': 'pending',
+    return {'release': '7.5.0-media-production', 'live_acceptance': 'pending',
             'external_actions_enabled': os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') == '1',
             'integrations': configuration_status(),
             'gmail_connected': bool(one("SELECT id FROM email_connections WHERE user_id=? AND status='connected'", (session['user_id'],))),

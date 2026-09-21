@@ -66,8 +66,8 @@ def settings_response(session, *, error=None, status_code=200):
         body += '<div class="card"><b class="ok">مفتاح fal.ai محفوظ ومشفّر</b><p>آخر حفظ: ' + e(saved['updated_at']) + '</p></div>'
     else:
         body += '<div class="card">لم يتم حفظ مفتاح fal.ai بعد.</div>'
-    body += '<div class="card"><h2>حالة الإنتاج</h2><p>لم يُختبر المفتاح لدى fal.ai بعد. إنتاج الصور والفيديو لم يُفعّل بعد.</p>'
-    body += '<p>حفظ المفتاح لا ينشئ محتوى ولا يستهلك رصيدًا. يُحدَّد سقف الإنفاق قبل تشغيل الإنتاج.</p></div>'
+    body += '<div class="card"><h2>حالة الإنتاج</h2><p>حفظ المفتاح لا يثبت نجاح التوليد. افحص الاتصال ثم راجع تكلفة المهمة في الاستوديو.</p><p><a class="btn" href="/media-pricing">فحص المفتاح والأسعار — دون توليد</a> <a class="btn" href="/media-studio">فتح استوديو الإنتاج</a></p>'
+    body += '<p>حفظ المفتاح لا ينشئ محتوى ولا يستهلك رصيدًا. تُعتمد تكلفة كل مهمة قبل تشغيل الإنتاج.</p></div>'
     state = mfa_state(session['user_id'])
     if not state or not state.get('mfa_enabled'):
         body += '<div class="card"><p>فعّل التحقق الثنائي لحفظ مفتاح الإنتاج.</p><a class="btn" href="/mfa">إعداد التحقق الثنائي</a></div>'
