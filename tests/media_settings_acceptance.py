@@ -82,7 +82,7 @@ def run(client, app):
             assert saved_key not in record['api_key_enc'] and media_connection() == saved_key
             page = client.get(path)
             assert 'مفتاح fal.ai محفوظ ومشفّر' in page.text
-            assert 'لم يُختبر المفتاح' in page.text and 'لم يُفعّل بعد' in page.text
+            assert 'حفظ المفتاح لا يثبت نجاح التوليد' in page.text and '/media-pricing' in page.text
             assert saved_key not in page.text and record['api_key_enc'] not in page.text
             assert 'value="' + saved_key not in page.text
         sync_http.assert_not_called()

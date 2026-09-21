@@ -44,10 +44,11 @@ from app.saber_workflow import router as saber_workflow_router
 from app.social_content import router as social_content_router
 from app.social_publishing import router as social_publishing_router
 from app.media_settings import router as media_settings_router
+from app.media_studio import router as media_studio_router,register_worker as register_media_worker
 from app.readiness import router as readiness_router
 from app.storage import get_session,one,execute,utcnow
 ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/soc','/incidents','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'viewer':()}
-SENSITIVE=[('manage_media','POST','/settings/media',''),('manage_social','POST','/settings/social',''),('publish_social','POST','/content-center/','/schedule'),('send_email','POST','/outbound/','/send'),('send_email','POST','/shipping-agent-messages/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('make_phone_call','POST','/freight-workflow/','/contact-owner'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
+SENSITIVE=[('manage_media','POST','/media-studio/','/run'),('manage_media','POST','/settings/media',''),('manage_social','POST','/settings/social',''),('publish_social','POST','/content-center/','/schedule'),('send_email','POST','/outbound/','/send'),('send_email','POST','/shipping-agent-messages/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('make_phone_call','POST','/freight-workflow/','/contact-owner'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
 def role_allowed(request,s):
  if not s:return True
  role=s.get('role','viewer');path=request.url.path
@@ -89,6 +90,8 @@ app.include_router(saber_workflow_router)
 app.include_router(social_content_router)
 app.include_router(social_publishing_router)
 app.include_router(media_settings_router)
+app.include_router(media_studio_router)
+register_media_worker(app)
 
 app.include_router(zernio_receiver_router)
 app.include_router(readiness_router)

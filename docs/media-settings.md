@@ -12,12 +12,11 @@ and its credential-free audit entry are committed together. GET and redirect
 responses use `Cache-Control: no-store`; no response renders the saved credential.
 No Runway, Zernio or WhatsApp setting is read or changed by this setup.
 
-This release only provides secure credential intake. It does not call fal, test
-provider authorization or balance, generate media, spend credits, schedule or
-publish anything. The page explicitly identifies that remaining work. A stored
-key is not a successful generation test. The next integration needs an approved
-spending limit, generation task tracking and durable output storage before a
-real production test.
+Saving still provides credential intake only: it does not call fal or spend
+credits. `/media-pricing` separately checks authentication and current model
+prices without generation. `/media-studio` provides budget-reviewed production
+as described in `media-production.md`. A stored key or successful pricing lookup
+is not a successful generation or balance test.
 
 Validation: the full application PostgreSQL acceptance exercises authenticated
 and unauthenticated requests, roles and explicit permission denial, expired MFA,

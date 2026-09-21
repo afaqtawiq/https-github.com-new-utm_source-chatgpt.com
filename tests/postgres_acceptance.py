@@ -94,3 +94,6 @@ run_social_acceptance(client, app)
 
 from media_settings_acceptance import run as run_media_settings_acceptance
 run_media_settings_acceptance(client, app)
+
+from media_studio_acceptance import run as run_media_studio_acceptance
+run_media_studio_acceptance(client, app)
