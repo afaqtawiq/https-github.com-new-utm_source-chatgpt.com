@@ -144,6 +144,8 @@ def register_worker(app):
         while True:
             try:
                 await run_in_threadpool(tick)
+                from app.publication_reports import tick as report_tick
+                await run_in_threadpool(report_tick)
             except Exception:
                 pass
             await asyncio.sleep(60)

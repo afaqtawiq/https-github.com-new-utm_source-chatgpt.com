@@ -109,3 +109,5 @@ from agent_operations_acceptance import run as run_agent_operations_acceptance
 run_agent_operations_acceptance(client, app)
 from official_replies_acceptance import run as run_official_replies_acceptance
 run_official_replies_acceptance(client, app)
+from publication_reports_acceptance import run as run_publication_reports_acceptance
+run_publication_reports_acceptance(client, app)
