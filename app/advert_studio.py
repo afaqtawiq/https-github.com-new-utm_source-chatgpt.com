@@ -428,6 +428,8 @@ def detail(job_id: int, request: Request):
         body += '<p>تُستكمل المراحل تلقائيًا. لا تُعد إرسال طلب الإنتاج.</p><form method="post" action="/advert-studio/' + str(job_id) + '/sync">' + hidden_csrf(session) + '<button class="btn">تحديث نتيجة الطلب الموجود — دون توليد</button></form>'
     if job['status'] == 'needs_review' and all(s['status'] == 'complete' for s in steps):
         body += '<form method="post" action="/advert-studio/' + str(job_id) + '/retry-render">' + hidden_csrf(session) + '<button class="btn">إعادة المونتاج من النتائج المحفوظة — دون توليد</button></form>'
+    if job['status'] == 'needs_review':
+        body += '<p><a href="/agent-operations">مراجعة العطل واستئناف التشغيل</a></p>'
     body += '</div><div class="card"><h2>السيناريو والتعليق</h2><table><tr><th>اللقطة</th><th>نص الشاشة</th><th>التعليق الرجالي</th></tr>'
     for i, scene in enumerate(plan['scenes']):
         body += '<tr><td>' + str(i+1) + '. ' + e(scene['name']) + '</td><td>' + e(scene['text']) + '</td><td>' + e(scene['voice']) + '</td></tr>'

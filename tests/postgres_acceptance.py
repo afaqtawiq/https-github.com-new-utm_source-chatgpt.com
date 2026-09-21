@@ -105,3 +105,5 @@ from production_monitor_acceptance import run as run_production_monitor_acceptan
 run_production_monitor_acceptance(client, app)
 from spacemail_acceptance import run as run_spacemail_acceptance
 run_spacemail_acceptance(client, app)
+from agent_operations_acceptance import run as run_agent_operations_acceptance
+run_agent_operations_acceptance(client, app)
