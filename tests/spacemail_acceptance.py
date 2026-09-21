@@ -14,6 +14,13 @@ def run(client, app):
     with db() as c:
         c.execute('UPDATE stepup_auth SET expires_at=%s WHERE session_id=%s', (utcnow()+dt.timedelta(minutes=10),s['id']))
     assert client.get(m.PATH).status_code == 200
+    with patch.object(m.smtplib, 'SMTP_SSL', side_effect=TimeoutError), patch.object(m.imaplib, 'IMAP4_SSL', side_effect=TimeoutError):
+        result = m.probe_network()
+        assert result.count('قبل تسجيل الدخول') == 2
+    with patch.object(m, 'probe_network', return_value='network-test-ok') as probe:
+        assert client.post(m.PATH+'/network',data={'csrf':'wrong'}).status_code==403
+        probe.assert_not_called()
+        assert 'network-test-ok' in client.post(m.PATH+'/network',data={'csrf':s['csrf']}).text
     with patch.object(m, 'validate') as validate:
         assert client.post(m.PATH, data={**data,'csrf':'wrong'}).status_code == 403
         validate.assert_not_called()
