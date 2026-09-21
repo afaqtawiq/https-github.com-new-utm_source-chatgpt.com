@@ -1,5 +1,6 @@
 """Configuration and operational evidence; configured never means live-tested."""
 import os
+import json
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -16,9 +17,24 @@ def configuration_status():
               else present('WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN'))
     from app.social_publishing import connection_status
     social = connection_status()
+    published = None
+    published_ok = False
+    for candidate in rows("SELECT content_id,results_json,updated_at FROM social_publications WHERE status='published' ORDER BY updated_at DESC LIMIT 100"):
+        try:
+            results = json.loads(candidate['results_json'])
+            published_ok = ({p['platform'] for p in results} == {'youtube','tiktok'} and
+                            all(p.get('status') == 'published' and p.get('url') for p in results))
+            if published_ok:
+                published = candidate
+                break
+        except (ValueError, KeyError, TypeError):
+            pass
+    produced = one("SELECT id FROM media_jobs WHERE status='complete' AND kind='video' AND image_url IS NOT NULL AND video_url IS NOT NULL AND approved_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+    advert = one("SELECT j.id FROM advert_jobs j WHERE j.status='complete' AND j.approved_at IS NOT NULL AND EXISTS(SELECT 1 FROM advert_exports x WHERE x.job_id=j.id) ORDER BY j.id DESC LIMIT 1")
     return [
-        {'name': 'نشر فيديوهات آفاق على YouTube وTikTok', 'configured': social['configured'], 'detail': 'حفظ الربط والتحقق من صلاحيات الحسابين ثم مراجعة كل فيديو وجدولته؛ لا يُعتبر الاتصال اختبار نشر حي'},
-        {'name': 'إنتاج الصور والفيديو عبر fal.ai', 'configured': bool(one('SELECT id FROM media_provider_settings WHERE id=1')), 'detail': 'استوديو الإنتاج يطلب اعتماد التكلفة ثم ينتج الوسائط ويجهز مسودة؛ نجاح الحفظ لا يثبت نجاح توليد حي'},
+        {'name': 'نشر فيديوهات آفاق على YouTube وTikTok', 'configured': social['configured'], 'live_tested': published_ok, 'detail': ('ثبت نجاح النشر على الحسابين؛ راجع المحتوى رقم ' + str(published['content_id'])) if published_ok else 'يلزم إيصال نشر مؤكد للحسابين؛ حفظ الربط وحده لا يثبت نجاح النشر'},
+        {'name': 'إنتاج الصور والفيديو عبر fal.ai', 'configured': bool(one('SELECT id FROM media_provider_settings WHERE id=1')), 'live_tested': bool(produced), 'detail': ('اكتملت صورة وفيديو في مهمة الإنتاج رقم ' + str(produced['id'])) if produced else 'اعتماد التكلفة ثم إنتاج فعلي وحفظ النتيجة؛ حفظ المفتاح لا يثبت نجاح التوليد'},
+        {'name': 'إعلان كامل بالتعليق العربي والهوية', 'configured': bool(one('SELECT id FROM media_provider_settings WHERE id=1')), 'live_tested': bool(advert), 'detail': ('اكتمل الإعلان رقم ' + str(advert['id'])) if advert else 'المسار متاح؛ يحتاج اعتماد تكلفة إعلان ثم إنتاجًا حيًا ومراجعة الصوت والمونتاج'},
         {'name': 'أوامر واتساب الإدارية', 'configured': present('ZERNIO_API_KEY', 'ZERNIO_WEBHOOK_SECRET', 'WHATSAPP_COMMAND_OWNER', 'WHATSAPP_COMMAND_ACCOUNT_ID'), 'detail': 'تحتاج اختبار رسالة واردة وتنفيذ موثق من رقم الإدارة'},
         {'name': 'تفريغ الرسائل الصوتية', 'configured': present('OPENAI_API_KEY'), 'detail': 'يحتاج مفتاح تفريغ صوتي ثم اختبار رسالة صوتية'},
         {'name': 'إرسال عروض النقل عبر واتساب', 'configured': direct, 'detail': 'يحتاج إعداد مزود الإرسال واعتماد العرض قبل إرساله'},
@@ -32,7 +48,7 @@ def snapshot(request):
     session = get_session(request.cookies.get('gla_session'))
     if not session:
         raise HTTPException(401, 'Login required')
-    return {'release': '7.5.0-media-production', 'live_acceptance': 'pending',
+    return {'release': '7.6.0-cinematic-studio', 'live_acceptance': 'pending',
             'external_actions_enabled': os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') == '1',
             'integrations': configuration_status(),
             'gmail_connected': bool(one("SELECT id FROM email_connections WHERE user_id=? AND status='connected'", (session['user_id'],))),
@@ -49,10 +65,10 @@ def readiness_api(request: Request):
 def readiness_page(request: Request):
     from app.main import page, esc, head, current
     data = snapshot(request)
-    table = ''.join('<tr><td>' + esc(x['name']) + '</td><td>' + ('إعداد موجود — لم يُختبر حيًا' if x['configured'] else 'إعداد ناقص') + '</td><td>' + esc(x['detail']) + '</td></tr>' for x in data['integrations'])
+    table = ''.join('<tr><td>' + esc(x['name']) + '</td><td>' + ('اختبار إنتاج موثق ناجح' if x.get('live_tested') else ('إعداد موجود — لم يُختبر حيًا' if x['configured'] else 'إعداد ناقص')) + '</td><td>' + esc(x['detail']) + '</td></tr>' for x in data['integrations'])
     sources = ''.join('<tr><td>' + esc(x['name']) + '</td><td>' + esc(x['last_status'] or 'لم يُفحص') + '</td><td>' + esc(x['last_checked_at']) + '</td></tr>' for x in data['sources'])
     return HTMLResponse(page('جاهزية التشغيل', head(current(request), 'جاهزية التشغيل') +
-        '<div class="card"><h2>حالة الاختبار التشغيلي</h2><p>التصحيحات البرمجية مطبقة. اختبار القنوات الحي ودورة النقل الكاملة لم يُعتمدا بعد.</p><p>صلاحية الإجراءات الخارجية: ' + ('مفعّلة؛ تخضع لاعتماد الإجراء' if data['external_actions_enabled'] else 'متوقفة؛ يمكن تجهيز المسودات') +
+        '<div class="card"><h2>حالة الاختبار التشغيلي</h2><p>تعرض كل وظيفة دليل تشغيلها على حدة. دورة النقل الكاملة والقنوات الأخرى تحتفظ باختباراتها المستقلة.</p><p>صلاحية الإجراءات الخارجية: ' + ('مفعّلة؛ تخضع لاعتماد الإجراء' if data['external_actions_enabled'] else 'متوقفة؛ يمكن تجهيز المسودات') +
         '</p><p>Gmail: ' + ('ربط محفوظ؛ يحتاج اختبارًا حيًا' if data['gmail_connected'] else 'لا يوجد ربط محفوظ لهذا المستخدم') +
         '</p><a href="/settings/email">إعداد البريد</a></div><div class="card scroll"><table><tr><th>الوظيفة</th><th>الحالة</th><th>المتبقي</th></tr>' + table +
         '</table></div><div class="card scroll"><h2>آخر فحص للمصادر</h2><table><tr><th>المصدر</th><th>النتيجة</th><th>الوقت</th></tr>' + sources + '</table></div>'))
