@@ -31,6 +31,24 @@ def test_live_price_math_and_validation():
             f.prices('fixture')
 
 
+@pytest.mark.parametrize('unit', ['seconds', 'video_second', 'video_seconds', 'Video-Second', ' second '])
+def test_equivalent_second_units_preserve_five_second_budget(unit):
+    data = pricing()
+    data['prices'][1]['unit'] = unit
+    with patch.object(f, 'call', return_value=data):
+        assert f.prices('fixture')['video'] == Decimal('.350000')
+
+
+def test_unknown_unit_stays_blocked_and_diagnostic_excludes_unsafe_values():
+    for unit in ('megapixel', '<script>secret</script>', None, []):
+        data = pricing()
+        data['prices'][1]['unit'] = unit
+        with patch.object(f, 'call', return_value=data), pytest.raises(f.MediaError) as error:
+            f.prices('fixture')
+        assert 'secret' not in str(error.value)
+    assert 'unknown' in str(error.value)
+
+
 @pytest.mark.parametrize('url', ['http://v3.fal.media/x.mp4', 'https://evil.example/x.mp4',
     'https://fal.media.evil.example/x.mp4', 'https://user@v3.fal.media/x.mp4',
     'https://127.0.0.1/x.mp4', 'https://storage.googleapis.com/other/x.mp4',
