@@ -136,7 +136,7 @@ def scan():
     for settings in rows('SELECT * FROM production_monitor_settings WHERE enabled=TRUE'):
         for kind, table in [('advert', 'advert_jobs'), ('media', 'media_jobs')]:
             # Follow active jobs, and failures occurring after monitoring was enabled.
-            jobs = rows('SELECT id FROM ' + table + " WHERE created_by=? AND approved_at IS NOT NULL AND status!='draft' AND (status!='needs_review' OR updated_at>=?) ORDER BY updated_at DESC LIMIT 100",
+            jobs = rows('SELECT id FROM ' + table + " WHERE created_by=? AND approved_at IS NOT NULL AND status!='draft' AND (status NOT IN ('needs_review','failed') OR updated_at>=?) ORDER BY updated_at DESC",
                         (settings['user_id'], settings['enabled_at']))
             for candidate in jobs:
                 job = snapshot(kind, candidate['id'])
@@ -193,7 +193,8 @@ def tick():
         for field in ('alert', 'support'):
             c.execute('UPDATE production_incidents SET ' + field + "_status='uncertain'," + field + '_error=%s WHERE ' + field + "_status='sending' AND " + field + '_updated_at<%s',
                       ('انقطع تأكيد إرسال البريد؛ راجع الرسائل المرسلة قبل أي إعادة إرسال.', utcnow()-dt.timedelta(minutes=3)))
-    for item in rows("SELECT id FROM production_incidents WHERE alert_status='ready' ORDER BY id LIMIT 20"):
+    for item in rows("""SELECT i.id FROM production_incidents i JOIN production_monitor_settings s ON s.user_id=i.user_id
+        WHERE i.alert_status='ready' AND s.enabled=TRUE AND s.recipient=i.recipient AND s.sender=i.sender ORDER BY i.id LIMIT 20"""):
         deliver(item['id'])
 
 
