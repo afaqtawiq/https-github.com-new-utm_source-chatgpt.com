@@ -110,3 +110,7 @@ register_spacemail_worker(app)
 
 from app.agent_operations import router as agent_operations_router
 app.include_router(agent_operations_router)
+
+from app.official_replies import router as official_replies_router, register_worker as register_official_replies_worker
+app.include_router(official_replies_router)
+register_official_replies_worker(app)

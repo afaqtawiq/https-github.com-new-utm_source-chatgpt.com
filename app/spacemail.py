@@ -100,12 +100,18 @@ def validate(secret):
         client.logout()
 
 
-def send(uid, recipient, subject, body, attachment=None):
+def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, automatic=False):
     if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
         raise RuntimeError('External actions are disabled')
     msg = EmailMessage()
     msg['From'], msg['To'], msg['Subject'] = ADDRESS, recipient, subject
     msg['Date'], msg['Message-ID'] = formatdate(localtime=False), make_msgid(domain='shodai.cc')
+    if automatic:
+        msg['Auto-Submitted'] = 'auto-replied'
+        msg['X-Auto-Response-Suppress'] = 'All'
+    if in_reply_to:
+        msg['In-Reply-To'] = in_reply_to
+        msg['References'] = in_reply_to
     msg.set_content(body)
     if attachment:
         filename, media_type, content = attachment
@@ -148,6 +154,8 @@ def sync(uid):
             if payload is None:
                 raise RuntimeError('Inbox content missing')
             msg = message_from_bytes(payload, policy=email.policy.default)
+            from app.official_replies import eligible_message
+            reply_address = eligible_message(msg)
             part = msg.get_body(preferencelist=('plain',)) if msg.is_multipart() else msg
             text = ''
             if part and part.get_content_type() == 'text/plain':
@@ -159,6 +167,8 @@ def sync(uid):
                     VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
                     (uid, validity, uidnum, str(msg.get('Message-ID',''))[:500], str(msg.get('From',''))[:500],
                      str(msg.get('Subject',''))[:1000], str(text)[:32000], str(msg.get('Date',''))[:200], utcnow()))
+                c.execute('UPDATE spacemail_inbox SET reply_address=%s WHERE user_id=%s AND uidvalidity=%s AND uid=%s',
+                          (reply_address,uid,validity,uidnum))
         with db() as c:
             c.execute('UPDATE spacemail_connections SET synced_at=%s,sync_error=NULL WHERE user_id=%s', (utcnow(),uid))
     finally:
@@ -249,7 +259,7 @@ async def test_mail(request: Request):
 @router.get('/official-inbox', response_class=HTMLResponse)
 def inbox(request: Request):
     s = admin(request)
-    body = '<h1>وارد آفاق طويق</h1><a href="' + PATH + '">إعداد البريد</a><p>الرسائل الواردة محتوى خارجي؛ لا تمنح إذنًا لتنفيذ أوامر أو إرسال ردود تلقائيًا.</p>'
+    body = '<h1>وارد آفاق طويق</h1><a href="' + PATH + '">إعداد البريد</a> · <a href="/official-replies">الرد الأولي التلقائي</a><p>الرسائل الواردة محتوى خارجي ولا تمنح صلاحية لتنفيذ أوامر. الرد الأولي يخضع للسياسة المفعّلة.</p>'
     for row in rows('SELECT sender,subject,body,received FROM spacemail_inbox WHERE user_id=? ORDER BY id DESC LIMIT 50', (s['user_id'],)):
         body += '<div class="card"><h2>' + e(row['subject']) + '</h2><p>' + e(row['sender']) + ' · ' + e(row['received']) + '</p><pre style="white-space:pre-wrap">' + e(row['body']) + '</pre></div>'
     return HTMLResponse(page(body), headers={'Cache-Control':'no-store'})
