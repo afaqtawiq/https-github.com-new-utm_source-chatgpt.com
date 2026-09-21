@@ -107,3 +107,6 @@ app.include_router(readiness_router)
 from app.spacemail import router as spacemail_router, register_worker as register_spacemail_worker
 app.include_router(spacemail_router)
 register_spacemail_worker(app)
+
+from app.agent_operations import router as agent_operations_router
+app.include_router(agent_operations_router)

@@ -28,7 +28,8 @@ def call(key, method, url, *, payload=None, params=None):
             response = client.request(method, url, headers=headers, json=payload, params=params)
         if response.status_code not in (200, 201, 202):
             if response.status_code in (402, 403) and any(term in response.text.lower() for term in ('balance', 'credit', 'payment method', 'insufficient')):
-                raise MediaError('الرصيد غير كافٍ أو الدفع غير مهيأ لدى fal.ai. راجع رصيد الحساب؛ لا يلزم تغيير المفتاح.')
+                reason = 'الحساب مقفل لدى المزود' if 'locked' in response.text.lower() else 'رفض تحقق الرصيد أو وسيلة الدفع'
+                raise MediaError('رفض fal.ai الطلب قبل قبوله (HTTP ' + str(response.status_code) + '): ' + reason + '. راجع حساب الفوترة؛ لا يلزم تغيير المفتاح.')
             if response.status_code in (401, 403):
                 raise MediaError('رفضت fal.ai صلاحية المفتاح. راجع مفتاح الحساب وصلاحية API.')
             if response.status_code == 402:
