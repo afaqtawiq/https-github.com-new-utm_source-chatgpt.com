@@ -103,3 +103,7 @@ register_monitor_worker(app)
 
 app.include_router(zernio_receiver_router)
 app.include_router(readiness_router)
+
+from app.spacemail import router as spacemail_router, register_worker as register_spacemail_worker
+app.include_router(spacemail_router)
+register_spacemail_worker(app)

@@ -17,7 +17,9 @@ def cfg():
  return cid,sec,redir,key,scope
 def enc(v,key):return Fernet(key.encode()).encrypt(v.encode()).decode()
 def dec(v,key):return Fernet(key.encode()).decrypt(v.encode()).decode()
-def connection(uid):return one('SELECT * FROM email_connections WHERE user_id=?',(uid,))
+def connection(uid):
+ from app.spacemail import connection as official_connection
+ return official_connection(uid) or one('SELECT * FROM email_connections WHERE user_id=?',(uid,))
 def safe_google_error(resp):
  try:
   data=resp.json();err=data.get('error',{})
@@ -49,12 +51,14 @@ def gmail_get(user_id,path,params=None):
   return r.json()
 @router.get('/settings/email',response_class=HTMLResponse)
 def settings(request:Request):
- s=auth(request);c=connection(s['user_id']);configured=all(os.getenv(k) for k in ('GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REDIRECT_URI','TOKEN_ENCRYPTION_KEY'));read_ok=has_reply_read_scope(c)
+ s=auth(request);c=connection(s['user_id'])
+ if c and c.get('provider')=='spacemail':return RedirectResponse('/settings/email/spacemail',303)
+ configured=all(os.getenv(k) for k in ('GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REDIRECT_URI','TOKEN_ENCRYPTION_KEY'));read_ok=has_reply_read_scope(c)
  status=('متصل: '+html.escape(c.get('sender_email') or 'Gmail')) if c and c.get('status')=='connected' else 'غير متصل'
  action='<a href="/auth/google/start" style="display:inline-block;padding:12px 18px;background:#22c55e;color:#06120b;border-radius:10px;text-decoration:none;font-weight:bold">'+('إعادة ربط Gmail لتفعيل قراءة الردود' if c and not read_ok else 'ربط Gmail')+'</a>' if configured else '<b>إعداد Google OAuth غير مكتمل في Railway.</b>'
  if c and c.get('status')=='connected':action+='<form method="post" action="/settings/email/disconnect" style="margin-top:12px"><button>فصل الربط</button></form>'
  perms='الإرسال + قراءة الردود داخل محادثات المبيعات فقط' if read_ok else 'الإرسال مفعل؛ قراءة الردود تحتاج إعادة موافقة Google'
- return HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>إعداد البريد</title><body style="font-family:Arial;background:#07131f;color:white;padding:30px"><a href="/dashboard" style="color:white">الرئيسية</a><h1>قناة البريد</h1><p>'+status+'</p><p>'+perms+'. النظام لا يرسل أي رد تلقائي.</p>'+action+'</body></html>')
+ return HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>إعداد البريد</title><body style="font-family:Arial;background:#07131f;color:white;padding:30px"><a href="/dashboard" style="color:white">الرئيسية</a><h1>قناة البريد</h1><p><a href="/settings/email/spacemail">ربط البريد الرسمي afaq@shodai.cc</a></p><p>'+status+'</p><p>'+perms+'. النظام لا يرسل أي رد تلقائي.</p>'+action+'</body></html>')
 @router.get('/auth/google/start')
 def start(request:Request):
  s=auth(request);cid,sec,redir,key,scope=cfg();state=secrets.token_urlsafe(32);execute('UPDATE sessions SET csrf=? WHERE id=?',(state,s['id']))
@@ -82,6 +86,8 @@ def callback(request:Request,code:str='',state:str='',error:str=''):
 def disconnect(request:Request):
  s=auth(request);execute('DELETE FROM email_connections WHERE user_id=?',(s['user_id'],));log(s['user_id'],'disconnect_gmail','email_connection',None,'Gmail sender disconnected');return RedirectResponse('/settings/email',303)
 def send_gmail(user_id,recipient,subject,body):
+ from app.spacemail import connection as official_connection,send as official_send
+ if official_connection(user_id):return official_send(user_id,recipient,subject,body)
  if os.getenv('ENABLE_EXTERNAL_ACTIONS','0')!='1':raise RuntimeError('External actions are disabled')
  c=connection(user_id)
  if not c or c.get('status')!='connected':raise RuntimeError('Gmail is not connected')
@@ -92,6 +98,8 @@ def send_gmail(user_id,recipient,subject,body):
   return sr.json().get('id','')
 
 def send_gmail_with_attachment(user_id,recipient,subject,body,filename,media_type,content):
+ from app.spacemail import connection as official_connection,send as official_send
+ if official_connection(user_id):return official_send(user_id,recipient,subject,body,(filename,media_type,content))
  if os.getenv('ENABLE_EXTERNAL_ACTIONS','0')!='1':raise RuntimeError('External actions are disabled')
  c=connection(user_id)
  if not c or c.get('status')!='connected':raise RuntimeError('Gmail is not connected')
