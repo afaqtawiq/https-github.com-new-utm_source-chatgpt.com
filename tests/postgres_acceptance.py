@@ -103,3 +103,5 @@ run_advert_acceptance(client, app)
 
 from production_monitor_acceptance import run as run_production_monitor_acceptance
 run_production_monitor_acceptance(client, app)
+from spacemail_acceptance import run as run_spacemail_acceptance
+run_spacemail_acceptance(client, app)

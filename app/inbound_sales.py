@@ -61,7 +61,9 @@ def sync_replies(uid):
  return checked,added
 @router.get('/sales-inbox')
 def inbox(request:Request):
- s=auth(request);c=connection(s['user_id']);read_ok=has_reply_read_scope(c);data=rows('SELECT r.*,o.company_name FROM inbound_replies r LEFT JOIN opportunities o ON o.id=r.opportunity_id ORDER BY r.received_at DESC,r.id DESC LIMIT 200')
+ s=auth(request);c=connection(s['user_id'])
+ if c and c.get('provider')=='spacemail':return RedirectResponse('/official-inbox',303)
+ read_ok=has_reply_read_scope(c);data=rows('SELECT r.*,o.company_name FROM inbound_replies r LEFT JOIN opportunities o ON o.id=r.opportunity_id ORDER BY r.received_at DESC,r.id DESC LIMIT 200')
  trs=''.join('<tr><td>'+esc(x.get('company_name'))+'</td><td>'+esc(x['sender'])+'</td><td>'+esc(x['subject'])+'</td><td><span class="pill">'+esc(x['classification'])+'</span> '+str(x['confidence'])+'%</td><td>'+esc(x['received_at'])+'</td><td><a class="btn" href="/sales-inbox/'+str(x['id'])+'">فتح</a></td></tr>' for x in data)
  notice=('<form method="post" action="/sales-inbox/sync"><button class="btn">مزامنة ردود العملاء الآن</button></form>' if read_ok else '<div class="card"><b>قراءة الردود غير مفعلة.</b><p>أعد ربط Gmail من إعداد البريد ووافق على صلاحية القراءة للردود.</p><a class="btn" href="/settings/email">إعداد Gmail</a></div>')
  return shell(nav()+'<h1>ردود العملاء</h1><div class="card"><b>الخصوصية:</b> النظام يتتبع فقط محادثات Gmail التي بدأها من رسائل مبيعات مسجلة في CRM، ولا ينفذ أي رد تلقائي.</div>'+notice+'<div class="card"><table><tr><th>العميل</th><th>المرسل</th><th>العنوان</th><th>التصنيف</th><th>الوصول</th><th></th></tr>'+trs+'</table></div>')
