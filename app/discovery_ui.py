@@ -3,6 +3,7 @@ from fastapi import APIRouter,Request,HTTPException
 from fastapi.responses import HTMLResponse,RedirectResponse
 from app.storage import get_session,rows,one,execute,log,utcnow
 from app.discovery import fetch_public
+from app.opportunity_quality import verify_public_request
 
 router=APIRouter()
 STYLE='''<style>body{font-family:Arial;background:#07131f;color:#eef6fb;margin:0}*{box-sizing:border-box}.wrap{max-width:1250px;margin:auto;padding:24px}.card{background:#102536;border:1px solid #28475d;border-radius:16px;padding:20px;margin:14px 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.nav{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.nav a,.btn{display:inline-block;padding:10px 14px;border:0;border-radius:10px;background:#18384d;color:white;font-weight:700;text-decoration:none;cursor:pointer}.btn{background:#22c55e;color:#04130a}.muted{color:#9fb4c4}.good{color:#54e28b}.warn{color:#fbbf24}input{padding:12px;border:1px solid #36586e;border-radius:9px;margin:6px 0;background:#081925;color:white;width:100%}.formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}table{width:100%;border-collapse:collapse}th,td{text-align:right;padding:11px;border-bottom:1px solid #28475d;vertical-align:top}.scroll{overflow:auto}.pill{padding:4px 8px;border-radius:999px;background:#18384d}</style>'''
@@ -67,6 +68,8 @@ def convert_signal(signal_id:int,r:Request):
     sig=one('SELECT * FROM discovered_signals WHERE id=?',(signal_id,))
     if not sig:return HTMLResponse(page('غير موجود','<div class="card">الإشارة غير موجودة.</div>'),404)
     if sig.get('opportunity_id'):return RedirectResponse('/opportunities',303)
+    try: verify_public_request(sig['url'])
+    except Exception as exc: raise HTTPException(409, str(exc))
     now=utcnow(); stage='qualified' if sig['score']>=70 else ('research' if sig['score']>=40 else 'new')
     oid=execute('INSERT INTO opportunities(company_name,source_url,signal,score,stage,estimated_value,currency,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(sig['company_name'] or sig['title'],sig['url'],sig['excerpt'],sig['score'],stage,0,'SAR',s['email'],now,now))
     execute('UPDATE discovered_signals SET status=?,opportunity_id=? WHERE id=?',('converted',oid,signal_id)); log(s['user_id'],'convert','discovered_signal',signal_id,f'Opportunity {oid}')

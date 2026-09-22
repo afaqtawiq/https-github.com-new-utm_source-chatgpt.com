@@ -3,6 +3,7 @@ from fastapi import APIRouter,Request,HTTPException
 from fastapi.responses import HTMLResponse,RedirectResponse
 from app.storage import get_session,rows,one,execute,log,utcnow
 from app.gmail_oauth import send_gmail,connection
+from app.opportunity_quality import verify_public_request
 router=APIRouter()
 def esc(v): return html.escape(str(v or ''))
 def auth(r):
@@ -21,6 +22,8 @@ def home(request:Request):
 def create_from_opportunity(oid:int,request:Request):
  s=auth(request);op=one('SELECT * FROM opportunities WHERE id=?',(oid,));intel=one('SELECT * FROM opportunity_intelligence WHERE opportunity_id=?',(oid,))
  if not op or not intel: raise HTTPException(400,'Generate Sales Copilot first')
+ try: verify_public_request(op.get('source_url'))
+ except Exception as exc: raise HTTPException(409,str(exc))
  body='السادة/ '+op['company_name']+'\n\nتحية طيبة،\nنود من آفاق طويق مناقشة احتياجكم المرتبط بـ '+(intel.get('services') or 'الخدمات اللوجستية')+'.\nيسعدنا دراسة نطاق العمل وتقديم الحل التشغيلي المناسب بعد التحقق من المتطلبات.\n\nمع التحية،\nآفاق طويق';mid=execute('INSERT INTO outbound_messages(opportunity_id,channel,subject,body,proposal_text,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(oid,'email','عرض خدمات لوجستية — آفاق طويق',body,intel.get('proposal_draft'),'draft',s['user_id'],utcnow(),utcnow()));log(s['user_id'],'create_outbound_draft','outbound_message',mid,'Draft created; not sent');return RedirectResponse('/outbound/'+str(mid),303)
 @router.get('/outbound/{mid}',response_class=HTMLResponse)
 def detail(mid:int,request:Request):
@@ -59,6 +62,9 @@ def send(mid:int,request:Request):
  if not m or m['status']!='approved':raise HTTPException(409,'Message is not approved')
  a=one('SELECT * FROM approvals WHERE id=?',(m['approval_id'],));
  if not a or a['status']!='approved':raise HTTPException(409,'Approval missing')
+ op=one('SELECT * FROM opportunities WHERE id=?',(m['opportunity_id'],))
+ try: verify_public_request((op or {}).get('source_url'), m.get('recipient'))
+ except Exception as exc: raise HTTPException(409,str(exc))
  try:
   provider_id=send_gmail(s['user_id'],m['recipient'],m['subject'],m['body']+'\n\n'+(m.get('proposal_text') or ''));now=utcnow();execute('UPDATE outbound_messages SET status=?,provider=?,provider_message_id=?,sent_at=?,updated_at=?,last_error=NULL WHERE id=?',('sent','gmail',provider_id,now,now,mid));execute('UPDATE opportunities SET stage=?,updated_at=? WHERE id=? AND stage NOT IN (?,?)',('contacted',now,m['opportunity_id'],'won','lost'));existing=one("SELECT COUNT(*) n FROM sales_followups WHERE opportunity_id=? AND status='open'",(m['opportunity_id'],))['n'];
   if not existing:execute('INSERT INTO sales_followups(opportunity_id,kind,due_at,status,notes,created_by,created_at) VALUES(?,?,?,?,?,?,?)',(m['opportunity_id'],'follow_up',now+datetime.timedelta(days=3),'open','متابعة تلقائية بعد الإرسال: تحقق من الرد وحدد الإجراء التالي.',s['user_id'],now))

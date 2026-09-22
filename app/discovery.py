@@ -3,6 +3,7 @@ from urllib.parse import urlparse, urljoin
 import httpx
 
 from app.search_connectors import external_search_candidates
+from app.opportunity_quality import assess, verify_public_request
 
 TERMS={
  'customs':['تخليص جمركي','مخلص جمركي','التخليص الجمركي','customs clearance','customs broker','clearance services'],
@@ -76,7 +77,7 @@ def extract_candidates(raw, base_url):
         candidates.append({
             "title": title[:500],
             "url": href,
-            "excerpt": context[:900],
+            "excerpt": title[:900],
             "score": score,
             "matched_terms": matched,
         })
@@ -96,10 +97,13 @@ def fetch_public(url):
         ctype=r.headers.get('content-type','').lower()
         if not any(x in ctype for x in ('text/html','text/plain','application/xhtml+xml','application/xml','text/xml','application/rss+xml')):raise ValueError('Unsupported content type')
         raw=r.text[:500000]
-    title,text=strip_html(raw); score,matched=score_text(title+' '+text)
-    excerpt=text[:900]
+    title,text=strip_html(raw)
+    article = re.search(r'(?is)<article\b[^>]*>(.*?)</article>', raw)
+    request_text = strip_html(article.group(1))[1] if article else text
+    score,matched=score_text(title+' '+request_text)
+    excerpt=request_text[:900]
     return {'title':title or urlparse(url).hostname,'url':str(r.url),'excerpt':excerpt,'score':score,'matched_terms':matched,
-            'candidates':extract_candidates(raw,str(r.url))}
+            'request_text':request_text,'detail_extracted':bool(article),'candidates':extract_candidates(raw,str(r.url))}
 
 def fingerprint(url):return hashlib.sha256(url.strip().encode()).hexdigest()
 
@@ -135,6 +139,21 @@ def _promote_signal(signal_id, source_name, result):
     signal = one("SELECT * FROM discovered_signals WHERE id=?", (signal_id,))
     if not signal or signal.get("opportunity_id"):
         return signal.get("opportunity_id") if signal else None
+    quality = assess(result.get('title', source_name), result.get('excerpt', ''), result.get('url', ''))
+    if not quality['is_request']:
+        execute("UPDATE discovered_signals SET status=? WHERE id=?", (quality['kind'], signal_id))
+        return None
+    try:
+        verified = verify_public_request(result['url'])
+    except Exception:
+        execute("UPDATE discovered_signals SET status='needs_verification' WHERE id=?", (signal_id,))
+        return None
+    result = dict(result, excerpt=verified['excerpt'], url=verified['url'])
+    source_name = verified['title']
+    existing = one("SELECT id FROM opportunities WHERE split_part(source_url,'#',1)=? LIMIT 1", (result['url'].split('#',1)[0],))
+    if existing:
+        execute("UPDATE discovered_signals SET status='promoted',opportunity_id=? WHERE id=?", (existing['id'], signal_id))
+        return existing['id']
     now = utcnow()
     opportunity_id = execute(
         """INSERT INTO opportunities(company_name,source_url,signal,score,stage,estimated_value,currency,owner,created_at,updated_at)
@@ -298,8 +317,8 @@ def _scan_registered_customers():
                 "phone": phone,
                 "recipient": email or phone,
             }
-            _promote_signal(signal_id, name, result)
-            stats["customer_opportunities"] += 1
+            oid = _promote_signal(signal_id, name, result)
+            stats["customer_opportunities"] += int(bool(oid))
     return stats
 
 
@@ -348,8 +367,8 @@ def _scan_external_search():
         )
         stats["external_signals"] += 1
         if item["score"] >= 60:
-            _promote_signal(signal_id, item.get("company_name") or item["title"], item)
-            stats["external_opportunities"] += 1
+            oid = _promote_signal(signal_id, item.get("company_name") or item["title"], item)
+            stats["external_opportunities"] += int(bool(oid))
     return stats
 
 def _activate_customer_pilot(limit=10):
@@ -409,7 +428,7 @@ def _run_discovery_cycle():
     stats = {"checked": 0, "signals": 0, "opportunities": 0, "errors": 0}
     customer_stats = _scan_registered_customers()
     stats.update(customer_stats)
-    pilot_stats = _activate_customer_pilot(10)
+    pilot_stats = {"pilot_target": 0, "pilot_active": 0, "pilot_activated": 0}
     stats.update(pilot_stats)
     external_stats = _scan_external_search()
     stats.update(external_stats)
@@ -446,8 +465,8 @@ def _run_discovery_cycle():
                 )
                 stats["signals"] += 1
                 if candidate["score"] >= 50:
-                    _promote_signal(signal_id, source["name"], candidate)
-                    stats["opportunities"] += 1
+                    oid = _promote_signal(signal_id, candidate["title"], candidate)
+                    stats["opportunities"] += int(bool(oid))
             execute(
                 "UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?",
                 (f"تم الفحص — {len(scan_results)} نتيجة — أعلى درجة {highest_score}", utcnow(), source["id"]),
