@@ -6,7 +6,7 @@ EMAIL = 'afaq@shodai.cc'
 PHONE = '+966530130435'
 WEBSITE = 'https://www.afaqtwiq.com/'
 SUBJECT = 'خدمات آفاق طويق في ميناء جدة الإسلامي | التخليص والنقل والتخزين'
-TEMPLATE_NAME = 'afaaq_marketing_jeddah_brochure_v1_ar'
+TEMPLATE_NAME = 'afaaq_marketing_jeddah_brochure_v2_ar'
 SERVICES = [
     ('التخليص الجمركي', 'متابعة إجراءات التخليص في ميناء جدة.'),
     ('استقبال الشحنات', 'تنسيق وصول الشحنة ومتابعة المستندات.'),
@@ -66,12 +66,12 @@ def message_text(brochure_url, unsubscribe_url):
 
 def message_html(brochure_url, unsubscribe_url):
     e = html.escape
-    cards = ''.join('<tr><td style="padding:14px 22px;border-bottom:1px solid #e4e8eb"><b style="color:#0b2537">'+e(t)+'</b><br><span style="color:#526777">'+e(d)+'</span></td></tr>' for t,d in SERVICES)
-    return f'''<!doctype html><html lang="ar" dir="rtl"><body style="margin:0;background:#f5f3ed;font-family:Arial,sans-serif">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px 12px">
-    <table role="presentation" width="600" style="width:100%;max-width:600px;background:white;border-collapse:collapse">
-    <tr><td style="background:#0b2537;color:white;padding:30px 24px"><b style="color:#d9b365">آفاق طويق</b><h1 style="font-size:28px;line-height:1.5">شحناتكم عبر ميناء جدة<br>خدمات متكاملة حتى وجهتكم</h1><p>من وصول الشحنة إلى التخليص والنقل والتسليم.</p></td></tr>
-    {cards}<tr><td style="padding:24px;background:#d9b365;color:#0b2537"><h2 style="margin-top:0">اطلب عرض سعر لشحنتك</h2><p>أرسل نوع البضاعة والوزن أو عدد الحاويات وموعد الوصول والوجهة.</p><a href="https://wa.me/966530130435" style="display:inline-block;padding:12px 20px;background:#0b2537;color:white;text-decoration:none;border-radius:6px">تواصل عبر واتساب</a> <a href="{e(brochure_url)}" style="color:#0b2537">تحميل البروشور PDF</a></td></tr>
-    <tr><td style="padding:22px;background:#0b2537;color:white;line-height:2">واتساب: <a dir="ltr" style="color:white" href="https://wa.me/966530130435">{PHONE}</a><br>البريد: <a style="color:white" href="mailto:{EMAIL}">{EMAIL}</a><br>الموقع: <a style="color:white" href="{WEBSITE}">www.afaqtwiq.com</a><br><small>من الحدود... إلى وجهة تجارتك</small></td></tr>
+    artwork_url = brochure_url.rsplit('.', 1)[0] + '.jpg'
+    return f'''<!doctype html><html lang="ar" dir="rtl"><body style="margin:0;background:#e9edf1;font-family:Arial,sans-serif">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:20px 8px">
+    <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;background:white;border-collapse:collapse">
+    <tr><td><a href="{e(brochure_url)}"><img src="{e(artwork_url)}" width="640" alt="آفاق طويق — شحناتك في ميناء جدة، نكمل رحلتها. تخليص جمركي، نقل بري، تخزين ومناولة، شحن وتسليم." style="display:block;width:100%;max-width:640px;height:auto;border:0"></a></td></tr>
+    <tr><td style="padding:26px;color:#082139;font-size:16px;line-height:1.9"><h2 style="margin:0 0 10px">هل لديكم شحنة قادمة عبر ميناء جدة؟</h2><p>آفاق طويق لخدمات التخليص الجمركي، استقبال الشحنات، النقل البري، المناولة والتخزين، والشحن والتسليم.</p><p>لطلب عرض سعر، أرسلوا نوع البضاعة والوزن أو عدد الحاويات وموعد الوصول والوجهة.</p><a href="https://wa.me/966530130435" style="display:inline-block;padding:12px 22px;background:#082139;color:white;text-decoration:none;border-radius:6px">اطلب عرض سعر عبر واتساب</a><p><a href="{e(brochure_url)}" style="color:#082139">تحميل البروشور PDF</a> — تجدون نسخة مرفقة أيضًا.</p></td></tr>
+    <tr><td style="padding:22px;background:#082139;color:white;line-height:2">واتساب: <a dir="ltr" style="color:#ecc183" href="https://wa.me/966530130435">{PHONE}</a><br>البريد: <a style="color:#ecc183" href="mailto:{EMAIL}">{EMAIL}</a><br>الموقع: <a style="color:#ecc183" href="{WEBSITE}">www.afaqtwiq.com</a></td></tr>
     <tr><td style="padding:16px;font-size:12px;color:#526777">رسالة تعريفية بخدمات آفاق طويق. <a href="{e(unsubscribe_url)}" style="color:#526777">إيقاف الرسائل التسويقية</a></td></tr>
     </table></td></tr></table></body></html>'''

@@ -29,6 +29,7 @@ from app.zernio_whatsapp import WhatsAppBlocked,template_parameters
 client=TestClient(app,base_url='http://testserver',headers={'origin':'http://testserver'})
 assert client.get('/customer-campaigns').status_code==401
 assert client.get(m.PDF_PATH).content.startswith(b'%PDF')
+assert client.get(m.ART_PATH).headers['content-type']=='image/jpeg'
 assert client.post('/login',data={'email':'marketing@example.invalid','password':password}).status_code==200
 session=get_session(client.cookies.get('gla_session'));csrf=session['csrf']
 for name,email,phone in [('Fixture A','fixture-a@example.com','+966500000021'),('Fixture B','fixture-b@example.com','+971500000022'),('Duplicate','FIXTURE-A@example.com','+966500000021')]:
@@ -47,6 +48,7 @@ assert EMAIL in client.get(f'/customer-campaigns/{cid}/preview').text
 assert template_parameters(m.template_spec(campaign),campaign['plain_template'].replace('__UNSUBSCRIBE__','https://example.com/unsub'))==['https://example.com/unsub']
 sendpath=f'/customer-campaigns/{cid}/send/email'
 assert client.post(sendpath,data={'csrf':csrf,'confirmed':'yes'}).status_code==428
+assert client.post('/customer-campaigns/schedule',data={'csrf':csrf,'enabled':'1','confirmed':'yes'}).status_code==428
 calls=[]
 def provider(*args,**kwargs):
     calls.append((args,kwargs));return 'ci-'+str(len(calls))
@@ -93,5 +95,38 @@ with patch.object(spacemail,'password',return_value='fixture'),patch.object(spac
 assert mid and smtp.message['From']==EMAIL
 assert smtp.message.get_body(preferencelist=('html',)).get_content().strip()=='<b>Brochure</b>'
 assert next(smtp.message.iter_attachments()).get_content().startswith(b'%PDF')
+# Recurring approval is MFA protected; daily runs use durable, unique day keys.
+from datetime import datetime
+from zoneinfo import ZoneInfo
+schedule_path='/customer-campaigns/schedule'
+daily_calls=[]
+def daily_email(*args,**kwargs):daily_calls.append(('email',args[1]));return 'daily-email-'+str(len(daily_calls))
+async def daily_wa(recipient,*args,**kwargs):
+    daily_calls.append(('whatsapp',recipient));return {'messages':[{'id':'daily-wa-'+str(len(daily_calls))}]}
+async def ready(*args):return True
+date1=datetime(2070,1,2,9,0,tzinfo=ZoneInfo('Asia/Riyadh'))
+with patch('app.bootstrap.mfa_state',return_value={'mfa_enabled':1}),patch('app.bootstrap.recent_stepup',return_value=True),patch('app.mfa_stepup.mfa_state',return_value={'mfa_enabled':1}),patch.object(m,'mailbox_connection',return_value={'status':'connected'}),patch.object(m,'official_send',daily_email),patch.object(m.wa,'send',daily_wa),patch.object(m,'approved_template',ready):
+    assert client.post(schedule_path,data={'csrf':csrf,'enabled':'1'}).status_code==400
+    assert client.post(schedule_path,data={'csrf':csrf,'enabled':'1','confirmed':'yes'}).status_code==200
+    asyncio.run(m.daily_tick(date1.replace(hour=8)))
+    assert not daily_calls
+    async def parallel_tick():await asyncio.gather(m.daily_tick(date1),m.daily_tick(date1))
+    asyncio.run(parallel_tick())
+    assert len(daily_calls)==3,daily_calls  # 2 emails, 1 WhatsApp; opt-out excluded.
+    asyncio.run(m.daily_tick(date1.replace(hour=12)))
+    assert len(daily_calls)==3
+    execute('INSERT INTO accounts(name,email,phone,status,created_at,updated_at) VALUES(?,?,?,?,?,?)',('New daily company','new@example.com','','lead',utcnow(),utcnow()))
+    asyncio.run(m.daily_tick(date1.replace(day=3)))
+    assert len(daily_calls)==7  # the newly registered company joins the next day.
+    assert len(rows("SELECT id FROM customer_campaigns WHERE campaign_key LIKE '%2070-01-%'"))==2
+    assert client.post(schedule_path,data={'csrf':csrf,'enabled':'0'}).status_code==200
+    asyncio.run(m.daily_tick(date1.replace(day=4)))
+    assert len(daily_calls)==7
+    assert client.post(schedule_path,data={'csrf':csrf,'enabled':'1','confirmed':'yes'}).status_code==200
+    with patch.object(m,'content_digest',return_value='changed-artwork'):
+        asyncio.run(m.daily_tick(date1.replace(day=4)))
+    assert not one('SELECT enabled FROM customer_campaign_schedule WHERE id=1')['enabled']
+    assert len(daily_calls)==7
+print('PASS: daily Riyadh schedule, MFA approval, same-day non-duplication, parallel workers, next-day roster refresh, stop control, approved artwork fingerprint.')
 print('PASS: customer roster deduplication, public PDF, immutable approval, MFA, HTML+PDF MIME, template gate, unsubscribe, receipts, uncertain-send non-retry.')
 with psycopg.connect(url,autocommit=True) as conn:conn.execute('DROP SCHEMA '+schema+' CASCADE')
