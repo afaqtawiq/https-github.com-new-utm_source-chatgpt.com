@@ -28,7 +28,7 @@ def is_menu_request(text):
     return control_text(text) in {
         "hi", "hello", "hey", "start", "menu", "restart", "back",
         "مرحبا", "اهلا", "أهلا", "السلام عليكم", "السلام عليكم ورحمة الله وبركاته",
-        "القائمة", "القائمة الرئيسية", "البداية", "ابدأ", "ابدا", "رجوع"}
+        "القائمة", "القايمة", "القائمه", "القايمه", "القائمة الرئيسية", "القايمة الرئيسية", "البداية", "ابدأ", "ابدا", "رجوع"}
 
 def explicit_agent(text, interactive=""):
     if interactive == "route_afaaq": return "afaaq"
@@ -43,10 +43,7 @@ def explicit_agent(text, interactive=""):
 def choose_agent(text, interactive="", previous=None):
     selected = explicit_agent(text, interactive)
     if selected: return selected
-    if is_menu_request(text):
-        if previous == "afaaq" and control_text(text) in {"hi", "hello", "hey", "مرحبا", "اهلا", "أهلا", "السلام عليكم", "السلام عليكم ورحمة الله وبركاته"}:
-            return "afaaq"
-        return None
+    if is_menu_request(text): return None
     return previous if previous in ("afaaq", "shawahid") else None
 
 def response_body(agent):
