@@ -4,7 +4,7 @@ import os
 import secrets
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit, urlencode
+from urllib.parse import urlsplit, urlencode, quote
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).parents[1]))
@@ -15,7 +15,7 @@ schema='marketing_test_'+secrets.token_hex(5)
 with psycopg.connect(url,autocommit=True) as conn:
     conn.execute('CREATE SCHEMA '+schema)
 password=secrets.token_urlsafe(24)
-os.environ.update(DATABASE_URL=url+'?'+urlencode({'options':'-c search_path='+schema}),
+os.environ.update(DATABASE_URL=url+'?'+urlencode({'options':'-c search_path='+schema},quote_via=quote),
     DISCOVERY_AUTO_ENABLED='0',ENABLE_EXTERNAL_ACTIONS='0',ADMIN_EMAIL='marketing@example.invalid',
     ADMIN_PASSWORD=password,BROWSER_COOKIE_SECURE='0')
 from fastapi.testclient import TestClient
