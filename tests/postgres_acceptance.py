@@ -164,6 +164,18 @@ with patch.dict(os.environ, {'ZERNIO_API_KEY':'ci-not-real','ZERNIO_WEBHOOK_SECR
         assert inbound('ci-owner-reply', '966500000001', 'السعر 2000 ريال').json()['duplicate']
         assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply'", (second_sid,))['n'] == 1
         assert one('SELECT agreed_owner_price FROM freight_negotiations WHERE shipment_id=?',(second_sid,))['agreed_owner_price'] is None
+        # A shipper may also be the authenticated administrator. Ordinary replies
+        # attach to the contacted shipment; explicit commands still reach admin routing.
+        with patch.dict(os.environ, {'WHATSAPP_COMMAND_OWNER':'966500000001'}):
+            reply = inbound('ci-admin-shipper-reply', '966500000001', 'نعم متاحة')
+            assert reply.json()['agent'] == 'afaaq', reply.text
+            assert inbound('ci-admin-shipper-reply', '966500000001', 'نعم متاحة').json()['duplicate']
+            assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply'", (second_sid,))['n'] == 2
+            for index, command in enumerate(('آفاق اعرض الشحنات', 'شواهد اعرض الطلبات', 'الأوامر', 'نفذ ABCDEF')):
+                reply = inbound('ci-admin-command-' + str(index), '966500000001', command)
+                assert reply.json()['agent'] == 'owner', reply.text
+            assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply'", (second_sid,))['n'] == 2
+            assert one('SELECT agreed_owner_price FROM freight_negotiations WHERE shipment_id=?',(second_sid,))['agreed_owner_price'] is None
 print('PASS: PostgreSQL startup, transport intake, duplicate intake, agreement, concurrent offer creation, 150 SAR margin and driver assignment for NQ and WA references. External sends: 0.')
 
 from social_postgres_acceptance import run as run_social_acceptance

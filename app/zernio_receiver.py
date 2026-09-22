@@ -129,9 +129,18 @@ async def receive(request: Request):
                 and not conversation.get('isGroup') and not message.get('isGroup')
                 and transport_phone(conversation.get('participantId')) == contact
                 and (not identity.get('id') or transport_phone(identity['id']) == contact))
-            if private_transport and not sender and text.strip() and not is_transport_request(text) and not is_menu_request(text) and not explicit_agent(text):
+            # Explicit administrative commands retain priority. Plain replies from
+            # an administrator who is also the contacted shipper belong to that shipment.
+            from app.whatsapp_admin import normalize, audio_index
+            admin_text = normalize(text)
+            administrative = bool(sender and (
+                re.match(r'^(?:افاق|شواهد)(?:\\s|[:،-]|$)', admin_text)
+                or admin_text.casefold() in ('الاوامر', 'اوامر', 'مساعدة', 'ادارة', 'help', 'menu')
+                or re.fullmatch(r'نفذ\\s+[0-9A-Fa-f]{6}', admin_text)
+                or audio_index(message) is not None))
+            if private_transport and not administrative and text.strip() and not is_transport_request(text) and not is_menu_request(text) and not explicit_agent(text):
                 from app.logistics_parsing import accepts_offer
-                if re.search(r'(?:NQ-\d+|WA-[A-F0-9]{12})', text.upper()) and accepts_offer(text):
+                if not sender and re.search(r'(?:NQ-\d+|WA-[A-F0-9]{12})', text.upper()) and accepts_offer(text):
                     from app.freight_workflow import accept_driver_reply
                     if accept_driver_reply('+' + contact, text, connection=c):
                         return 'afaaq', {'message': 'تم تسجيل موافقتك على عرض النقل وربطك بالشحنة. سنتابع معك تفاصيل التنفيذ.'}
