@@ -240,11 +240,19 @@ def review(update_id: int, request: Request):
     return page('مراجعة نتيجة التتبع وإرسالها', body)
 
 
+@router.get('/tracking-updates/{update_id}/send')
+def return_after_stepup(update_id: int):
+    # MFA returns with GET; always return to review, never send on navigation.
+    return RedirectResponse(f'/tracking-updates/{update_id}', 303)
+
+
 @router.post('/tracking-updates/{update_id}/send')
 async def send(update_id: int, request: Request):
     form = dict(await request.form())
     current = admin(request, str(form.get('csrf') or ''))
     if form.get('verified') != 'yes': raise HTTPException(400, 'راجع النتيجة والمستلم أولًا')
+    if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
+        raise HTTPException(403, 'الإرسال الخارجي متوقف في إعدادات البرنامج')
     key = os.getenv('ZERNIO_API_KEY', '')
     if not key: raise HTTPException(503, 'ربط واتساب غير جاهز')
     with db() as c:
