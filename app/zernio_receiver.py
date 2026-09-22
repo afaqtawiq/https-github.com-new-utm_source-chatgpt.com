@@ -129,7 +129,20 @@ async def receive(request: Request):
                     c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
                 else:
                     c.execute("DELETE FROM zernio_conversation_agents WHERE conversation_id=%s", (conversation_id,))
-                reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message)
+                document_result = None
+                if agent == 'afaaq':
+                    from app.whatsapp_documents import document_indexes, read_attachment
+                    indexes = document_indexes(message)
+                    if indexes:
+                        try:
+                            document_result = asyncio.run(read_attachment(p, indexes[0]))
+                        except Exception:
+                            document_result = ({'tracking_status': 'attachment_failed'},
+                                'تعذرت قراءة المرفق. أعد إرسال البوليصة الأصلية بصيغة PDF أو صورة واضحة؛ لم يتم التحقق من موعد الوصول.')
+                        if len(indexes) > 1:
+                            data, answer = document_result
+                            document_result = (data, answer + '\nأرسل بقية المستندات كل مستند في رسالة منفصلة لتحليله.')
+                reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message, document_result)
         return agent, reply
     prepared = await run_in_threadpool(prepare_reply)
     if prepared is None:
@@ -227,7 +240,7 @@ def next_reply(agent, fields, pending, text, selection=False):
         reply = "Your request is saved for review:\n" + summary + "\nNo price, booking or payment has been confirmed. Further messages will be added to your request."
     return fields, None, "ready_for_review", reply
 
-def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
+def intake_reply(c, agent, conversation_id, event_id, text, selection, message, document_result=None):
     if agent not in FIELDS:
         return response_body(agent)
     c.execute("""INSERT INTO zernio_requests(conversation_id,agent)
@@ -244,13 +257,19 @@ def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
         c.execute("""INSERT INTO zernio_request_messages(event_id,request_id,body,reply)
             VALUES(%s,%s,%s,%s)""", (event_id,row["id"],text[:20000],reply))
         return {"message": reply}
-    fields, pending, status, reply = next_reply(agent, row["fields"], row["pending_field"], text, selection)
+    if agent == 'afaaq' and document_result is not None:
+        data, reply = document_result
+        fields = dict(row['fields'] or {})
+        fields['shipping_document'] = data
+        pending, status = row['pending_field'], row['status']
+    else:
+        fields, pending, status, reply = next_reply(agent, row["fields"], row["pending_field"], text, selection)
     if agent == "shawahid" and not selection and explicit_updates(agent, text).get("revision"):
         from app.material_bridge import material_reply
         reply = material_reply(c, row["id"], event_id, fields["revision"])
         if explicit_updates(agent, text).get("budget"):
             reply = "Budget updated: " + fields["budget"] + "\n\n" + reply
-    if not text.strip() and not selection:
+    if not text.strip() and not selection and document_result is None:
         reply = ("يرجى إرسال التفاصيل كتابةً؛ المرفقات لم تُحلّل تلقائيًا. " if agent=="afaaq"
                  else "Please send the details as text; attachments are not automatically analyzed. ") + reply
     ref = ("AF-" if agent=="afaaq" else "SH-") + str(row["id"])
