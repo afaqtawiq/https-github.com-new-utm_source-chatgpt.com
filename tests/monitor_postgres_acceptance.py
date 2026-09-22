@@ -33,9 +33,11 @@ for i in range(10):
     live.finish(live.begin('مهمة'), 'نتيجة')
 with db() as c:
     assert c.execute('SELECT COUNT(*) AS n FROM agent_live_operations').fetchone()['n'] == 1
-    c.execute("CREATE TABLE IF NOT EXISTS media_jobs(id BIGSERIAL PRIMARY KEY,status TEXT,updated_at TIMESTAMPTZ)")
-    c.execute("INSERT INTO media_jobs(status,updated_at) VALUES('image_pending',NOW())")
+    c.execute("CREATE TABLE monitor_test_jobs(id BIGSERIAL PRIMARY KEY,status TEXT,updated_at TIMESTAMPTZ)")
+    c.execute("INSERT INTO monitor_test_jobs(status,updated_at) VALUES('image_pending',NOW())")
+live.SOURCES += (('monitor_test_jobs', 'إنتاج الصور التجريبي', 'id', 'status', 'updated_at'),)
 items, missing = live.current_items()
+assert missing == 0, 'An installed workflow table could not be read'
 assert any('إنتاج الصور' in x['label'] and x['status'] == 'waiting' for x in items)
 compact = snapshot(compact=True)
 assert compact['items']
