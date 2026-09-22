@@ -129,10 +129,12 @@ async def receive(request: Request):
                 and not conversation.get('isGroup') and not message.get('isGroup')
                 and transport_phone(conversation.get('participantId')) == contact
                 and (not identity.get('id') or transport_phone(identity['id']) == contact))
-            if private_transport and not is_menu_request(text) and not explicit_agent(text):
-                from app.freight_workflow import accept_driver_reply
-                if accept_driver_reply('+' + contact, text, connection=c):
-                    return 'afaaq', {'message': 'تم تسجيل موافقتك على عرض النقل وربطك بالشحنة. سنتابع معك تفاصيل التنفيذ.'}
+            if private_transport and not sender and text.strip() and not is_transport_request(text) and not is_menu_request(text) and not explicit_agent(text):
+                from app.logistics_parsing import accepts_offer
+                if re.search(r'(?:NQ-\d+|WA-[A-F0-9]{12})', text.upper()) and accepts_offer(text):
+                    from app.freight_workflow import accept_driver_reply
+                    if accept_driver_reply('+' + contact, text, connection=c):
+                        return 'afaaq', {'message': 'تم تسجيل موافقتك على عرض النقل وربطك بالشحنة. سنتابع معك تفاصيل التنفيذ.'}
                 pending = c.execute("""SELECT s.id,s.reference FROM shipments s
                     JOIN freight_negotiations n ON n.shipment_id=s.id
                     WHERE n.owner_phone=%s AND n.contact_channel='whatsapp'

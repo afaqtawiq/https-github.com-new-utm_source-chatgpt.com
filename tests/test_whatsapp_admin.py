@@ -55,7 +55,7 @@ class Connection:
                 revenue REAL,cost REAL,currency TEXT);
             CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,notes TEXT,created_at TEXT,updated_at TEXT);
             CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER UNIQUE,
-                owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT);
+                owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT,\n                contact_channel TEXT,record_kind TEXT DEFAULT 'shipment_request');
             CREATE TABLE accounts(id INTEGER PRIMARY KEY,name TEXT,status TEXT);
         ''')
 
