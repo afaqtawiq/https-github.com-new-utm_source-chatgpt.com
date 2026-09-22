@@ -48,6 +48,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(tracking, 'db', db)
     monkeypatch.setattr(tracking, 'get_session', lambda _: {'role':'admin','csrf':'csrf','user_id':1})
     monkeypatch.setenv('ZERNIO_API_KEY', 'test')
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
     tracking.ensure_tables()
     details = dict(container='ABCD1234567',carrier='Example Carrier',port='Jeddah',
                    eta='2026-09-26T04:00',status='departed',source_url='https://example.org/tracking')
@@ -137,6 +138,15 @@ def test_eta_only_from_planned_event():
 
 def test_invalid_format():
     with pytest.raises(ValueError): tracking.media_type(b'<html>not a PDF</html>')
+
+
+def test_external_action_switch_blocks_send(setup,monkeypatch):
+    c,details=setup
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','0')
+    with pytest.raises(tracking.HTTPException) as error:
+        asyncio.run(tracking.send(1,request(details)))
+    assert error.value.status_code==403
+    assert c.execute('SELECT state FROM afaaq_tracking_updates').fetchone()['state']=='draft'
 
 
 def test_upload_matches_and_deduplicates(setup,monkeypatch):

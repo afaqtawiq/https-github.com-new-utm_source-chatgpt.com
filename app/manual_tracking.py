@@ -245,6 +245,8 @@ async def send(update_id: int, request: Request):
     form = dict(await request.form())
     current = admin(request, str(form.get('csrf') or ''))
     if form.get('verified') != 'yes': raise HTTPException(400, 'راجع النتيجة والمستلم أولًا')
+    if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
+        raise HTTPException(403, 'الإرسال الخارجي متوقف في إعدادات البرنامج')
     key = os.getenv('ZERNIO_API_KEY', '')
     if not key: raise HTTPException(503, 'ربط واتساب غير جاهز')
     with db() as c:
