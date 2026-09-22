@@ -51,7 +51,11 @@ class Connection:
             CREATE TABLE drivers(id INTEGER PRIMARY KEY,driver_name TEXT,whatsapp_phone TEXT UNIQUE,
                 vehicle_type TEXT,availability TEXT,offer_consent INTEGER,notes TEXT,created_at TEXT,updated_at TEXT);
             CREATE TABLE shipments(id INTEGER PRIMARY KEY,reference TEXT UNIQUE,service_type TEXT,
-                origin TEXT,destination TEXT,status TEXT,created_at TEXT,updated_at TEXT);
+                origin TEXT,destination TEXT,status TEXT,created_at TEXT,updated_at TEXT,
+                revenue REAL,cost REAL,currency TEXT);
+            CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,notes TEXT,created_at TEXT,updated_at TEXT);
+            CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER UNIQUE,
+                owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT);
             CREATE TABLE accounts(id INTEGER PRIMARY KEY,name TEXT,status TEXT);
         ''')
 
@@ -136,6 +140,43 @@ def outbound(monkeypatch):
             return types.SimpleNamespace(is_success=True)
     monkeypatch.setattr(receiver.httpx, 'AsyncClient', Client)
     return calls
+
+
+@pytest.mark.parametrize('sender', ['966500000009', '966507665873'])
+def test_transport_employee_or_owner_creates_operational_job(db, outbound, sender):
+    text = 'طلب نقل\nمن جدة إلى الشارقة\nجوال صاحب الشحنة: 966579411107\nسطحة تريلا (+20 طن)'
+    event = payload(text, sender=sender)
+    assert receive(event)['state'] == 'sent'
+    assert receive(event)['duplicate']
+    shipment = db.execute('SELECT * FROM shipments').fetchone()
+    assert (shipment['origin'], shipment['destination']) == ('جدة', 'الشارقة')
+    job = db.execute('SELECT * FROM freight_negotiations').fetchone()
+    assert job['owner_phone'] == '+966579411107'
+    assert job['weight_tons'] is None
+    assert json.loads(job['notes'])['submitter_phone'] == '+' + sender
+    assert job['status'] == 'contact_ready'
+    assert db.execute('SELECT COUNT(*) n FROM shipments').fetchone()['n'] == 1
+    assert len(outbound) == 1  # acknowledgement only; no owner contact or driver offer
+
+
+def test_transport_partial_then_second_independent_job(db, outbound):
+    receive(payload('طلب نقل\nمن جدة إلى الشارقة', sender='966500000009'))
+    assert db.execute('SELECT COUNT(*) n FROM shipments').fetchone()['n'] == 0
+    receive(payload('جوال صاحب الشحنة: 966579411107', sender='966500000009', event='evt-2'))
+    receive(payload('طلب نقل\nمن الرياض إلى الدمام\nجوال صاحب الشحنة: 0500000010', sender='966500000009', event='evt-3'))
+    assert db.execute('SELECT COUNT(*) n FROM shipments').fetchone()['n'] == 2
+
+
+def test_transport_offers_and_ambiguous_contacts_are_not_promoted(db, outbound):
+    receive(payload('طلب نقل\nعندي شاحنة لنقل شحنتك من جدة إلى الشارقة\n966579411107', sender='966500000009'))
+    receive(payload('طلب نقل\nمن جدة إلى الشارقة\n0500000010\n0500000011', sender='966500000009', event='evt-2'))
+    assert db.execute('SELECT COUNT(*) n FROM shipments').fetchone()['n'] == 0
+
+
+def test_transport_labelled_owner_wins_over_employee_phone():
+    from app.transport_intake import extract_transport
+    data = extract_transport('طلب نقل\nرقم الموظف: 0500000010\nجوال صاحب الشحنة: 0500000011\nالوزن: ١٢ طن')
+    assert data['owner_phone'] == '+966500000011' and data['weight_tons'] == 12
 
 
 def test_owner_only_signed_sender(db):

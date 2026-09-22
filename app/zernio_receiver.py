@@ -41,6 +41,8 @@ def explicit_agent(text, interactive=""):
     return None
 
 def choose_agent(text, interactive="", previous=None):
+    from app.transport_intake import is_transport_request
+    if is_transport_request(text): return 'afaaq'
     selected = explicit_agent(text, interactive)
     if selected: return selected
     if is_menu_request(text): return None
@@ -116,7 +118,13 @@ async def receive(request: Request):
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
             claim = c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'sending') ON CONFLICT DO NOTHING RETURNING event_id",(event_id,conversation_id)).fetchone()
             if not claim: return None
-            if sender:
+            from app.transport_intake import is_transport_request
+            text = str(message.get('text') or '')
+            transport_mode = is_transport_request(text)
+            if sender and not transport_mode:
+                pending_transport = c.execute("SELECT fields FROM zernio_requests WHERE conversation_id=%s AND agent='afaaq'", (conversation_id,)).fetchone()
+                transport_mode = bool(pending_transport and (pending_transport['fields'] or {}).get('_transport_draft'))
+            if sender and not transport_mode:
                 agent = "owner"
                 reply = asyncio.run(admin_reply(c, p, sender))
             else:
@@ -124,7 +132,7 @@ async def receive(request: Request):
                 text = str(message.get("text") or "")
                 interactive = str(metadata.get("interactiveId") or "")
                 selection = explicit_agent(text, interactive) is not None
-                agent = choose_agent(text, interactive, previous["agent"] if previous else None)
+                agent = 'afaaq' if transport_mode else choose_agent(text, interactive, previous["agent"] if previous else None)
                 if agent:
                     c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
                 else:
@@ -258,6 +266,16 @@ def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
         VALUES(%s,%s) ON CONFLICT DO NOTHING""", (conversation_id,agent))
     row = c.execute("""SELECT * FROM zernio_requests WHERE conversation_id=%s
         AND agent=%s FOR UPDATE""", (conversation_id,agent)).fetchone()
+    if agent == 'afaaq':
+        from app.transport_intake import transport_reply
+        transport = transport_reply(c, row['fields'], text, event_id, conversation_id, message)
+        if transport is not None:
+            fields, status, reply = transport
+            c.execute("""UPDATE zernio_requests SET fields=%s::jsonb,pending_field=NULL,
+                status=%s,updated_at=NOW() WHERE id=%s""", (json.dumps(fields,ensure_ascii=False),status,row['id']))
+            c.execute("""INSERT INTO zernio_request_messages(event_id,request_id,body,reply)
+                VALUES(%s,%s,%s,%s)""", (event_id,row['id'],text[:20000],reply))
+            return {'message': reply}
     # All initial context is retained, but not incorrectly assigned to an unasked field.
     ref = ("AF-" if agent == "afaaq" else "SH-") + str(row["id"])
     references = re.findall(r"(?i)\b(?:SH|AF)-\d+\b", text)

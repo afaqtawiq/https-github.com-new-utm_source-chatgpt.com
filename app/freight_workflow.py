@@ -325,7 +325,7 @@ def prepare_driver_offer(shipment_id, user_id):
 
 def accept_driver_reply(phone, text):
     normalized = _valid_phone(phone)
-    match = re.search(r"NQ-\d+", (text or "").upper())
+    match = re.search(r"(?:NQ-\d+|WA-[A-F0-9]{12})", (text or "").upper())
     if not normalized or not match or not accepts_offer(text):
         return False
     reference = match.group(0)
