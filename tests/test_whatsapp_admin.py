@@ -89,6 +89,30 @@ def payload(text='الأوامر', sender='966507665873', event='evt-1'):
             'text': text, 'sender': {'id': sender, 'phoneNumber': '+' + sender}}}
 
 
+def test_legacy_afaaq_greetings_are_archived_not_ready(db):
+    receiver.ensure_intake_tables()
+    invalid = dict(service='مرحبا',route='hi',cargo='hi',deadline='مرحبا')
+    for agent in ('afaaq','shawahid'):
+        db.execute("INSERT INTO zernio_requests(conversation_id,agent,fields,status) VALUES(%s,%s,%s,'ready_for_review')",
+                   ('legacy',agent,json.dumps(invalid)))
+    receiver.ensure_intake_tables()
+    receiver.ensure_intake_tables()
+    af = db.execute("SELECT * FROM zernio_requests WHERE agent='afaaq'").fetchone()
+    sh = db.execute("SELECT * FROM zernio_requests WHERE agent='shawahid'").fetchone()
+    assert af['status']=='collecting' and af['pending_field']=='service'
+    assert af['fields']['_legacy_invalid_fields']==invalid
+    assert not any(key in af['fields'] for key in invalid)
+    assert sh['fields']==invalid and sh['status']=='ready_for_review'
+    assert db.execute('SELECT COUNT(*) n FROM zernio_request_messages').fetchone()['n']==1
+
+
+def test_legacy_repair_preserves_real_shipment_data():
+    from app.afaaq_customer_reply import repair_legacy_fields
+    fields=dict(service='تخليص جمركي',route='جدة',cargo='Hello branded toys',deadline='بعد أسبوع')
+    repaired, invalid=repair_legacy_fields(fields)
+    assert repaired==fields and invalid=={}
+
+
 def receive(p, valid=True):
     raw = json.dumps(p).encode()
     signature = hmac.new(b'test-secret', raw, hashlib.sha256).hexdigest() if valid else 'bad'

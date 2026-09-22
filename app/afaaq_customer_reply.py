@@ -7,8 +7,28 @@ QUESTIONS = [('service','كيف نقدر نخدمك؟'), ('route','ما مينا
 def normalized(text):
     return re.sub(r'[\u064b-\u065f\u0670ـ]', '', text).translate(str.maketrans('أإآى','اااي')).strip().lower()
 
+def repair_legacy_fields(fields):
+    """Archive old router/greeting values instead of counting them as cargo data."""
+    fields = dict(fields or {})
+    controls = {'hi', 'hello', 'hey', 'start', 'menu', 'restart', 'back',
+                'مرحبا', 'اهلا', 'السلام عليكم', 'السلام عليكم ورحمة الله وبركاته',
+                'القائمة', 'القايمة', 'القائمه', 'القايمه', 'القائمة الرئيسية',
+                'القايمة الرئيسية', 'البداية', 'ابدا', 'رجوع'}
+    invalid = {}
+    for key, _ in QUESTIONS:
+        value = fields.get(key)
+        if isinstance(value, str):
+            token = ' '.join(re.sub(r'[^\w\s]', ' ', normalized(value)).split())
+            if token in controls:
+                invalid[key] = fields.pop(key)
+    if invalid:
+        archive = dict(fields.get('_legacy_invalid_fields') or {})
+        archive.update(invalid)
+        fields['_legacy_invalid_fields'] = archive
+    return fields, invalid
+
 def reply(fields, pending, text, selection, updates, greeting):
-    fields = dict(fields)
+    fields, _ = repair_legacy_fields(fields)
     raw = text.strip()
     t = normalized(raw)
     question = '?' in raw or '؟' in raw or bool(re.match(r'^(هل|كيف|متي|كم|ما هي|ماهي|ايش|وش|ممكن|اقدر)\b',t))

@@ -178,6 +178,23 @@ def ensure_intake_tables():
             event_id TEXT PRIMARY KEY, request_id BIGINT NOT NULL REFERENCES zernio_requests(id),
             body TEXT NOT NULL, reply TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        # Reversible repair of legacy greetings misclassified as intake answers.
+        # Scope strictly to Afaaq intake; preserve original values and history.
+        from app.afaaq_customer_reply import repair_legacy_fields, QUESTIONS
+        for item in c.execute("""SELECT id,fields FROM zernio_requests WHERE agent='afaaq'
+            AND status IN ('collecting','ready_for_review') ORDER BY id FOR UPDATE""").fetchall():
+            fields, invalid = repair_legacy_fields(item['fields'])
+            if not invalid:
+                continue
+            pending = next((key for key, _ in QUESTIONS if not fields.get(key)), None)
+            c.execute("""UPDATE zernio_requests SET fields=%s::jsonb,pending_field=%s,
+                status='collecting',updated_at=NOW() WHERE id=%s""",
+                (json.dumps(fields,ensure_ascii=False),pending,item['id']))
+            c.execute("""INSERT INTO zernio_request_messages(event_id,request_id,body,reply)
+                VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                ('afaaq-intake-repair-v1-' + str(item['id']),item['id'],
+                 'تصحيح بيانات ترحيب قديمة: ' + json.dumps(invalid,ensure_ascii=False),
+                 'ملاحظة داخلية: حُفظت القيم القديمة في السجل، وأعيد الطلب لاستكمال بياناته. لم تُرسل رسالة للعميل.'))
 
 def explicit_updates(agent, text):
     """Only labelled customer fields are updates; prose is never a budget."""
