@@ -76,3 +76,50 @@ def test_widget_renders_untrusted_text_as_text_and_handles_disconnect():
     assert 'textContent' in widget
     assert 'البيانات المعروضة قديمة' in widget
     assert 'setTimeout(refresh,5000)' in widget
+
+
+def test_live_state_does_not_confuse_waiting_with_success():
+    from app.live_activity import state_item
+    now = datetime.now(timezone.utc)
+    assert state_item('نشر', 'scheduled', now)['status'] == 'waiting'
+    assert state_item('نقل', 'awaiting_owner', now)['status'] == 'waiting'
+    assert state_item('إرسال', 'sending', now - timedelta(minutes=6), now=now)['status'] == 'stale'
+    assert state_item('نشر', 'private_response', now)['status'] == 'unknown'
+    assert 'private_response' not in str(state_item('نشر', 'private_response', now))
+    assert 'التسليم غير مؤكد' in state_item('بريد', 'sent', now)['label']
+
+
+def test_observation_preserves_return_and_exception_without_exposing_inputs():
+    from app import live_activity as live
+    with patch.object(live, 'begin', return_value='x') as begin, patch.object(live, 'finish') as finish:
+        @live.observe('عمل', 'انتهى')
+        def operation(secret):
+            return secret
+        assert operation('private') == 'private'
+        assert 'private' not in str(begin.call_args) + str(finish.call_args)
+        @live.observe('عمل', 'انتهى')
+        def failed():
+            raise ValueError('private')
+        with pytest.raises(ValueError):
+            failed()
+        assert finish.call_args.args == ('x', 'تعذر: عمل', 'failed')
+
+
+def test_monitor_failure_does_not_block_business_operation():
+    from app import live_activity as live
+    with patch.object(live, 'ensure_schema', side_effect=RuntimeError('database')):
+        @live.observe('عمل', 'انتهى')
+        def operation():
+            return 42
+        assert operation() == 42
+
+
+def test_tracked_request_does_not_track_unauthenticated_webhook():
+    import asyncio
+    from app import live_activity as live
+    request = types.SimpleNamespace(method='POST', url=types.SimpleNamespace(path='/webhooks/zernio'))
+    async def next_handler(request):
+        return types.SimpleNamespace(status_code=200)
+    with patch.object(live, 'begin') as begin:
+        assert asyncio.run(live.tracked_request(request, next_handler, None)).status_code == 200
+        begin.assert_not_called()
