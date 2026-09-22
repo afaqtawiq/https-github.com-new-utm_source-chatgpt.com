@@ -23,6 +23,12 @@ from app.bootstrap import app
 from app.storage import one, execute, get_session
 from app.freight_workflow import prepare_driver_offer, accept_driver_reply, sync_retell_negotiation
 from app.command_assistant import deliver_driver_broadcast
+from app.zernio_whatsapp import required_templates, template_parameters
+from app.freight_workflow import _owner_message
+specs = required_templates()
+assert all(c['type'] == 'body' for t in specs for c in t['components'])  # Zernio create schema is lowercase
+assert template_parameters(specs[0], _owner_message({'origin':'رابغ','destination':'دبي'})) == ['رابغ','دبي']
+
 
 client = TestClient(app, base_url='http://testserver', headers={'accept': 'text/html', 'origin': 'http://testserver'})
 assert client.get('/naqliat', follow_redirects=False).status_code == 303
@@ -180,3 +186,4 @@ from official_replies_acceptance import run as run_official_replies_acceptance
 run_official_replies_acceptance(client, app)
 from publication_reports_acceptance import run as run_publication_reports_acceptance
 run_publication_reports_acceptance(client, app)
+

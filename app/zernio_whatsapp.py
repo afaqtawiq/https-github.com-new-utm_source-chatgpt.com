@@ -61,10 +61,10 @@ def required_templates():
     from app.freight_workflow import _owner_message
     return [
         {'name': 'afaaq_transport_owner_inquiry_v2_ar', 'language': 'ar', 'category': 'MARKETING',
-         'components': [{'type': 'BODY', 'text': _owner_message({'origin': '{{1}}', 'destination': '{{2}}'}),
+         'components': [{'type': 'body', 'text': _owner_message({'origin': '{{1}}', 'destination': '{{2}}'}),
                          'example': {'body_text': [['رابغ', 'دبي']]}}]},
         {'name': 'afaaq_transport_driver_offer_v1_ar', 'language': 'ar', 'category': 'MARKETING',
-         'components': [{'type': 'BODY', 'text': 'عرض حمولة من آفاق طويق — {{1}}\nالمسار: {{2}} → {{3}}\nالوزن: {{4}} طن\nسعر السائق: {{5}} ريال\nالتنزيل: {{6}}\nالدفع: {{7}}\nللرغبة اكتب: موافق {{1}}',
+         'components': [{'type': 'body', 'text': 'عرض حمولة من آفاق طويق — {{1}}\nالمسار: {{2}} → {{3}}\nالوزن: {{4}} طن\nسعر السائق: {{5}} ريال\nالتنزيل: {{6}}\nالدفع: {{7}}\nللرغبة اكتب: موافق {{1}}',
                          'example': {'body_text': [['NQ-19', 'رابغ', 'دبي', '20', '1,850.00', 'دبي', 'عند التسليم']]}}]},
     ]
 
