@@ -1,3 +1,4 @@
+from app.opportunity_quality import assess_opportunity
 SERVICE_RULES=[('التخليص الجمركي',['تخليص','جمرك','customs','broker','clearance']),('النقل البري',['نقل','شاحن','transport','trucking','fleet']),('الشحن',['شحن','freight','shipping','بحري','جوي']),('التخزين',['مستودع','تخزين','warehouse','warehousing','storage']),('الباب إلى الباب',['باب إلى باب','door to door','last mile'])]
 INTENT_RULES=[('High',['طلب عروض','مناقصة','rfq','rfx','tender','request for quotation','request for proposal']),('Medium',['تبحث عن','مطلوب','seeking','looking for provider','vendor'])]
 
@@ -13,6 +14,9 @@ def analyze(opportunity):
     if score>=80 or intent=='High': priority='P1'
     elif score>=60 or intent=='Medium': priority='P2'
     else: priority='P3'
+    quality=assess_opportunity(opportunity)
+    if not quality['is_request']:
+        intent='Unverified'; priority='P3'
     evidence=(opportunity.get('signal') or '').strip()[:1400]
     rationale=[]
     if services:rationale.append('الخدمات المطابقة: '+', '.join(services))
@@ -25,4 +29,4 @@ def analyze(opportunity):
               'استنادًا إلى الإشارة العامة المرصودة، يمكن لآفاق طويق دراسة تقديم '+service_text+'. '
               'تشمل الخطوة التالية مراجعة نطاق العمل والمتطلبات والمنافذ أو المسارات ذات الصلة، ثم إعداد عرض فني وتجاري دقيق.\n\n'
               'مهم: يجب التحقق من الجهة والموعد وجميع المتطلبات من المصدر الرسمي قبل اعتماد أو إرسال أي عرض.')
-    return {'priority':priority,'intent':intent,'services':services,'rationale':' | '.join(rationale),'evidence':evidence,'next_action':next_action,'proposal_draft':proposal}
+    return {'priority':priority,'intent':intent,'services':services,'rationale':' | '.join(rationale),'evidence':evidence,'next_action':next_action,'proposal_draft':proposal,'qualification':quality}
