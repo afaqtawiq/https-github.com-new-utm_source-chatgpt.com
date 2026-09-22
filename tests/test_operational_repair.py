@@ -38,7 +38,7 @@ class Database:
         self.raw.executescript('''
         CREATE TABLE shipments(id INTEGER PRIMARY KEY,reference TEXT,origin TEXT,destination TEXT,status TEXT,revenue REAL,cost REAL,updated_at TEXT);
         CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER,naqliat_load_id INTEGER,
-            owner_phone TEXT,status TEXT,contact_channel TEXT,provider_call_id TEXT,provider_message_id TEXT,
+            record_kind TEXT NOT NULL DEFAULT 'shipment_request',owner_phone TEXT,status TEXT,contact_channel TEXT,provider_call_id TEXT,provider_message_id TEXT,
             asking_price REAL,agreed_owner_price REAL,driver_offer_price REAL,weight_tons REAL,
             unloading_location TEXT,payment_method TEXT,notes TEXT,last_error TEXT,contacted_at TEXT,agreed_at TEXT,updated_at TEXT);
         CREATE TABLE drivers(id INTEGER PRIMARY KEY,driver_name TEXT,whatsapp_phone TEXT,availability TEXT,offer_consent INTEGER);
