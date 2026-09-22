@@ -92,13 +92,22 @@ def ensure_negotiation(shipment_id, load_id=None, owner_phone="", weight_tons=No
 
 
 def _owner_message(item):
-    missing = _shipment_requirements(item)
-    route = (f"من {item['origin']} إلى {item['destination']}" if not missing else
-             "ونحتاج تأكيد مدينة التحميل ومدينة التنزيل")
+    origin = _usable_text(item.get('origin'))
+    destination = _usable_text(item.get('destination'))
+    route = (f"من {origin} إلى {destination}" if origin and destination else
+             f"من {origin}" if origin else f"إلى {destination}" if destination else '')
+    loading = (f"موقع التحميل في {origin}" if origin else 'مدينة التحميل وموقعها')
+    unloading = (f"موقع التنزيل في {destination}" if destination else 'مدينة التنزيل وموقعها')
     return (
-        "السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n"
-        f"وصلنا طلب الحمولة رقم {item['reference']} {route}.\n"
-        "نرجو تأكيد: السعر المطلوب، الوزن النهائي، موقع التحميل، موقع التنزيل، موعد التحميل وطريقة الدفع."
+        "السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n\n"
+        f"بخصوص الحمولة{(' ' + route) if route else ''}، هل ما زالت متاحة؟\n\n"
+        "نرجو توضيح:\n"
+        f"• {loading}: هل داخل الميناء أم خارجه؟\n"
+        f"• {unloading}.\n"
+        "• نوع البضاعة ووزنها الفعلي ونوع الشاحنة المطلوبة.\n"
+        "• موعد التحميل.\n"
+        "• السعر المعروض للنقل وطريقة وموعد الدفع.\n\n"
+        "شكرًا لك، لاستكمال الاتفاق وترتيب النقل."
     )
 
 
