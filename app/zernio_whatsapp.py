@@ -154,7 +154,7 @@ async def send(recipient, message):
             body.update(participantId=target, templateName=template['name'], templateLanguage='ar', templateParams=params)
         # No automatic retry after the sending boundary, even with idempotency.
         response = await c.post(BASE + path, json=body, headers={'Idempotency-Key': 'afaaq-' + uuid.uuid4().hex})
-        if 400 <= response.status_code < 500 and response.status_code != 409:
+        if 400 <= response.status_code < 500 and response.status_code not in (408, 409):
             raise WhatsAppBlocked('رفض مزود واتساب الإرسال (HTTP ' + str(response.status_code) + ')؛ راجع القالب وصلاحية الحساب')
         response.raise_for_status()
         data = response.json()

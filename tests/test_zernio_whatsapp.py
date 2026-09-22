@@ -78,7 +78,7 @@ def test_wrong_or_inactive_account_never_sends(provider):
     assert not provider['posts']
 
 
-@pytest.mark.parametrize('status', [409, 500, 502])
+@pytest.mark.parametrize('status', [408, 409, 500, 502])
 def test_ambiguous_post_not_classified_as_safe_retry(provider, status):
     provider['templates'] = [{'name': 'afaaq_transport_test', 'language': 'ar', 'status': 'APPROVED',
                               'components': [{'type': 'BODY', 'text': 'رسالة'}]}]
