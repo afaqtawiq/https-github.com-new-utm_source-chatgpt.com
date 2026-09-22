@@ -232,7 +232,7 @@ def test_afaaq_customer_questions_do_not_corrupt_intake():
 
 
 def test_afaaq_welcome_and_urgent_customs():
-    assert receiver.choose_agent('مرحبا',previous='afaaq')=='afaaq'
+    assert receiver.choose_agent('مرحبا',previous='afaaq') is None
     assert receiver.choose_agent('القائمة',previous='afaaq') is None
     fields,pending,state,text=receiver.next_reply('afaaq',{},'deadline','مرحبا')
     assert fields=={} and 'أهلًا وسهلًا' in text
@@ -241,3 +241,13 @@ def test_afaaq_welcome_and_urgent_customs():
     assert pending=='route' and 'ميناء الوصول' in text and 'مستعجل' in text
     fields,pending,state,text=receiver.next_reply('afaaq',fields,pending,'كم السعر؟')
     assert 'route' not in fields and 'موافقة الإدارة' in text
+
+
+@pytest.mark.parametrize('previous', [None,'afaaq','shawahid'])
+@pytest.mark.parametrize('text', ['القايمة','القائمة','القائمه','القايمه','Hello','مرحبا','السلام عليكم'])
+def test_shared_router_returns_both_teams(text,previous):
+    agent=receiver.choose_agent(text,previous=previous)
+    assert agent is None
+    assert {b['payload'] for b in receiver.response_body(agent)['buttons']}=={'route_afaaq','route_shawahid'}
+    assert receiver.choose_agent('',interactive='route_shawahid',previous=previous)=='shawahid'
+    assert receiver.choose_agent('',interactive='route_afaaq',previous=previous)=='afaaq'
