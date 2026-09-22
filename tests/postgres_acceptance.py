@@ -53,6 +53,28 @@ sid = shipment['id']
 assert one('SELECT status FROM freight_negotiations WHERE shipment_id=?', (sid,))['status'] == 'contact_ready'
 repeat = connector.post('/api/v7/naqliat/ocr', json={'raw_text': raw}, headers={'Authorization': 'Bearer local-ci-connector'})
 assert repeat.status_code == 200 and not repeat.json()['created']
+# A shared contact (even on the same route) is not a duplicate shipment.
+second_raw = raw + '\nوصف الحمولة: طلب مستقل رقم 2'
+second_response = connector.post('/api/v7/naqliat/ocr', json={'raw_text': second_raw}, headers={'Authorization': 'Bearer local-ci-connector'})
+assert second_response.status_code == 200 and second_response.json()['created']
+second_sid = one('SELECT id FROM shipments WHERE reference=?', ('NQ-' + str(second_response.json()['id']),))['id']
+assert second_sid != sid
+classification_path = f'/freight-workflow/{second_sid}/classification'
+assert client.post(classification_path, data={'record_kind':'carrier_offer'}, follow_redirects=False).status_code == 403
+assert client.post(classification_path, data={'csrf':csrf,'record_kind':'carrier_offer'}, follow_redirects=False).status_code == 303
+record = one('SELECT * FROM freight_negotiations WHERE shipment_id=?', (second_sid,))
+assert record['record_kind'] == 'carrier_offer' and record['owner_phone'] == load['owner_phone']
+assert one('SELECT record_kind FROM freight_negotiations WHERE shipment_id=?', (sid,))['record_kind'] == 'shipment_request'
+detail = client.get(f'/freight-workflow/{second_sid}').text
+assert 'عرض ناقل يبحث عن حمولة' in detail and 'اعتماد التواصل مع صاحب الشحنة' not in detail
+from app.freight_workflow import contact_owner
+asyncio.run(contact_owner(second_sid, approved=True))
+assert one('SELECT status FROM freight_negotiations WHERE shipment_id=?', (second_sid,))['status'] == 'carrier_offer'
+assert not sync_retell_negotiation({'shipment_id':second_sid,'freight_negotiation':True}, {'agreed_owner_price':2000})
+assert client.post(f'/freight-workflow/{second_sid}/agreement', data={'csrf':csrf,'agreed_owner_price':2000}, follow_redirects=False).status_code == 409
+assert client.post(classification_path, data={'csrf':csrf,'record_kind':'shipment_request'}, follow_redirects=False).status_code == 303
+assert one('SELECT status FROM freight_negotiations WHERE shipment_id=?', (second_sid,))['status'] == 'ready_to_contact'
+print('PASS: carrier classification is reversible, blocks shipper workflow and preserves separate shipments sharing a phone.')
 response = client.post(f'/freight-workflow/{sid}/agreement', data={
     'csrf': csrf, 'agreed_owner_price': '2000', 'weight_tons': '20', 'payment_method': 'عند التسليم',
     'unloading_location': 'جدة'}, follow_redirects=False)

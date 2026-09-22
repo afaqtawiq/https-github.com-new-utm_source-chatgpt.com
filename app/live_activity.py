@@ -96,6 +96,7 @@ async def tracked_request(request, call_next, session):
 
 
 STATES = {
+    'carrier_offer': ('waiting', 'عرض ناقل يبحث عن حمولة'),
     'running': ('running', 'جارٍ التنفيذ'), 'rendering': ('running', 'جارٍ تركيب الفيديو'),
     'submitting': ('running', 'جارٍ تقديم الطلب للمزود'), 'sending': ('running', 'جارٍ الإرسال'),
     'contacting': ('running', 'جارٍ التواصل'),
