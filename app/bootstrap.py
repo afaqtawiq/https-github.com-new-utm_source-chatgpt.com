@@ -59,6 +59,7 @@ def role_allowed(request,s):
  return not any(path==p or path.startswith(p+'/') for p in ROLE_PREFIX.get(role,()))
 def sensitive_permission(request):
  path=request.url.path
+ if request.method=='POST' and path.startswith('/tracking-updates/') and path.endswith('/send'):return 'send_whatsapp'
  if request.method=='POST' and (path=='/production-monitor/settings' or (path.startswith('/production-monitor/') and path.endswith('/send-support'))):return 'send_email'
  if request.method=='POST' and path.startswith('/advert-studio/') and path.endswith('/run'):return 'manage_media'
  for perm,method,prefix,suffix in SENSITIVE:
