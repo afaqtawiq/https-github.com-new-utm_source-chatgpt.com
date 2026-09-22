@@ -91,6 +91,8 @@ assert len(set(bids)) == 1
 bid = bids[0]
 offer = one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
 assert '1,850.00' in offer['message'] and offer['status'] == 'draft'
+assert not specs[1]['components'][0]['text'].rstrip().endswith('}}')
+assert template_parameters(specs[1], offer['message']) == [shipment['reference'], 'الرياض', 'جدة', '20.0', '1,850.00', 'جدة', 'عند التسليم']
 assert one('SELECT COUNT(*) n FROM driver_broadcasts WHERE shipment_id=?', (sid,))['n'] == 1
 assert client.post(f'/freight-workflow/{sid}/agreement', data={
     'csrf': csrf, 'agreed_owner_price': '3000', 'weight_tons': '20', 'payment_method': 'عند التسليم',

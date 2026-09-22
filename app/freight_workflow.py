@@ -330,7 +330,7 @@ def prepare_driver_offer(shipment_id, user_id):
             f"سعر السائق: {price:,.2f} ريال\n"
             f"التنزيل: {item.get('unloading_location') or item['destination']}\n"
             f"الدفع: {item['payment_method']}\n"
-            "للرغبة اكتب: موافق " + item['reference']
+            "للرغبة اكتب: موافق " + item['reference'] + "\nشكرًا لتعاونك."
         )
         now = utcnow()
         bid = c.execute("""INSERT INTO driver_broadcasts(raw_command,message,status,recipient_count,created_by,created_at,updated_at,shipment_id)
