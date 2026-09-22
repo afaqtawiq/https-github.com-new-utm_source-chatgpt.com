@@ -11,6 +11,7 @@ from app.storage import db, execute, get_session, log, one, rows, utcnow
 from app.discovery import run_discovery_cycle
 from app.data_import import _phone
 from app.whatsapp_integration import send_text_message
+from app.zernio_whatsapp import WhatsAppBlocked
 
 router = APIRouter()
 
@@ -376,7 +377,7 @@ async def deliver_driver_broadcast(broadcast_id):
                 raise RuntimeError('لم يرجع مزود الرسائل معرفًا؛ يلزم التحقق قبل إعادة المحاولة')
             execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN status='sending' THEN 'sent' ELSE status END,provider_message_id=?,sent_at=? WHERE id=?", (provider_id, utcnow(), recipient["id"]))
         except Exception as exc:
-            execute("UPDATE driver_broadcast_recipients SET status='uncertain',last_error=? WHERE id=? AND status='sending'", (str(exc)[:300], recipient["id"]))
+            execute("UPDATE driver_broadcast_recipients SET status=?,last_error=? WHERE id=? AND status='sending'", ('failed' if isinstance(exc, WhatsAppBlocked) else 'uncertain', str(exc)[:300], recipient["id"]))
     counts = one("""SELECT COUNT(*) FILTER (WHERE provider_message_id IS NOT NULL AND provider_message_id<>'') sent,
         COUNT(*) FILTER (WHERE status IN ('failed','uncertain')) failed,
         COUNT(*) FILTER (WHERE status IN ('pending','sending')) pending FROM driver_broadcast_recipients WHERE broadcast_id=?""", (broadcast_id,))
@@ -412,3 +413,4 @@ async def send_broadcast(broadcast_id: int, request: Request, background_tasks: 
     log(current["user_id"], "driver_broadcast_confirmed", "driver_broadcast", broadcast_id, f"Single confirmation accepted for {campaign['recipient_count']} recipients")
     background_tasks.add_task(deliver_driver_broadcast, broadcast_id)
     return RedirectResponse(f"/commands/broadcast/{broadcast_id}", 303)
+

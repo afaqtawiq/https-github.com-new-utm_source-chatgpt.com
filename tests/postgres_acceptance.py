@@ -123,8 +123,39 @@ assert one('SELECT COUNT(*) n FROM shipments WHERE reference=?', (reference,))['
 execute("UPDATE freight_negotiations SET agreed_owner_price=2000,payment_method='عند التسليم' WHERE shipment_id=?", (wa['id'],))
 wa_bid = prepare_driver_offer(wa['id'], driver['id'])
 assert '1,850.00' in one('SELECT message FROM driver_broadcasts WHERE id=?', (wa_bid,))['message']
-execute("UPDATE driver_broadcasts SET status='awaiting_driver' WHERE id=?", (wa_bid,))
-assert accept_driver_reply('+966500000002', 'موافق ' + reference)
+execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?", (wa_bid,))
+with patch('app.command_assistant.send_text_message', provider):
+    asyncio.run(deliver_driver_broadcast(wa_bid))
+# Signed Zernio inbound uses the same transaction as event deduplication.
+import hashlib
+import hmac
+import json
+import httpx
+class ReplyClient:
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+    async def post(self, *args, **kwargs):
+        return httpx.Response(200, json={'success': True})
+def inbound(event, sender, text, account='ci-wa-account'):
+    body = json.dumps({'id':event, 'event':'message.received',
+        'account':{'accountId':account,'platform':'whatsapp'},
+        'conversation':{'id':'ci-c-' + sender,'participantId':sender},
+        'message':{'direction':'incoming','text':text,'sender':{'phoneNumber':sender,'id':sender}}}).encode()
+    signature = hmac.new(b'ci-secret', body, hashlib.sha256).hexdigest()
+    return connector.post('/webhooks/zernio', content=body, headers={'x-zernio-signature':signature})
+with patch.dict(os.environ, {'ZERNIO_API_KEY':'ci-not-real','ZERNIO_WEBHOOK_SECRET':'ci-secret',
+                             'WHATSAPP_COMMAND_ACCOUNT_ID':'ci-wa-account'}):
+    with patch('app.zernio_receiver.httpx.AsyncClient', lambda **kwargs: ReplyClient()):
+        reply = inbound('ci-driver-accept', '966500000002', 'موافق ' + reference)
+        assert reply.status_code == 200 and reply.json()['agent'] == 'afaaq', reply.text
+        assert inbound('ci-driver-accept', '966500000002', 'موافق ' + reference).json()['duplicate']
+        assert one('SELECT status FROM shipments WHERE id=?',(wa['id'],))['status'] == 'driver_assigned'
+        execute("UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='whatsapp' WHERE shipment_id=?", (second_sid,))
+        reply = inbound('ci-owner-reply', '966500000001', 'السعر 2000 ريال')
+        assert reply.json()['agent'] == 'afaaq', reply.text
+        assert inbound('ci-owner-reply', '966500000001', 'السعر 2000 ريال').json()['duplicate']
+        assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply'", (second_sid,))['n'] == 1
+        assert one('SELECT agreed_owner_price FROM freight_negotiations WHERE shipment_id=?',(second_sid,))['agreed_owner_price'] is None
 print('PASS: PostgreSQL startup, transport intake, duplicate intake, agreement, concurrent offer creation, 150 SAR margin and driver assignment for NQ and WA references. External sends: 0.')
 
 from social_postgres_acceptance import run as run_social_acceptance
