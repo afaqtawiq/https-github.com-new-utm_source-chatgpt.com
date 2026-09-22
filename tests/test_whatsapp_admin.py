@@ -219,3 +219,25 @@ def test_no_arbitrary_sql_publishing_or_send(db):
     for command in ('آفاق DROP TABLE drivers', 'شواهد انشر الحملة', 'آفاق أرسل للجميع أي رسالة'):
         result = admin.run_command(db, command, 'unused')
         assert 'لم أنفذ' in result
+
+
+def test_afaaq_customer_questions_do_not_corrupt_intake():
+    fields={'service':'التخليص الجمركي','route':'جدة','cargo':'حاوية','deadline':'بعد أسبوع'}
+    updated,pending,state,text=receiver.next_reply('afaaq',fields,None,'هل ارفع لك البوليصة لمعرفة تاريخ الوصول')
+    assert updated==fields and pending is None
+    assert 'رقم البوليصة' in text and 'غير مفعّل' in text
+    assert 'النشر' not in text and 'تم حفظ رسالتك' not in text
+    updated,pending,state,text=receiver.next_reply('afaaq',{},'deadline','هل ارفع لك البوليصة؟')
+    assert 'deadline' not in updated and pending=='service'
+
+
+def test_afaaq_welcome_and_urgent_customs():
+    assert receiver.choose_agent('مرحبا',previous='afaaq')=='afaaq'
+    assert receiver.choose_agent('القائمة',previous='afaaq') is None
+    fields,pending,state,text=receiver.next_reply('afaaq',{},'deadline','مرحبا')
+    assert fields=={} and 'أهلًا وسهلًا' in text
+    fields,pending,state,text=receiver.next_reply('afaaq',{},None,'عندي حاوية بتصل من الصين بعد اسبوع وعايز تخليص جمركي مستعجل')
+    assert fields['service']=='التخليص الجمركي' and 'بعد أسبوع' in fields['deadline']
+    assert pending=='route' and 'ميناء الوصول' in text and 'مستعجل' in text
+    fields,pending,state,text=receiver.next_reply('afaaq',fields,pending,'كم السعر؟')
+    assert 'route' not in fields and 'موافقة الإدارة' in text
