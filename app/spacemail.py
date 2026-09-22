@@ -21,6 +21,7 @@ from app.social_content import auth, e, page, parse
 from app.social_publishing import csrf, hidden_csrf
 from app.fine_permissions import has_permission
 from app.mfa_stepup import recent_stepup
+from app.live_activity import observe
 
 router = APIRouter()
 ADDRESS = 'afaq@shodai.cc'
@@ -100,6 +101,7 @@ def validate(secret):
         client.logout()
 
 
+@observe('إرسال البريد الرسمي', 'قبل خادم البريد الرسالة — التسليم غير مؤكد')
 def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, automatic=False):
     if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
         raise RuntimeError('External actions are disabled')
@@ -132,6 +134,7 @@ def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, au
     return str(msg['Message-ID'])
 
 
+@observe('مزامنة البريد الوارد', 'انتهت مزامنة البريد الوارد')
 def sync(uid):
     client = imap_login(password(uid))
     try:

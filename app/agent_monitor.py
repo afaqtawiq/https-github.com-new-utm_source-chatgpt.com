@@ -72,6 +72,16 @@ ACTION_LABELS = {
     'freight_owner_contact_submitted': 'قبل مزود الاتصال طلب التواصل مع صاحب الحمولة',
     'freight_driver_offer_prepared': 'تجهيز عرض للسائق — لم يرسل',
     'run': 'طلب تشغيل البحث',
+    'bill_of_lading_processed': 'تمت معالجة البوليصة',
+    'bill_of_lading_reprocessed': 'أعيدت معالجة البوليصة',
+    'shipping_agent_identified': 'تم تحديد الوكيل الملاحي',
+    'shipping_agent_email_sent': 'قبل مزود البريد الإرسال — التسليم غير مؤكد',
+    'media_generation_completed': 'اكتمل إنتاج المحتوى',
+    'social_schedule_requested': 'طُلبت جدولة النشر — تحقق من حالة المزود',
+    'driver_broadcast_draft_created': 'تجهيز عرض للسائقين — لم يرسل',
+    'driver_broadcast_confirmed': 'اعتماد عرض السائقين — ليس إثبات قبول',
+    'ingest_customer_reply': 'استقبال رد العميل ومعالجته',
+    'sync_sales_inbox': 'مزامنة رسائل العملاء',
 }
 
 
@@ -80,8 +90,25 @@ def snapshot(compact=False):
     ensure_schema()
     latest = run_view(one('SELECT * FROM agent_runs ORDER BY id DESC LIMIT 1'))
     if compact:
-        event = one("SELECT action,entity_id,created_at FROM activity WHERE action IN ('create_outbound_draft','request_send_approval','approve_external_send','send_approved_message','freight_owner_contact_submitted','freight_driver_offer_prepared') ORDER BY id DESC LIMIT 1")
-        return {'run': latest, 'latest_event': ({'label': ACTION_LABELS[event['action']], 'at': event['created_at'], 'entity_id': event['entity_id']} if event else None), 'updated_at': utcnow()}
+        from app.live_activity import current_items, request_label
+        event = one("SELECT action,entity_id,created_at FROM activity WHERE action<>'agent_progress' ORDER BY id DESC LIMIT 1")
+        event_view = None
+        if event:
+            event_view = {'label': ACTION_LABELS.get(event['action'], 'سُجل إجراء: ' + request_label(event['action'])),
+                          'at': event['created_at'], 'entity_id': event['entity_id']}
+        items, unavailable = current_items()
+        if unavailable:
+            items.append({'label': 'تعذر قراءة حالة بعض المسارات — العرض غير مكتمل', 'status': 'blocked', 'at': utcnow()})
+        if latest.get('updated_at'):
+            items.append({'label': latest.get('step') or latest['label'], 'status': latest['status'], 'at': latest['updated_at']})
+        if event_view:
+            items.append(dict(event_view, status='recorded'))
+        items.sort(key=lambda x: str(x.get('at') or ''), reverse=True)
+        # Keep simultaneous current tasks and only the latest terminal result.
+        active = [x for x in items if x['status'] in ('running','waiting','blocked','stale')]
+        terminal = [x for x in items if x['status'] not in ('running','waiting','blocked','stale')]
+        return {'run': latest, 'latest_event': event_view, 'items': active + terminal[:1],
+                'unavailable': unavailable, 'updated_at': utcnow()}
     events = []
     for e in rows('SELECT id,action,entity_type,entity_id,summary,created_at FROM activity ORDER BY id DESC LIMIT 100'):
         if e['action'] == 'agent_progress':
@@ -128,7 +155,7 @@ def monitor_widget():
 (()=>{
 const el=id=>document.getElementById(id), txt=(id,v)=>el(id).textContent=v;
 const fmt=v=>v?new Date(v).toLocaleTimeString('ar-SA',{timeZone:'Asia/Riyadh'}):'';
-let motion=null,paused=false,lastLine='';
+let motion=null,paused=false,lastLine='',items=[],itemIndex=0;
 const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
 function animate(){
  if(motion)motion.cancel();
@@ -149,11 +176,28 @@ el('aw-pause').onclick=()=>{
 };
 new ResizeObserver(animate).observe(el('aw-window'));
 reduced.addEventListener('change',animate);
+function showItem(){
+ if(!items.length)return;
+ const item=items[itemIndex%items.length];
+ txt('aw-state',({'running':'● يعمل الآن','waiting':'بانتظار','blocked':'⚠ يحتاج تدخلاً','stale':'⚠ تأخر التحديث','failed':'⚠ تعذر','partial':'⚠ آخر نتيجة'})[item.status]||'آخر نتيجة');
+ line(item.label+' · '+fmt(item.at)+(items.length>1?' · '+(itemIndex%items.length+1)+'/'+items.length:''));
+}
+setInterval(()=>{if(!paused&&items.length>1){itemIndex=(itemIndex+1)%items.length;showItem();}},8000);
 async function refresh(){
 try{
 const res=await fetch('/api/agent-monitor',{cache:'no-store',signal:AbortSignal.timeout(10000)});
 if(!res.ok)throw new Error(res.status===401?'انتهت الجلسة — سجّل الدخول':'تعذر تحديث الحالة');
 const d=await res.json(),r=d.run,s=r.result||{},e=d.latest_event;
+if(d.items&&d.items.length){
+ const previous=items[itemIndex%Math.max(1,items.length)];
+ items=d.items;
+ const same=previous?items.findIndex(x=>x.label===previous.label):-1;
+ itemIndex=same>=0?same:0;
+ showItem();
+ el('agent-watch').title='آخر قراءة: '+fmt(d.updated_at)+(d.unavailable?' · تعذر قراءة بعض المسارات':'');
+ el('aw-progress').max=Math.max(1,r.total||0);el('aw-progress').value=r.status==='running'?(r.completed||0):0;
+ return;
+}
 const newer=e&&(!r.updated_at||new Date(e.at)>new Date(r.updated_at));
 txt('aw-state',r.status==='running'?'● يعمل الآن':r.status==='stale'?'⚠ تأخر التحديث':r.status==='failed'?'⚠ تعطل التنفيذ':newer?'آخر إجراء':r.status==='partial'?'⚠ آخر نتيجة':'آخر نتيجة');
 let message=r.step||r.label||'بانتظار مهمة';
@@ -162,7 +206,7 @@ else if(r.total)message+=' · '+r.completed+' من '+r.total+' مصادر · ف�
 line(message);
 el('agent-watch').title='آخر قراءة: '+fmt(d.updated_at);
 el('aw-progress').max=Math.max(1,r.total||0);el('aw-progress').value=r.completed||0;
-}catch(e){txt('aw-state','⚠ الاتصال');line(e.message==='انتهت الجلسة — سجّل الدخول'?e.message:'تعذر تحديث الحالة — البيانات المعروضة قديمة');}
+}catch(e){items=[];txt('aw-state','⚠ الاتصال');line(e.message==='انتهت الجلسة — سجّل الدخول'?e.message:'تعذر تحديث الحالة — البيانات المعروضة قديمة');}
 finally{setTimeout(refresh,5000);}}
 refresh();
 })();

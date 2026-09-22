@@ -20,3 +20,24 @@ assert view['run']['finished_at'] is not None
 assert view['run']['result']['opportunities'] == 0
 assert view['events'][0]['label'] == 'انتهى مع مصدر متعذر'
 print('Monitor persistence acceptance passed')
+
+from app import live_activity as live
+from app.storage import db
+first, second = live.begin('المهمة الأولى'), live.begin('المهمة الثانية')
+items, missing = live.current_items()
+assert any('المهمة الأولى' in x['label'] and x['status'] == 'running' for x in items)
+assert any('المهمة الثانية' in x['label'] and x['status'] == 'running' for x in items)
+live.finish(first, 'انتهت الأولى')
+live.finish(second, 'انتهت الثانية')
+for i in range(10):
+    live.finish(live.begin('مهمة'), 'نتيجة')
+with db() as c:
+    assert c.execute('SELECT COUNT(*) AS n FROM agent_live_operations').fetchone()['n'] == 1
+    c.execute("CREATE TABLE IF NOT EXISTS media_jobs(id BIGSERIAL PRIMARY KEY,status TEXT,updated_at TIMESTAMPTZ)")
+    c.execute("INSERT INTO media_jobs(status,updated_at) VALUES('image_pending',NOW())")
+items, missing = live.current_items()
+assert any('إنتاج الصور' in x['label'] and x['status'] == 'waiting' for x in items)
+compact = snapshot(compact=True)
+assert compact['items']
+assert all(set(x) <= {'label','status','at','entity_id'} for x in compact['items'])
+print('Concurrent bounded live monitoring acceptance passed')
