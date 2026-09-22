@@ -1,9 +1,9 @@
 name: Afaaq operational acceptance
 on:
   push:
-    paths: ['app/**', 'tests/**', 'requirements.txt', 'Dockerfile', '.github/workflows/operational-tests.yml']
+    paths: ['app/**', 'discovery_worker.py', 'tests/**', 'requirements.txt', 'Dockerfile', '.github/workflows/operational-tests.yml']
   pull_request:
-    paths: ['app/**', 'tests/**', 'requirements.txt', 'Dockerfile', '.github/workflows/operational-tests.yml']
+    paths: ['app/**', 'discovery_worker.py', 'tests/**', 'requirements.txt', 'Dockerfile', '.github/workflows/operational-tests.yml']
 permissions:
   contents: read
 jobs:
@@ -26,7 +26,7 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt pytest
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core
-      - run: python -m pytest tests/test_operational_repair.py tests/test_whatsapp_admin.py tests/test_manual_tracking.py tests/test_social_publishing.py tests/test_media_fal.py tests/test_advert.py -q
+      - run: python -m pytest tests/test_opportunity_quality.py tests/test_operational_repair.py tests/test_whatsapp_admin.py tests/test_manual_tracking.py tests/test_social_publishing.py tests/test_media_fal.py tests/test_advert.py -q
       - run: python tests/postgres_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
