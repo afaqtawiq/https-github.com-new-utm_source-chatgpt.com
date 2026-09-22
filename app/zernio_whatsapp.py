@@ -126,7 +126,9 @@ async def open_conversation(c, target):
     raise WhatsAppBlocked('تعذر إكمال التحقق من المحادثة؛ لم تُرسل الرسالة')
 
 
-async def send(recipient, message):
+async def send(recipient, message, *, template_prefix='afaaq_transport_'):
+    if template_prefix not in ('afaaq_transport_', 'afaaq_marketing_'):
+        raise WhatsAppBlocked('نوع قالب الإرسال غير مسموح')
     target = phone(recipient)
     if not target or not message.strip():
         raise WhatsAppBlocked('رقم المستلم أو نص الرسالة غير صالح')
@@ -141,7 +143,7 @@ async def send(recipient, message):
             options = await templates(c)
             selected = None
             for template in options:
-                if not template.get('name', '').startswith('afaaq_transport_') or template.get('language') != 'ar':
+                if not template.get('name', '').startswith(template_prefix) or template.get('language') != 'ar':
                     continue
                 params = template_parameters(template, message)
                 if params is not None and template.get('status') == 'APPROVED':

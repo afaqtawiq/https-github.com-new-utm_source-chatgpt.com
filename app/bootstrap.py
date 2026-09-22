@@ -61,6 +61,9 @@ def role_allowed(request,s):
  return not any(path==p or path.startswith(p+'/') for p in ROLE_PREFIX.get(role,()))
 def sensitive_permission(request):
  path=request.url.path
+ if request.method=='POST' and path.startswith('/customer-campaigns/'):
+  if path.endswith('/send/email'):return 'send_email'
+  if path.endswith('/send/whatsapp') or path.endswith('/template'):return 'send_whatsapp'
  if request.method=='POST' and path=='/settings/whatsapp/channel/templates':return 'send_whatsapp'
  if request.method=='POST' and path.startswith('/freight-workflow/') and path.endswith('/contact-owner'):
   return 'send_whatsapp' if os.getenv('FREIGHT_OWNER_CONTACT_CHANNEL','retell').lower()=='whatsapp' else 'make_phone_call'
@@ -123,5 +126,7 @@ from app.official_replies import router as official_replies_router, register_wor
 app.include_router(official_replies_router)
 register_official_replies_worker(app)
 
-from app import publication_reports
+from app.customer_marketing import router as customer_marketing_router
+app.include_router(customer_marketing_router)
 
+from app import publication_reports

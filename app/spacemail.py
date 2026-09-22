@@ -102,7 +102,7 @@ def validate(secret):
 
 
 @observe('إرسال البريد الرسمي', 'قبل خادم البريد الرسالة — التسليم غير مؤكد')
-def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, automatic=False):
+def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, automatic=False, html_body=None):
     if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
         raise RuntimeError('External actions are disabled')
     msg = EmailMessage()
@@ -115,6 +115,8 @@ def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, au
         msg['In-Reply-To'] = in_reply_to
         msg['References'] = in_reply_to
     msg.set_content(body)
+    if html_body:
+        msg.add_alternative(html_body, subtype='html')
     if attachment:
         filename, media_type, content = attachment
         main, sub = media_type.split('/', 1) if '/' in media_type else ('application', 'octet-stream')
