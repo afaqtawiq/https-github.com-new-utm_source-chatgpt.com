@@ -1,7 +1,8 @@
 import os
 os.environ.setdefault("DATABASE_URL", "postgresql://localhost/unused")
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import types
 from app.opportunity_quality import assess, verify_public_request
 from app.intelligence import analyze
 
@@ -39,7 +40,11 @@ class QualityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): verify_public_request('https://example.com/ad/1')
     def test_no_promotion_or_draft_for_directory(self):
         from app.discovery import _promote_signal
-        with patch('app.storage.one',return_value={'id':1,'opportunity_id':None}), patch('app.storage.execute') as execute:
+        storage = types.ModuleType('app.storage')
+        storage.one = Mock(return_value={'id':1,'opportunity_id':None})
+        storage.execute = execute = Mock()
+        storage.utcnow = Mock()
+        with patch.dict('sys.modules', {'app.storage': storage}):
             self.assertIsNone(_promote_signal(1,'شركة',{'url':'internal://customer/account/1','excerpt':'مستورد','score':100}))
             self.assertEqual(execute.call_count,1)
             self.assertIn('UPDATE discovered_signals',execute.call_args.args[0])
