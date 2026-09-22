@@ -40,7 +40,9 @@ def update_run(run_id, step, completed=0, total=0, result=None, status='running'
     execute('UPDATE agent_runs SET status=?,step=?,completed=?,total=?,result=?,updated_at=?,finished_at=? WHERE id=?',
             (status, step, completed, total, json.dumps(result or {}, ensure_ascii=False), now,
              None if status == 'running' else now, run_id))
-    log(None, 'agent_progress', 'agent_run', run_id, step)
+    # Update the current step in place; retain only the terminal result in activity.
+    if status != 'running':
+        log(None, 'agent_progress', 'agent_run', run_id, step)
 
 
 def run_view(run, now=None):
@@ -73,10 +75,13 @@ ACTION_LABELS = {
 }
 
 
-def snapshot():
+def snapshot(compact=False):
     from app.storage import rows, one, utcnow
     ensure_schema()
     latest = run_view(one('SELECT * FROM agent_runs ORDER BY id DESC LIMIT 1'))
+    if compact:
+        event = one("SELECT action,entity_id,created_at FROM activity WHERE action IN ('create_outbound_draft','request_send_approval','approve_external_send','send_approved_message','freight_owner_contact_submitted','freight_driver_offer_prepared') ORDER BY id DESC LIMIT 1")
+        return {'run': latest, 'latest_event': ({'label': ACTION_LABELS[event['action']], 'at': event['created_at'], 'entity_id': event['entity_id']} if event else None), 'updated_at': utcnow()}
     events = []
     for e in rows('SELECT id,action,entity_type,entity_id,summary,created_at FROM activity ORDER BY id DESC LIMIT 100'):
         if e['action'] == 'agent_progress':
@@ -99,51 +104,65 @@ def monitor_api(request: Request):
     from app.storage import get_session
     if not get_session(request.cookies.get('gla_session')):
         raise HTTPException(401, 'يلزم تسجيل الدخول')
-    return JSONResponse(jsonable_encoder(snapshot()), headers={'Cache-Control': 'no-store'})
+    return JSONResponse(jsonable_encoder(snapshot(compact=True)), headers={'Cache-Control': 'no-store'})
 
 
 def monitor_widget():
     return '''
 <style>
-#agent-watch{border:1px solid #d5ad52;border-radius:16px;background:#102b3e;padding:14px 18px;margin:16px 0;color:#f3f7fa}
-#agent-watch summary{cursor:pointer;display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-weight:700}
-#agent-watch summary:before{content:'◉';color:#e7b64b}#aw-state{color:#ffd978}#aw-step{margin:14px 0 6px}
-#agent-watch progress{width:100%;height:12px;accent-color:#e7b64b}#aw-feed{max-height:270px;overflow-y:auto;padding:0;list-style:none}
-#aw-feed li{border-bottom:1px solid #355064;padding:9px 0}#aw-feed time{color:#a7bdcb;margin-left:10px;font-size:12px}
-#aw-sources{max-height:200px;overflow:auto}#aw-sources p{border-bottom:1px solid #355064;padding:8px 0;margin:0}
-#aw-stamp{font-size:12px;color:#bdd0dd}#agent-watch a{color:#ffd978}#aw-result,#aw-messages{line-height:1.9}
+#agent-watch{display:flex;align-items:center;gap:12px;position:relative;overflow:hidden;border:1px solid #b79042;border-radius:12px;background:#102b3e;padding:12px 14px;margin:12px 0;color:#f3f7fa;min-height:54px}
+#aw-state{color:#ffd978;font-weight:700;flex-shrink:0;font-size:13px;max-width:35%}
+#aw-window{min-width:0;flex:1;overflow:hidden}
+#aw-line{width:max-content;white-space:nowrap;font-size:14px}
+#aw-pause{flex-shrink:0;background:transparent;border:1px solid #496071;color:#dce8ef;border-radius:7px;padding:4px 8px;cursor:pointer}
+#aw-progress{position:absolute;bottom:0;right:0;width:100%;height:3px;accent-color:#e7b64b;border:0}
+@media(prefers-reduced-motion:reduce){#aw-window{overflow-x:auto}}
 </style>
-<details id="agent-watch" open>
-<summary><span>ماذا يفعل الوكيل؟</span><span id="aw-state" role="status">جارٍ جلب الحالة…</span><span id="aw-stamp"></span></summary>
-<p id="aw-step"></p><progress id="aw-progress" value="0" max="1" aria-label="المصادر المنتهية"></progress>
-<p id="aw-result"></p><p id="aw-messages"></p>
-<p id="aw-signals"></p>
-<details><summary>حالة المصادر وأسباب التعثر</summary><div id="aw-sources"></div></details>
-<h3>آخر أحداث التنفيذ</h3><ul id="aw-feed"></ul>
-<a href="/activity">فتح سجل النشاط الكامل</a> · <a href="/outbound">متابعة الرسائل</a>
-</details>
+<div id="agent-watch" aria-label="متابعة الوكيل مباشرة">
+<span id="aw-state" role="status">الوكيل</span>
+<div id="aw-window"><div id="aw-line">جارٍ جلب الحالة…</div></div>
+<button id="aw-pause" type="button" aria-label="إيقاف حركة الشريط" aria-pressed="false">إيقاف الحركة</button>
+<progress id="aw-progress" value="0" max="1" aria-label="المصادر المنتهية"></progress>
+</div>
 <script>
 (()=>{
 const el=id=>document.getElementById(id), txt=(id,v)=>el(id).textContent=v;
-const fmt=v=>v?new Date(v).toLocaleString('ar-SA',{timeZone:'Asia/Riyadh'}):'—';
-const labels={draft:'مسودة',pending_approval:'بانتظار الاعتماد',approved:'معتمدة ولم ترسل',sent:'مقبولة من مزود البريد',failed:'فشل الإرسال',sending:'جارٍ الإرسال'};
-const reasons={prospect:'جهة محتملة وليست طلبًا',listing:'صفحة عامة',closed:'طلب مغلق',recruitment:'إعلان توظيف',provider:'عرض مقدم خدمة',unverified:'طلب غير موثق',needs_verification:'تعذر التحقق من المصدر'};
+const fmt=v=>v?new Date(v).toLocaleTimeString('ar-SA',{timeZone:'Asia/Riyadh'}):'';
+let motion=null,paused=false,lastLine='';
+const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
+function animate(){
+ if(motion)motion.cancel();
+ motion=null;
+ const distance=el('aw-line').scrollWidth-el('aw-window').clientWidth;
+ if(distance>0&&!reduced.matches){
+  motion=el('aw-line').animate([{transform:'translateX(0)'},{transform:'translateX('+distance+'px)'}],{duration:Math.max(12000,distance*45),iterations:Infinity,direction:'alternate',easing:'linear'});
+  if(paused)motion.pause();
+ }
+}
+function line(value){if(value!==lastLine){lastLine=value;txt('aw-line',value);animate();}}
+el('aw-pause').onclick=()=>{
+ paused=!paused;
+ if(motion){if(paused)motion.pause();else motion.play();}
+ el('aw-pause').setAttribute('aria-pressed',String(paused));
+ el('aw-pause').setAttribute('aria-label',paused?'تشغيل حركة الشريط':'إيقاف حركة الشريط');
+ txt('aw-pause',paused?'تشغيل الحركة':'إيقاف الحركة');
+};
+new ResizeObserver(animate).observe(el('aw-window'));
+reduced.addEventListener('change',animate);
 async function refresh(){
 try{
 const res=await fetch('/api/agent-monitor',{cache:'no-store',signal:AbortSignal.timeout(10000)});
 if(!res.ok)throw new Error(res.status===401?'انتهت الجلسة — سجّل الدخول':'تعذر تحديث الحالة');
-const d=await res.json(),r=d.run,s=r.result||{};
-txt('aw-state',r.label);txt('aw-stamp','آخر قراءة: '+fmt(d.updated_at));
-txt('aw-step',(r.step||'بانتظار تشغيل البحث')+(r.updated_at?' · آخر حدث: '+fmt(r.updated_at):''));
+const d=await res.json(),r=d.run,s=r.result||{},e=d.latest_event;
+const newer=e&&(!r.updated_at||new Date(e.at)>new Date(r.updated_at));
+txt('aw-state',r.status==='running'?'● يعمل الآن':r.status==='stale'?'⚠ تأخر التحديث':r.status==='failed'?'⚠ تعطل التنفيذ':newer?'آخر إجراء':r.status==='partial'?'⚠ آخر نتيجة':'آخر نتيجة');
+let message=r.step||r.label||'بانتظار مهمة';
+if(newer&&r.status!=='running')message=e.label+(e.entity_id?' · #'+e.entity_id:'')+' · '+fmt(e.at);
+else if(r.total)message+=' · '+r.completed+' من '+r.total+' مصادر · فرص موثقة: '+((s.opportunities||0)+(s.external_opportunities||0))+' · مصادر متعذرة: '+(s.errors||0)+' · '+fmt(r.updated_at);
+line(message);
+el('agent-watch').title='آخر قراءة: '+fmt(d.updated_at);
 el('aw-progress').max=Math.max(1,r.total||0);el('aw-progress').value=r.completed||0;
-txt('aw-result','مصادر منتهية: '+(r.completed||0)+' / '+(r.total||0)+' · إشارات جديدة: '+(s.signals||0)+' · فرص اجتازت التحقق: '+((s.opportunities||0)+(s.external_opportunities||0))+' · مصادر تعذر فحصها: '+(s.errors||0));
-txt('aw-messages','حالة رسائل البريد المسجلة (إجمالي): '+(d.messages.map(m=>(labels[m.status]||m.status)+': '+m.count).join(' · ')||'لا توجد رسائل')+' — لا يعني قبول المزود وصول الرسالة أو موافقة العميل.');
-txt('aw-signals','آخر نتائج التأهيل غير المحولة: '+(d.signals.map(s=>s.title+' ('+(reasons[s.status]||s.status)+')').join('؛ ')||'لا توجد نتائج مسجلة'));
-el('aw-feed').replaceChildren();
-for(const e of d.events){const li=document.createElement('li'),t=document.createElement('time');t.textContent=fmt(e.at);li.append(t,document.createTextNode(e.label+(e.entity_id?' · #'+e.entity_id:'')));el('aw-feed').append(li);}
-el('aw-sources').replaceChildren();
-for(const s of d.sources){const p=document.createElement('p');p.textContent=s.name+' — '+(s.last_status||'لم يفحص بعد')+' · '+fmt(s.last_checked_at);el('aw-sources').append(p);}
-}catch(e){txt('aw-state',e.message==='انتهت الجلسة — سجّل الدخول'?e.message:'تعذر تحديث الحالة — البيانات المعروضة قديمة');}
+}catch(e){txt('aw-state','⚠ الاتصال');line(e.message==='انتهت الجلسة — سجّل الدخول'?e.message:'تعذر تحديث الحالة — البيانات المعروضة قديمة');}
 finally{setTimeout(refresh,5000);}}
 refresh();
 })();
