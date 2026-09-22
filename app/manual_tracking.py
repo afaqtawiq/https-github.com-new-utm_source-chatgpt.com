@@ -240,6 +240,12 @@ def review(update_id: int, request: Request):
     return page('مراجعة نتيجة التتبع وإرسالها', body)
 
 
+@router.get('/tracking-updates/{update_id}/send')
+def return_after_stepup(update_id: int):
+    # MFA returns with GET; always return to review, never send on navigation.
+    return RedirectResponse(f'/tracking-updates/{update_id}', 303)
+
+
 @router.post('/tracking-updates/{update_id}/send')
 async def send(update_id: int, request: Request):
     form = dict(await request.form())
