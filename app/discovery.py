@@ -419,20 +419,32 @@ def run_discovery_cycle():
     with db() as connection:
         if not connection.execute('SELECT pg_try_advisory_xact_lock(73002026) acquired').fetchone()['acquired']:
             return {'skipped': 'cycle_already_running'}
-        return _run_discovery_cycle()
+        from app.agent_monitor import start_run, update_run
+        run_id = start_run()
+        try:
+            return _run_discovery_cycle(run_id)
+        except Exception as exc:
+            update_run(run_id, 'تعطل البحث قبل اكتماله؛ راجع سجل الخدمة (' + type(exc).__name__ + ')', status='failed')
+            raise
 
 
-def _run_discovery_cycle():
+def _run_discovery_cycle(run_id=None):
     from app.storage import rows, one, execute, utcnow
+    from app.agent_monitor import update_run
     ensure_default_sources()
     stats = {"checked": 0, "signals": 0, "opportunities": 0, "errors": 0}
+    update_run(run_id, 'مراجعة الجهات المسجلة؛ وجود جهة لا يثبت طلب شراء', result=stats)
     customer_stats = _scan_registered_customers()
     stats.update(customer_stats)
     pilot_stats = {"pilot_target": 0, "pilot_active": 0, "pilot_activated": 0}
     stats.update(pilot_stats)
+    update_run(run_id, 'فحص إعدادات البحث الخارجي وجمع النتائج المتاحة', result=stats)
     external_stats = _scan_external_search()
     stats.update(external_stats)
-    for source in rows("SELECT * FROM source_watches WHERE enabled=1 ORDER BY id"):
+    sources = rows("SELECT * FROM source_watches WHERE enabled=1 ORDER BY id")
+    total = len(sources)
+    for source in sources:
+        update_run(run_id, 'فحص المصدر: ' + source['name'], stats['checked'], total, stats)
         stats["checked"] += 1
         try:
             result = fetch_public(source["url"])
@@ -471,12 +483,17 @@ def _run_discovery_cycle():
                 "UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?",
                 (f"تم الفحص — {len(scan_results)} نتيجة — أعلى درجة {highest_score}", utcnow(), source["id"]),
             )
+            update_run(run_id, 'انتهى فحص: ' + source['name'] + '؛ النتائج ليست طلبات مؤكدة قبل التحقق', stats['checked'], total, stats)
         except Exception as exc:
             stats["errors"] += 1
             execute(
                 "UPDATE source_watches SET last_status=?,last_checked_at=? WHERE id=?",
                 ("تعذر الفحص: " + str(exc)[:180], utcnow(), source["id"]),
             )
+            update_run(run_id, 'تعذر فحص: ' + source['name'] + ' (' + type(exc).__name__ + ')؛ متابعة بقية المصادر', stats['checked'], total, stats)
+    accepted = stats['opportunities'] + stats.get('external_opportunities', 0)
+    update_run(run_id, f'انتهت دورة البحث: {accepted} فرصة اجتازت التحقق. لم ترسل هذه الدورة رسائل للعملاء.',
+               stats['checked'], total, stats, 'partial' if stats['errors'] else 'completed')
     return stats
 
 
