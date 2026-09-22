@@ -254,3 +254,25 @@ def test_manual_search_links_are_explicitly_marked(monkeypatch):
     monkeypatch.delenv('BRAVE_SEARCH_API_KEY', raising=False)
     items, _ = brave_search_candidates()
     assert items and all(item['manual_search'] for item in items)
+
+
+
+def test_unsent_driver_cannot_accept(modules):
+    commands, freight, database = modules
+    freight.prepare_driver_offer(1, 1)
+    database.execute("UPDATE driver_broadcasts SET status='sending'")
+    assert not freight.accept_driver_reply('+966500000002', 'موافق NQ-16')
+    assert database.one('SELECT accepted_driver_id FROM driver_broadcasts')['accepted_driver_id'] is None
+
+
+def test_whatsapp_preflight_block_is_retryable_not_uncertain(modules, monkeypatch):
+    commands, freight, database = modules
+    from app.zernio_whatsapp import WhatsAppBlocked
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    monkeypatch.setenv('FREIGHT_AUTO_OWNER_CONTACT', '1')
+    monkeypatch.setenv('FREIGHT_OWNER_CONTACT_CHANNEL', 'whatsapp')
+    async def blocked(*args):
+        raise WhatsAppBlocked('قالب قيد المراجعة؛ لم ترسل الرسالة')
+    monkeypatch.setattr(freight, 'send_text_message', blocked)
+    asyncio.run(freight.contact_owner(1, approved=True, user_id=1))
+    assert database.one('SELECT status FROM freight_negotiations')['status'] == 'contact_blocked'

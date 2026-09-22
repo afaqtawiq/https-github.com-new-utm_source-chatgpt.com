@@ -11,6 +11,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.storage import db, execute, get_session, log, one, rows, utcnow
 from app.whatsapp_integration import send_text_message
+from app.zernio_whatsapp import WhatsAppBlocked
+from contextlib import nullcontext
 from app.logistics_parsing import phone as normalize_phone, accepts_offer
 
 
@@ -210,7 +212,7 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
             (provider_id, utcnow(), utcnow(), shipment_id))
         log(user_id, "freight_owner_contact_submitted", "shipment", shipment_id, "Provider accepted message: " + provider_id)
     except Exception as exc:
-        status = 'contact_uncertain' if attempted else 'contact_failed'
+        status = 'contact_blocked' if isinstance(exc, WhatsAppBlocked) else 'contact_uncertain' if attempted else 'contact_failed'
         execute("UPDATE freight_negotiations SET status=?,last_error=?,updated_at=? WHERE shipment_id=?",
                 (status, str(exc)[:500], utcnow(), shipment_id))
         log(user_id, status, "shipment", shipment_id, "Contact not verified; automatic retry disabled" if attempted else "Contact configuration needs review")
@@ -344,17 +346,17 @@ def prepare_driver_offer(shipment_id, user_id):
     return bid
 
 
-def accept_driver_reply(phone, text):
+def accept_driver_reply(phone, text, connection=None):
     normalized = _valid_phone(phone)
     match = re.search(r"(?:NQ-\d+|WA-[A-F0-9]{12})", (text or "").upper())
     if not normalized or not match or not accepts_offer(text):
         return False
     reference = match.group(0)
-    with db() as c:
+    with (nullcontext(connection) if connection is not None else db()) as c:
         row = c.execute("""SELECT r.id recipient_id,r.driver_id,b.id broadcast_id,b.shipment_id,b.accepted_driver_id
             FROM driver_broadcast_recipients r JOIN driver_broadcasts b ON b.id=r.broadcast_id
             JOIN shipments s ON s.id=b.shipment_id
-            WHERE r.phone=%s AND s.reference=%s AND b.status IN ('sending','completed','completed_with_errors','awaiting_driver')
+            WHERE r.phone=%s AND s.reference=%s AND r.status='sent' AND COALESCE(r.provider_message_id,'')<>'' AND b.status IN ('sending','completed','completed_with_errors','awaiting_driver')
             ORDER BY b.id DESC LIMIT 1 FOR UPDATE""", (normalized, reference)).fetchone()
         if not row or row["accepted_driver_id"]:
             return False
@@ -416,6 +418,9 @@ def workflow_detail(shipment_id: int, request: Request):
     manual_contact = (f"<a class=manual href='{esc(owner_link)}' target='_blank' rel='noopener'>فتح واتساب لصاحب الشحنة برسالة جاهزة</a>"
                       "<p class=warn>هذا الزر يفتح المحادثة فقط؛ راجع الرسالة واضغط إرسال داخل واتساب بنفسك.</p>"
                       if owner_link else "")
+    replies = rows("SELECT summary,happened_at FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply' ORDER BY id DESC LIMIT 10", (shipment_id,))
+    reply_html = "<h2>ردود صاحب الحمولة عبر واتساب</h2>" + ("".join("<p>" + esc(x['happened_at']) + "</p><p style='white-space:pre-wrap'>" + esc(x['summary']) + "</p>" for x in replies) or "<p>لم يصل رد مرتبط بهذه الشحنة بعد.</p>")
+    classification += "<p><a href='/settings/whatsapp/channel'>حالة قناة واتساب وقوالب Meta</a></p>" + reply_html
     controls = classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
     <p>راجع نتيجة الاستخراج. عند نقص المسار يمكنك تجهيز طلب استكمال لصاحب الشحنة إذا كان رقمه صحيحًا.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
@@ -564,3 +569,4 @@ def workflow_api(request: Request):
     return {"owner_auto_contact_enabled": os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") == "1",
             "driver_margin_sar": 150,
             "items": rows("SELECT * FROM freight_negotiations ORDER BY id DESC LIMIT 200")}
+

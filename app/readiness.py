@@ -59,6 +59,9 @@ def configuration_status():
     direct = (present('TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_WHATSAPP_FROM')
               if os.getenv('WHATSAPP_PROVIDER', 'meta').lower() == 'twilio'
               else present('WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN'))
+    if os.getenv('WHATSAPP_PROVIDER', 'meta').lower() == 'zernio':
+        from app.zernio_whatsapp import configured
+        direct = configured()
     from app.social_publishing import connection_status
     social = connection_status()
     published = None
@@ -81,7 +84,7 @@ def configuration_status():
         {'name': 'إعلان كامل بالتعليق العربي والهوية', 'configured': bool(one('SELECT id FROM media_provider_settings WHERE id=1')), 'live_tested': bool(advert), 'detail': ('اكتمل الإعلان رقم ' + str(advert['id'])) if advert else 'المسار متاح؛ يحتاج اعتماد تكلفة إعلان ثم إنتاجًا حيًا ومراجعة الصوت والمونتاج'},
         {'name': 'أوامر واتساب الإدارية', 'configured': present('ZERNIO_API_KEY', 'ZERNIO_WEBHOOK_SECRET', 'WHATSAPP_COMMAND_OWNER', 'WHATSAPP_COMMAND_ACCOUNT_ID'), 'detail': 'تحتاج اختبار رسالة واردة وتنفيذ موثق من رقم الإدارة'},
         {'name': 'تفريغ الرسائل الصوتية', 'configured': present('OPENAI_API_KEY'), 'detail': 'يحتاج مفتاح تفريغ صوتي ثم اختبار رسالة صوتية'},
-        {'name': 'إرسال عروض النقل عبر واتساب', 'configured': direct, 'detail': 'يحتاج إعداد مزود الإرسال واعتماد العرض قبل إرساله'},
+        {'name': 'إرسال عروض النقل عبر واتساب', 'configured': direct, 'detail': 'ربط المزود لا يثبت الإرسال. راجع /settings/whatsapp/channel لحالة قوالب Meta؛ يلزم اعتماد العرض وموافقة السائق على استقبال العروض'},
         {'name': 'بحث الويب الآلي', 'configured': present('BRAVE_SEARCH_API_KEY'), 'detail': 'المصادر العامة تعمل بشكل مستقل؛ روابط البحث اليدوية لا تُحسب فرصًا'},
         {'name': 'بحث الشركات في الخرائط', 'configured': present('GOOGLE_MAPS_API_KEY'), 'detail': 'وجود شركة في الخرائط لا يثبت وجود طلب شراء'},
         {'name': 'إعداد ربط Gmail', 'configured': present('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'TOKEN_ENCRYPTION_KEY'), 'detail': 'إعداد OAuth وحده لا يثبت اتصال البريد أو صلاحية الإرسال'},
@@ -122,3 +125,4 @@ def readiness_page(request: Request):
         '</p><a href="/settings/email/spacemail">البريد الرسمي</a></div><div class="card scroll"><h2>التشغيل الأساسي وخطوة العمل التالية</h2><table><tr><th>الوظيفة</th><th>الحالة الفعلية</th><th>الدليل والمتبقي</th></tr>' + operations +
         '</table></div><div class="card scroll"><h2>الإنتاج والتكاملات المساندة</h2><p>الصوت والخرائط والبحث الموسع وظائف مستقلة؛ عدم ربطها لا يمنع استقبال الطلبات النصية ومتابعتها يدويًا.</p><table><tr><th>الوظيفة</th><th>الحالة</th><th>المتبقي</th></tr>' + table +
         '</table></div><div class="card scroll"><h2>آخر فحص للمصادر</h2><table><tr><th>المصدر</th><th>النتيجة</th><th>الوقت</th></tr>' + sources + '</table></div>'))
+

@@ -127,8 +127,8 @@ def whatsapp_status():
     meta_ready = bool(os.getenv("WHATSAPP_ACCESS_TOKEN") and os.getenv("WHATSAPP_PHONE_NUMBER_ID") and os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID") and os.getenv("WHATSAPP_VERIFY_TOKEN") and os.getenv("WHATSAPP_APP_SECRET"))
     return {
         "provider": provider,
-        "configured": twilio_ready if provider == "twilio" else meta_ready,
-        "webhook": "/webhooks/twilio/whatsapp" if provider == "twilio" else "/webhooks/whatsapp",
+        "configured": (__import__("app.zernio_whatsapp", fromlist=["configured"]).configured() if provider == "zernio" else twilio_ready if provider == "twilio" else meta_ready),
+        "webhook": "/webhooks/zernio" if provider == "zernio" else "/webhooks/twilio/whatsapp" if provider == "twilio" else "/webhooks/whatsapp",
         "twilio_ready": twilio_ready,
         "meta_ready": meta_ready,
         "phone_number_id": os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""),
@@ -142,6 +142,9 @@ def whatsapp_status():
 async def send_text_message(recipient: str, message: str) -> dict:
     if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1":
         raise RuntimeError("الإرسال الخارجي غير مفعّل؛ لم تُرسل الرسالة")
+    if os.getenv("WHATSAPP_PROVIDER", "meta").lower() == "zernio":
+        from app.zernio_whatsapp import send
+        return await send(recipient, message)
     if os.getenv("WHATSAPP_PROVIDER", "meta").lower() == "twilio":
         return await _send_twilio_message(recipient, message)
     token = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
@@ -182,3 +185,4 @@ async def _send_twilio_message(recipient: str, message: str) -> dict:
     response.raise_for_status()
     payload = response.json()
     return {"messages": [{"id": payload.get("sid", "")}], "provider": "twilio", "raw": payload}
+

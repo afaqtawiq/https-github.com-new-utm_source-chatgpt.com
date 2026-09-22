@@ -120,6 +120,31 @@ async def receive(request: Request):
             if not claim: return None
             from app.transport_intake import is_transport_request
             text = str(message.get('text') or '')
+            from app.zernio_whatsapp import account_id as transport_account, phone as transport_phone
+            identity = message.get('sender') or {}
+            conversation = p.get('conversation') or {}
+            contact = transport_phone(identity.get('phoneNumber'))
+            private_transport = (account_id == transport_account() and contact
+                and message.get('direction') == 'incoming'
+                and not conversation.get('isGroup') and not message.get('isGroup')
+                and transport_phone(conversation.get('participantId')) == contact
+                and (not identity.get('id') or transport_phone(identity['id']) == contact))
+            if private_transport and not is_menu_request(text) and not explicit_agent(text):
+                from app.freight_workflow import accept_driver_reply
+                if accept_driver_reply('+' + contact, text, connection=c):
+                    return 'afaaq', {'message': 'تم تسجيل موافقتك على عرض النقل وربطك بالشحنة. سنتابع معك تفاصيل التنفيذ.'}
+                pending = c.execute("""SELECT s.id,s.reference FROM shipments s
+                    JOIN freight_negotiations n ON n.shipment_id=s.id
+                    WHERE n.owner_phone=%s AND n.contact_channel='whatsapp'
+                    AND n.status='awaiting_owner' AND n.record_kind='shipment_request'""", ('+' + contact,)).fetchall()
+                if pending:
+                    matching = [x for x in pending if x['reference'].upper() in text.upper().split()]
+                    selected = matching[0] if len(matching) == 1 else pending[0] if len(pending) == 1 else None
+                    if selected is None:
+                        return 'afaaq', {'message': 'لديك أكثر من طلب نقل. اذكر مرجع الشحنة مع الرد: ' + '، '.join(x['reference'] for x in pending)}
+                    c.execute('''INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
+                        VALUES(%s,'owner_whatsapp_reply',%s,'awaiting_owner',NOW())''', (selected['id'], text[:4000]))
+                    return 'afaaq', {'message': 'وصل ردك بخصوص ' + selected['reference'] + ' وتم حفظه للمراجعة واستكمال الاتفاق على السعر وشروط النقل.'}
             transport_mode = is_transport_request(text)
             if sender and not transport_mode:
                 pending_transport = c.execute("SELECT fields FROM zernio_requests WHERE conversation_id=%s AND agent='afaaq'", (conversation_id,)).fetchone()
@@ -352,3 +377,4 @@ router.include_router(material_router)
 
 from app.manual_tracking import router as tracking_router
 router.include_router(tracking_router)
+
