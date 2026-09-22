@@ -118,7 +118,7 @@ with patch('app.bootstrap.mfa_state',return_value={'mfa_enabled':1}),patch('app.
     execute('INSERT INTO accounts(name,email,phone,status,created_at,updated_at) VALUES(?,?,?,?,?,?)',('New daily company','new@example.com','','lead',utcnow(),utcnow()))
     asyncio.run(m.daily_tick(date1.replace(day=3)))
     assert len(daily_calls)==7  # the newly registered company joins the next day.
-    assert len(rows("SELECT id FROM customer_campaigns WHERE campaign_key LIKE '%2070-01-%'"))==2
+    assert len(rows('SELECT id FROM customer_campaigns WHERE campaign_key LIKE ?',('%2070-01-%',)))==2
     assert client.post(schedule_path,data={'csrf':csrf,'enabled':'0'}).status_code==200
     asyncio.run(m.daily_tick(date1.replace(day=4)))
     assert len(daily_calls)==7
