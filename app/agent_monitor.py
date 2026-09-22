@@ -113,7 +113,7 @@ def monitor_widget():
 #agent-watch{display:flex;align-items:center;gap:12px;position:relative;overflow:hidden;border:1px solid #b79042;border-radius:12px;background:#102b3e;padding:12px 14px;margin:12px 0;color:#f3f7fa;min-height:54px}
 #aw-state{color:#ffd978;font-weight:700;flex-shrink:0;font-size:13px;max-width:35%}
 #aw-window{min-width:0;flex:1;overflow:hidden}
-#aw-line{width:max-content;white-space:nowrap;font-size:14px}
+#aw-line{width:max-content;white-space:nowrap;font-size:14px;color:#ff6666}
 #aw-pause{flex-shrink:0;background:transparent;border:1px solid #496071;color:#dce8ef;border-radius:7px;padding:4px 8px;cursor:pointer}
 #aw-progress{position:absolute;bottom:0;right:0;width:100%;height:3px;accent-color:#e7b64b;border:0}
 @media(prefers-reduced-motion:reduce){#aw-window{overflow-x:auto}}
