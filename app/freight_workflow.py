@@ -41,6 +41,7 @@ def _init_storage():
             created_at TIMESTAMPTZ NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL
         )""",
+        "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS record_kind TEXT NOT NULL DEFAULT 'shipment_request'",
         "ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS shipment_id BIGINT REFERENCES shipments(id) ON DELETE SET NULL",
         "ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS accepted_driver_id BIGINT REFERENCES drivers(id) ON DELETE SET NULL",
         "ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ",
@@ -121,9 +122,11 @@ def _whatsapp_link(phone, message):
 
 
 async def contact_owner(shipment_id, approved=False, user_id=None):
-    item = one("""SELECT s.*,n.owner_phone,n.status negotiation_status,n.provider_call_id,n.provider_message_id FROM shipments s
+    item = one("""SELECT s.*,n.record_kind,n.owner_phone,n.status negotiation_status,n.provider_call_id,n.provider_message_id FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item:
+        return
+    if item.get('record_kind') == 'carrier_offer':
         return
     terminal = {'contacting', 'contact_uncertain', 'awaiting_owner', 'owner_agreed',
                 'driver_offer_pending_approval', 'driver_accepted', 'delivered', 'closed'}
@@ -147,7 +150,7 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
     # Claim before any network request. Concurrent invocations cannot send twice.
     with db() as c:
         claimed = c.execute("""UPDATE freight_negotiations SET status='contacting',last_error=NULL,updated_at=%s
-            WHERE shipment_id=%s AND status IN ('ready_to_contact','contact_ready','needs_contact_approval','contact_blocked','contact_failed','needs_manual_data')
+            WHERE shipment_id=%s AND record_kind='shipment_request' AND status IN ('ready_to_contact','contact_ready','needs_contact_approval','contact_blocked','contact_failed','needs_manual_data')
               AND COALESCE(provider_call_id,'')='' AND COALESCE(provider_message_id,'')='' RETURNING id""",
             (utcnow(), shipment_id)).fetchone()
     if not claimed:
@@ -220,6 +223,9 @@ def sync_retell_negotiation(metadata, custom, summary=""):
         return False
     if not metadata.get("freight_negotiation"):
         return False
+    kind = one('SELECT record_kind FROM freight_negotiations WHERE shipment_id=?', (shipment_id,))
+    if kind and kind.get('record_kind') == 'carrier_offer':
+        return False
     def number(value):
         match = re.search(r"\d+(?:[.,]\d+)?", str(value or "").replace(",", ""))
         return float(match.group(0)) if match else None
@@ -230,6 +236,9 @@ def sync_retell_negotiation(metadata, custom, summary=""):
         now = utcnow(); driver_price = round(agreed - 150, 2)
         with db() as c:
             if not c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone():
+                return False
+            current_kind = c.execute('SELECT record_kind FROM freight_negotiations WHERE shipment_id=%s FOR UPDATE', (shipment_id,)).fetchone()
+            if current_kind and current_kind['record_kind'] == 'carrier_offer':
                 return False
             if c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone():
                 return True
@@ -246,7 +255,7 @@ def sync_retell_negotiation(metadata, custom, summary=""):
             execute("UPDATE freight_negotiations SET last_error=?,updated_at=? WHERE shipment_id=?", (str(exc.detail)[:500], utcnow(), shipment_id))
         return True
     execute("""UPDATE freight_negotiations SET status='needs_review',notes=COALESCE(NULLIF(?,''),notes),updated_at=? WHERE shipment_id=?
-        AND status NOT IN ('driver_offer_pending_approval','driver_accepted','delivered','closed')""",
+        AND record_kind='shipment_request' AND status NOT IN ('driver_offer_pending_approval','driver_accepted','delivered','closed')""",
         (summary[:3000], utcnow(), shipment_id))
     return True
 
@@ -280,6 +289,8 @@ def _shipment_requirements(item, agreement=False):
 
 
 def _require_complete(item, agreement=False):
+    if item.get('record_kind') == 'carrier_offer':
+        raise HTTPException(409, "هذا عرض ناقل يبحث عن حمولة، وليس طلب نقل من صاحب حمولة")
     missing = _shipment_requirements(item, agreement)
     if missing:
         raise HTTPException(409, "أكمل البيانات أولًا: " + "، ".join(missing))
@@ -288,7 +299,7 @@ def _require_complete(item, agreement=False):
 def prepare_driver_offer(shipment_id, user_id):
     # Lock the shipment so simultaneous agreement submissions share one draft.
     with db() as c:
-        item = c.execute("""SELECT s.*,n.owner_phone,n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.payment_method,
+        item = c.execute("""SELECT s.*,n.record_kind,n.owner_phone,n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.payment_method,
             n.unloading_location FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
             WHERE s.id=%s FOR UPDATE OF s,n""", (shipment_id,)).fetchone()
         if not item or item.get("agreed_owner_price") is None:
@@ -362,12 +373,12 @@ def accept_driver_reply(phone, text):
 @router.get("/freight-workflow", response_class=HTMLResponse)
 def workflow_page(request: Request):
     session(request)
-    items = rows("""SELECT s.id,s.reference,s.origin,s.destination,s.status,n.owner_phone,n.status negotiation_status,
+    items = rows("""SELECT s.id,s.reference,s.origin,s.destination,s.status,n.record_kind,n.owner_phone,n.status negotiation_status,
         n.agreed_owner_price,n.driver_offer_price,b.status broadcast_status,d.driver_name
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
         LEFT JOIN LATERAL (SELECT * FROM driver_broadcasts x WHERE x.shipment_id=s.id ORDER BY x.id DESC LIMIT 1) b ON TRUE
         LEFT JOIN drivers d ON d.id=b.accepted_driver_id ORDER BY s.id DESC""")
-    table = "".join(f"<tr><td><a href='/freight-workflow/{x['id']}'>{esc(x['reference'])}</a></td><td>{esc(x['origin'])} → {esc(x['destination'])}</td><td dir=ltr>{esc(x['owner_phone'])}</td><td>{esc(x['negotiation_status'])}</td><td>{esc(x['agreed_owner_price'])}</td><td>{esc(x['driver_offer_price'])}</td><td>{esc(x.get('broadcast_status'))}</td><td>{esc(x.get('driver_name'))}</td></tr>" for x in items)
+    table = "".join(f"<tr><td><a href='/freight-workflow/{x['id']}'>{esc(x['reference'])}</a></td><td>{esc(x['origin'])} → {esc(x['destination'])}</td><td dir=ltr>{esc(x['owner_phone'])}</td><td>{esc('عرض ناقل يبحث عن حمولة' if x.get('record_kind') == 'carrier_offer' else x['negotiation_status'])}</td><td>{esc(x['agreed_owner_price'])}</td><td>{esc(x['driver_offer_price'])}</td><td>{esc(x.get('broadcast_status'))}</td><td>{esc(x.get('driver_name'))}</td></tr>" for x in items)
     return HTMLResponse(_page("إدارة عروض الشحن", f"<h1>إدارة عروض الشحن</h1><p><a href='/dashboard'>الرئيسية</a></p><div class=card><table><tr><th>الشحنة</th><th>المسار</th><th>صاحب الشحنة</th><th>التفاوض</th><th>اتفاق المالك</th><th>عرض السائق</th><th>الإرسال</th><th>السائق المقبول</th></tr>{table or '<tr><td colspan=8>لا توجد شحنات.</td></tr>'}</table></div>"))
 
 
@@ -378,10 +389,25 @@ def _page(title, body):
 @router.get("/freight-workflow/{shipment_id}", response_class=HTMLResponse)
 def workflow_detail(shipment_id: int, request: Request):
     current = session(request)
-    item = one("""SELECT s.*,n.id negotiation_id,n.owner_phone,n.status negotiation_status,n.asking_price,
+    item = one("""SELECT s.*,n.record_kind,n.id negotiation_id,n.owner_phone,n.status negotiation_status,n.asking_price,
         n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.unloading_location,n.payment_method,n.notes,n.last_error
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404)
+    classification = f"""<h2>تصنيف السجل</h2>
+    <p>تصنيف هذا الطلب مستقل عن رقم التواصل؛ يمكن للشخص نفسه عرض عدة شحنات.</p>
+    <form method=post action='/freight-workflow/{shipment_id}/classification'>
+    <input type=hidden name=csrf value='{esc(current['csrf'])}'>
+    <label>نوع السجل <select name=record_kind>
+    <option value=shipment_request {'selected' if item['record_kind']=='shipment_request' else ''}>طلب نقل من صاحب حمولة</option>
+    <option value=carrier_offer {'selected' if item['record_kind']=='carrier_offer' else ''}>عرض ناقل يبحث عن حمولة</option>
+    </select></label><button>حفظ التصنيف</button></form>"""
+    if item['record_kind'] == 'carrier_offer':
+        return HTMLResponse(_page(item['reference'], f"""<div class=card><h1>{esc(item['reference'])}</h1>
+        <p><a href='/freight-workflow'>العودة إلى السجلات</a></p>
+        <h2>عرض ناقل يبحث عن حمولة</h2><p>من {esc(item['origin'])} إلى {esc(item['destination'])}</p>
+        <p>رقم الناقل: <span dir=ltr>{esc(item['owner_phone'])}</span></p>
+        <p>محفوظ كعرض ناقل؛ لا يُرسل له طلب تسعير بصفته صاحب حمولة، ولا يُجهز منه عرض للسائقين.</p>
+        {classification}</div>"""))
     broadcast = one("SELECT * FROM driver_broadcasts WHERE shipment_id=? ORDER BY id DESC LIMIT 1", (shipment_id,))
     missing_contact = _shipment_requirements(item)
     readiness = ("<p class=good>بيانات المسار والتواصل مكتملة.</p>" if not missing_contact else
@@ -390,7 +416,7 @@ def workflow_detail(shipment_id: int, request: Request):
     manual_contact = (f"<a class=manual href='{esc(owner_link)}' target='_blank' rel='noopener'>فتح واتساب لصاحب الشحنة برسالة جاهزة</a>"
                       "<p class=warn>هذا الزر يفتح المحادثة فقط؛ راجع الرسالة واضغط إرسال داخل واتساب بنفسك.</p>"
                       if owner_link else "")
-    controls = f"""<h2>الاستخراج والتصحيح اليدوي</h2>
+    controls = classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
     <p>راجع نتيجة الاستخراج. عند نقص المسار يمكنك تجهيز طلب استكمال لصاحب الشحنة إذا كان رقمه صحيحًا.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
     <input name=origin required placeholder='مدينة أو موقع التحميل' value='{esc(item.get('origin'))}'>
@@ -406,13 +432,48 @@ def workflow_detail(shipment_id: int, request: Request):
     return HTMLResponse(_page(item["reference"], f"<div class=card><h1>{esc(item['reference'])}</h1><p>{esc(item['origin'])} → {esc(item['destination'])}</p><p>صاحب الشحنة: <span dir=ltr>{esc(item['owner_phone'])}</span> | الحالة: {esc(item['negotiation_status'])}</p><p class=warn>{esc(item.get('last_error'))}</p>{controls}</div>"))
 
 
+@router.post("/freight-workflow/{shipment_id}/classification")
+async def classify_record(shipment_id: int, request: Request):
+    current = session(request)
+    data = form(await request.body())
+    if data.get('csrf') != current['csrf']:
+        raise HTTPException(403)
+    kind = data.get('record_kind')
+    if kind not in ('shipment_request', 'carrier_offer'):
+        raise HTTPException(400, 'تصنيف غير صالح')
+    with db() as c:
+        item = c.execute("""SELECT s.id,n.* FROM shipments s JOIN freight_negotiations n
+            ON n.shipment_id=s.id WHERE s.id=%s FOR UPDATE OF s,n""", (shipment_id,)).fetchone()
+        if not item:
+            raise HTTPException(404)
+        if item['record_kind'] == kind:
+            return RedirectResponse(f'/freight-workflow/{shipment_id}', 303)
+        if (item.get('provider_call_id') or item.get('provider_message_id') or
+            item.get('agreed_owner_price') is not None or item['status'] in
+            ('contacting','contact_uncertain','awaiting_owner','driver_accepted','delivered','closed') or
+            c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone()):
+            raise HTTPException(409, 'بدأ تنفيذ هذا السجل؛ يلزم مراجعته قبل تغيير التصنيف')
+        status = 'carrier_offer' if kind == 'carrier_offer' else 'ready_to_contact'
+        c.execute("""UPDATE freight_negotiations SET record_kind=%s,status=%s,
+            last_error=NULL,updated_at=NOW() WHERE shipment_id=%s""", (kind, status, shipment_id))
+        # Preserve source, reference, phone, route and all other independent loads.
+        c.execute("UPDATE shipments SET status=%s,updated_at=NOW() WHERE id=%s",
+                  ('carrier_offer' if kind == 'carrier_offer' else 'new', shipment_id))
+        c.execute("""INSERT INTO activity(user_id,action,entity_type,entity_id,summary,created_at)
+            VALUES(%s,'freight_classification_updated','shipment',%s,%s,NOW())""",
+                  (current['user_id'], shipment_id, kind))
+    return RedirectResponse(f'/freight-workflow/{shipment_id}', 303)
+
+
 @router.post("/freight-workflow/{shipment_id}/manual-data")
 async def save_manual_data(shipment_id: int, request: Request):
     current = session(request); data = form(await request.body())
     if data.get("csrf") != current["csrf"]: raise HTTPException(403)
-    item = one("""SELECT s.id,n.naqliat_load_id FROM shipments s
+    item = one("""SELECT s.id,n.record_kind,n.naqliat_load_id FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404, "الشحنة غير موجودة")
+    if item.get('record_kind') == 'carrier_offer':
+        raise HTTPException(409, "عرض ناقل؛ لا تعدله كطلب حمولة")
     origin = _usable_text(data.get("origin")); destination = _usable_text(data.get("destination"))
     phone = _valid_phone(data.get("owner_phone"))
     if not origin or not destination:
@@ -428,6 +489,9 @@ async def save_manual_data(shipment_id: int, request: Request):
     now = utcnow()
     with db() as c:
         c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        locked = c.execute('SELECT record_kind FROM freight_negotiations WHERE shipment_id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        if locked and locked['record_kind'] == 'carrier_offer':
+            raise HTTPException(409, 'هذا عرض ناقل وليس طلب حمولة')
         if c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone():
             raise HTTPException(409, "يوجد عرض لهذه الشحنة؛ راجع العرض قبل تعديل بيانات الحمولة")
         c.execute("UPDATE shipments SET origin=%s,destination=%s,updated_at=%s WHERE id=%s",
@@ -446,9 +510,11 @@ async def save_manual_data(shipment_id: int, request: Request):
 async def contact_owner_now(shipment_id: int, request: Request, background_tasks: BackgroundTasks):
     current = session(request); data = form(await request.body())
     if data.get("csrf") != current["csrf"]: raise HTTPException(403)
-    item = one("""SELECT s.origin,s.destination,n.owner_phone FROM shipments s
+    item = one("""SELECT s.origin,s.destination,n.record_kind,n.owner_phone FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404, "الشحنة غير موجودة")
+    if item.get('record_kind') == 'carrier_offer':
+        raise HTTPException(409, "هذا عرض ناقل وليس طلب حمولة")
     if not _valid_phone(item.get('owner_phone')):
         raise HTTPException(409, "يلزم رقم صحيح لصاحب الشحنة لتجهيز التواصل")
     background_tasks.add_task(contact_owner, shipment_id, approved=True, user_id=current['user_id'])
@@ -468,7 +534,7 @@ async def save_agreement(shipment_id: int, request: Request):
     if not math.isfinite(agreed) or agreed <= 150: raise HTTPException(400, "سعر صاحب الشحنة يجب أن يكون رقمًا أكبر من 150 ريال")
     if (weight is not None and (not math.isfinite(weight) or weight <= 0)) or (asking is not None and (not math.isfinite(asking) or asking < 0)):
         raise HTTPException(400, "تحقق من السعر والوزن")
-    item = one("""SELECT s.origin,s.destination,n.owner_phone FROM shipments s
+    item = one("""SELECT s.origin,s.destination,n.record_kind,n.owner_phone FROM shipments s
         JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404, "الشحنة غير موجودة")
     item.update({"weight_tons": weight, "unloading_location": data.get("unloading_location"),
@@ -478,6 +544,9 @@ async def save_agreement(shipment_id: int, request: Request):
     now = utcnow()
     with db() as c:
         c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        locked = c.execute('SELECT record_kind FROM freight_negotiations WHERE shipment_id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        if locked and locked['record_kind'] == 'carrier_offer':
+            raise HTTPException(409, 'هذا عرض ناقل وليس طلب حمولة')
         existing = c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone()
         if existing:
             raise HTTPException(409, "يوجد عرض لهذه الشحنة؛ راجع العرض الحالي قبل تعديل الاتفاق")
