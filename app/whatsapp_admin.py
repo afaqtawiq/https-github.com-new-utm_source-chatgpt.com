@@ -27,6 +27,19 @@ def phone(value):
     return value if re.fullmatch(r'[1-9][0-9]{8,14}', value) else ''
 
 
+def is_admin_command(text):
+    """Keep explicit management commands separate from a shipper's reply."""
+    text = normalize(text)
+    return bool(
+        re.match(r'^(?:افاق(?: طويق)?|شواهد(?: الهدف)?)(?:\s|[:،-]|$)', text)
+        or re.fullmatch(r'نفذ\s+[0-9A-Fa-f]{6}', text)
+        or text.casefold() in {
+            'الاوامر', 'اوامر', 'مساعدة', 'ادارة', 'help', 'menu',
+            'مرحبا', 'السلام عليكم',
+        }
+    )
+
+
 def owner_sender(payload):
     """Use provider identity, never text, names, or the business account phone."""
     expected = phone(os.getenv('WHATSAPP_COMMAND_OWNER', ''))

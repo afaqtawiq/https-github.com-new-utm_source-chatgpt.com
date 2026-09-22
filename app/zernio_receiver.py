@@ -69,7 +69,7 @@ def ensure_tables():
 
 @router.get("/webhooks/zernio")
 async def health():
-    return {"receiver":"zernio", "routing_version":"owner-commands-v1", "requires_signature":True,
+    return {"receiver":"zernio", "routing_version":"owner-freight-replies-v2", "requires_signature":True,
             "owner_commands_configured":bool(os.getenv("WHATSAPP_COMMAND_OWNER") and os.getenv("WHATSAPP_COMMAND_ACCOUNT_ID")),
             "voice_commands_configured":bool(os.getenv("OPENAI_API_KEY")),
             "configured":bool(os.getenv("ZERNIO_API_KEY") and os.getenv("ZERNIO_WEBHOOK_SECRET"))}
@@ -111,7 +111,7 @@ async def receive(request: Request):
         return JSONResponse({"error":"Missing event or conversation identifiers"}, status_code=400)
     ensure_tables()
     ensure_intake_tables()
-    from app.whatsapp_admin import owner_sender, admin_reply
+    from app.whatsapp_admin import owner_sender, admin_reply, is_admin_command
     sender = owner_sender(p)
     def prepare_reply():
         with db() as c:
@@ -129,9 +129,9 @@ async def receive(request: Request):
                 and not conversation.get('isGroup') and not message.get('isGroup')
                 and transport_phone(conversation.get('participantId')) == contact
                 and (not identity.get('id') or transport_phone(identity['id']) == contact))
-            if private_transport and not sender and text.strip() and not is_transport_request(text) and not is_menu_request(text) and not explicit_agent(text):
+            if private_transport and (not sender or not is_admin_command(text)) and text.strip() and not is_transport_request(text) and not is_menu_request(text) and not explicit_agent(text):
                 from app.logistics_parsing import accepts_offer
-                if re.search(r'(?:NQ-\d+|WA-[A-F0-9]{12})', text.upper()) and accepts_offer(text):
+                if not sender and re.search(r'(?:NQ-\d+|WA-[A-F0-9]{12})', text.upper()) and accepts_offer(text):
                     from app.freight_workflow import accept_driver_reply
                     if accept_driver_reply('+' + contact, text, connection=c):
                         return 'afaaq', {'message': 'تم تسجيل موافقتك على عرض النقل وربطك بالشحنة. سنتابع معك تفاصيل التنفيذ.'}
@@ -140,10 +140,12 @@ async def receive(request: Request):
                     WHERE n.owner_phone=%s AND n.contact_channel='whatsapp'
                     AND n.status='awaiting_owner' AND n.record_kind='shipment_request'""", ('+' + contact,)).fetchall()
                 if pending:
-                    matching = [x for x in pending if x['reference'].upper() in text.upper().split()]
-                    selected = matching[0] if len(matching) == 1 else pending[0] if len(pending) == 1 else None
+                    references = set(re.findall(r'(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)', text.upper()))
+                    matching = [x for x in pending if x['reference'].upper() in references]
+                    selected = (matching[0] if len(references) == 1 and len(matching) == 1
+                                else pending[0] if not references and len(pending) == 1 else None)
                     if selected is None:
-                        return 'afaaq', {'message': 'لديك أكثر من طلب نقل. اذكر مرجع الشحنة مع الرد: ' + '، '.join(x['reference'] for x in pending)}
+                        return 'afaaq', {'message': 'حدد مرجع طلب النقل المنتظر مع ردك: ' + '، '.join(x['reference'] for x in pending)}
                     c.execute('''INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
                         VALUES(%s,'owner_whatsapp_reply',%s,'awaiting_owner',NOW())''', (selected['id'], text[:4000]))
                     return 'afaaq', {'message': 'وصل ردك بخصوص ' + selected['reference'] + ' وتم حفظه للمراجعة واستكمال الاتفاق على السعر وشروط النقل.'}
@@ -379,4 +381,3 @@ router.include_router(material_router)
 
 from app.manual_tracking import router as tracking_router
 router.include_router(tracking_router)
-

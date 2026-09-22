@@ -57,6 +57,8 @@ class Connection:
             CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER UNIQUE,
                 owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT,\n                contact_channel TEXT,record_kind TEXT DEFAULT 'shipment_request');
             CREATE TABLE accounts(id INTEGER PRIMARY KEY,name TEXT,status TEXT);
+            CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,
+                event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT);
         ''')
 
     def execute(self, sql, args=()):
@@ -81,6 +83,7 @@ def db(monkeypatch):
     monkeypatch.setenv('WHATSAPP_COMMAND_ACCOUNT_ID', 'business')
     monkeypatch.setenv('ZERNIO_WEBHOOK_SECRET', 'test-secret')
     monkeypatch.setenv('ZERNIO_API_KEY', 'test-key')
+    monkeypatch.delenv('ZERNIO_WHATSAPP_ACCOUNT_ID', raising=False)
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     return c
 
@@ -140,6 +143,66 @@ def outbound(monkeypatch):
             return types.SimpleNamespace(is_success=True)
     monkeypatch.setattr(receiver.httpx, 'AsyncClient', Client)
     return calls
+
+
+def pending_owner_shipment(db, reference='NQ-21', sender='966507665873'):
+    row = db.execute("INSERT INTO shipments(reference,origin,destination) VALUES(%s,'رابغ','دبي') RETURNING id",
+                     (reference,)).fetchone()
+    db.execute("""INSERT INTO freight_negotiations(shipment_id,owner_phone,status,contact_channel)
+        VALUES(%s,%s,'awaiting_owner','whatsapp')""", (row['id'], '+' + sender))
+    return row['id']
+
+
+@pytest.mark.parametrize('sender', ['966507665873', '966500000009'])
+@pytest.mark.parametrize('text', ['نعم متاحة', 'NQ-21: نعم متاحة'])
+def test_shipper_reply_from_admin_or_customer_is_linked_once(db, outbound, sender, text):
+    sid = pending_owner_shipment(db, sender=sender)
+    p = payload(text, sender=sender)
+    assert receive(p)['agent'] == 'afaaq'
+    assert receive(p)['duplicate']
+    events = db.execute('SELECT * FROM shipment_events').fetchall()
+    assert len(events) == 1 and events[0]['shipment_id'] == sid
+    assert events[0]['summary'] == text
+    assert len(outbound) == 1 and 'NQ-21' in outbound[0]['message']
+    assert 'أوامر الإدارة' not in outbound[0]['message']
+    assert db.execute('SELECT status FROM freight_negotiations').fetchone()['status'] == 'awaiting_owner'
+
+
+@pytest.mark.parametrize('text', ['آفاق اعرض الشحنات', 'شواهد اعرض الطلبات', 'الأوامر', 'نفذ ABC123'])
+def test_explicit_admin_command_keeps_admin_route_with_pending_shipment(db, outbound, text):
+    pending_owner_shipment(db)
+    with patch.object(admin, 'admin_reply', return_value={'message': 'admin reply'}) as routed:
+        assert receive(payload(text))['agent'] == 'owner'
+    routed.assert_awaited_once()
+    assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
+
+
+def test_multiple_shipments_require_reference_without_guessing(db, outbound):
+    pending_owner_shipment(db)
+    second = pending_owner_shipment(db, reference='NQ-22')
+    receive(payload('نعم متاحة'))
+    assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
+    assert 'NQ-21' in outbound[-1]['message'] and 'NQ-22' in outbound[-1]['message']
+    receive(payload('NQ-22: نعم متاحة', event='evt-2'))
+    assert db.execute('SELECT shipment_id FROM shipment_events').fetchone()['shipment_id'] == second
+
+
+@pytest.mark.parametrize('text', ['NQ-99 نعم متاحة', 'NQ-21 و NQ-99 متاحة'])
+def test_unknown_or_multiple_references_do_not_attach_to_single_pending_shipment(db, outbound, text):
+    pending_owner_shipment(db)
+    receive(payload(text))
+    assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
+
+
+@pytest.mark.parametrize('change', ['participant', 'account', 'group', 'signature'])
+def test_shipper_reply_requires_verified_private_identity(db, outbound, change):
+    pending_owner_shipment(db)
+    p = payload('نعم متاحة')
+    if change == 'participant': p['conversation']['participantId'] = '966500000009'
+    if change == 'account': p['account']['accountId'] = 'other-business'
+    if change == 'group': p['conversation']['isGroup'] = True
+    receive(p, valid=change != 'signature')
+    assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
 
 
 @pytest.mark.parametrize('sender', ['966500000009', '966507665873'])
