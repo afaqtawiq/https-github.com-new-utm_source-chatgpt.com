@@ -115,7 +115,7 @@ class NaqliatOcr(BaseModel):
 
 
 def _save(payload: NaqliatLoad):
-    phone = _clean_phone(payload.owner_phone)
+    phone = _clean_phone(payload.owner_phone) or extract_phone(payload.raw_text)
     origin = payload.origin.strip()
     destination = payload.destination.strip()
     if payload.raw_text and (

@@ -87,7 +87,23 @@ assert not accept_driver_reply('+966500000002', 'غير موافق ' + shipment[
 assert accept_driver_reply('+966500000002', 'موافق ' + shipment['reference'])
 assert not accept_driver_reply('+966500000002', 'موافق ' + shipment['reference'])
 assert one('SELECT status FROM shipments WHERE id=?', (sid,))['status'] == 'driver_assigned'
-print('PASS: PostgreSQL startup, protected pages, Arabic command persistence, OCR intake, duplicate intake, agreement, concurrent offer creation, guarded sends, driver assignment. External sends: 0.')
+from app.transport_intake import transport_reply
+from app.storage import db
+with db() as connection:
+    result = transport_reply(connection, {}, 'طلب نقل\nمن جدة إلى الشارقة\nجوال صاحب الشحنة: 0500000001\nالوزن: 20 طن',
+                             'ci-transport-event', 'ci-employee', {'sender': {'phoneNumber': '+966500000009'}})
+    reference = result[0]['_last_transport_reference']
+    duplicate = transport_reply(connection, {}, 'طلب نقل\nمن جدة إلى الشارقة\nجوال صاحب الشحنة: 0500000001\nالوزن: 20 طن',
+                                'ci-transport-event', 'ci-employee', {})
+    assert duplicate[0]['_last_transport_reference'] == reference
+wa = one('SELECT id FROM shipments WHERE reference=?', (reference,))
+assert one('SELECT COUNT(*) n FROM shipments WHERE reference=?', (reference,))['n'] == 1
+execute("UPDATE freight_negotiations SET agreed_owner_price=2000,payment_method='عند التسليم' WHERE shipment_id=?", (wa['id'],))
+wa_bid = prepare_driver_offer(wa['id'], driver['id'])
+assert '1,850.00' in one('SELECT message FROM driver_broadcasts WHERE id=?', (wa_bid,))['message']
+execute("UPDATE driver_broadcasts SET status='awaiting_driver' WHERE id=?", (wa_bid,))
+assert accept_driver_reply('+966500000002', 'موافق ' + reference)
+print('PASS: PostgreSQL startup, transport intake, duplicate intake, agreement, concurrent offer creation, 150 SAR margin and driver assignment for NQ and WA references. External sends: 0.')
 
 from social_postgres_acceptance import run as run_social_acceptance
 run_social_acceptance(client, app)

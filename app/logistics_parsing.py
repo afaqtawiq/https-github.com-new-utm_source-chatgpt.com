@@ -68,4 +68,4 @@ def extract_route(raw):
 def accepts_offer(text):
     text = digits(text).strip()
     text = re.sub(r"[\u064b-\u065f\u0670ـ]", "", text).replace("أ", "ا")
-    return bool(re.fullmatch(r"(?:موافق|اقبل|جاهز|نعم)\s+NQ-\d+[.!،\s]*", text, re.I))
+    return bool(re.fullmatch(r"(?:موافق|اقبل|جاهز|نعم)\s+(?:NQ-\d+|WA-[A-F0-9]{12})[.!،\s]*", text, re.I))
