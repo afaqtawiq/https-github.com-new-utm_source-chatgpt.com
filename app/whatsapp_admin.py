@@ -125,7 +125,7 @@ def afaaq_command(c, command):
         number = '+' + number
         row = c.execute('''INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,
             availability,offer_consent,notes,created_at,updated_at)
-            VALUES(%s,%s,%s,'متاح',0,'أضيف بأمر واتساب من المالك؛ موافقة العروض غير مسجلة',NOW(),NOW())
+            VALUES(%s,%s,%s,'متاح',1,'أضيف بأمر واتساب من المالك؛ مسجل لاستقبال عروض الحمولات',NOW(),NOW())
             ON CONFLICT(whatsapp_phone) DO NOTHING RETURNING id''', (name, number, vehicle or 'غير محدد')).fetchone()
         if not row:
             return 'هذا الرقم مسجل لسائق بالفعل؛ لم أنشئ سجلًا مكررًا.'

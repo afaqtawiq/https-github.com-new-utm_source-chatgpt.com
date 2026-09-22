@@ -189,10 +189,11 @@ def test_complete_agreement_prepares_one_offer_with_correct_margin(modules):
     first = freight.prepare_driver_offer(1, 1)
     assert freight.prepare_driver_offer(1, 1) == first
     offer = database.one('SELECT * FROM driver_broadcasts')
-    assert offer['status'] == 'draft' and offer['recipient_count'] == 1
+    assert offer['status'] == 'draft' and offer['recipient_count'] == 3
+    assert {r['phone'] for r in database.rows('SELECT phone FROM driver_broadcast_recipients')} == {'+966500000002', '+966500000003', '+966500000004'}
     assert '1,850.00' in offer['message']
     assert database.one('SELECT count(*) n FROM shipment_events')['n'] == 1
-    assert database.one('SELECT count(*) n FROM driver_broadcast_recipients')['n'] == 1
+    assert database.one('SELECT count(*) n FROM driver_broadcast_recipients')['n'] == 3
 
 
 def test_invalid_price_never_creates_offer(modules):
@@ -213,7 +214,7 @@ def test_broadcast_single_send_and_first_driver_acceptance(modules, monkeypatch)
     monkeypatch.setattr(commands, 'send_text_message', send)
     asyncio.run(commands.deliver_driver_broadcast(bid))
     asyncio.run(commands.deliver_driver_broadcast(bid))
-    assert len(calls) == 1
+    assert len(calls) == 3
     assert not freight.accept_driver_reply('+966500000002', 'غير موافق NQ-16')
     assert freight.accept_driver_reply('+966500000002', 'موافق NQ-16')
     assert not freight.accept_driver_reply('+966500000002', 'موافق NQ-16')
@@ -228,7 +229,7 @@ def test_missing_provider_id_is_not_sent(modules, monkeypatch):
     monkeypatch.setattr(commands, 'send_text_message', send)
     asyncio.run(commands.deliver_driver_broadcast(bid))
     row = database.one('SELECT * FROM driver_broadcasts')
-    assert row['sent_count'] == 0 and row['failed_count'] == 1
+    assert row['sent_count'] == 0 and row['failed_count'] == 3
     assert row['status'] == 'completed_with_errors'
 
 

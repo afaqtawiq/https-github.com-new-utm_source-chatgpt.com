@@ -9,7 +9,7 @@ router = APIRouter()
 MAX_FILE_BYTES = 2 * 1024 * 1024
 
 CUSTOMER_COLUMNS = ['company_name','contact_name','phone','email','country','city','activity','service_interest','source','contact_consent','consent_date','notes']
-DRIVER_COLUMNS = ['driver_name','whatsapp_phone','vehicle_type','capacity','current_city','preferred_routes','availability','company_name','offer_consent','consent_date','notes']
+DRIVER_COLUMNS = ['driver_name','whatsapp_phone','vehicle_type','capacity','current_city','preferred_routes','availability','company_name','notes']
 PROSPECT_COLUMNS = ['company_name','location','sector','lead_status','priority','fit_score','notes']
 ALIASES = {
  'اسم الشركة':'company_name','company':'company_name','company name':'company_name','اسم المسؤول':'contact_name','contact':'contact_name','contact name':'contact_name',
@@ -30,7 +30,7 @@ def _init():
   c.execute('''CREATE TABLE IF NOT EXISTS customer_directory(id BIGSERIAL PRIMARY KEY,company_name TEXT NOT NULL,contact_name TEXT,phone TEXT,email TEXT,city TEXT,activity TEXT,service_interest TEXT,source TEXT,contact_consent INTEGER NOT NULL DEFAULT 0,consent_date DATE,notes TEXT,created_at TIMESTAMPTZ NOT NULL,updated_at TIMESTAMPTZ NOT NULL)''')
   c.execute("CREATE UNIQUE INDEX IF NOT EXISTS customer_directory_phone_uq ON customer_directory(phone) WHERE phone IS NOT NULL AND phone<>''")
   c.execute("CREATE UNIQUE INDEX IF NOT EXISTS customer_directory_email_uq ON customer_directory(LOWER(email)) WHERE email IS NOT NULL AND email<>''")
-  c.execute('''CREATE TABLE IF NOT EXISTS drivers(id BIGSERIAL PRIMARY KEY,driver_name TEXT NOT NULL,whatsapp_phone TEXT NOT NULL UNIQUE,vehicle_type TEXT NOT NULL,capacity TEXT,current_city TEXT,preferred_routes TEXT,availability TEXT NOT NULL DEFAULT 'متاح',company_name TEXT,offer_consent INTEGER NOT NULL DEFAULT 0,consent_date DATE,notes TEXT,created_at TIMESTAMPTZ NOT NULL,updated_at TIMESTAMPTZ NOT NULL)''')
+  c.execute('''CREATE TABLE IF NOT EXISTS drivers(id BIGSERIAL PRIMARY KEY,driver_name TEXT NOT NULL,whatsapp_phone TEXT NOT NULL UNIQUE,vehicle_type TEXT NOT NULL,capacity TEXT,current_city TEXT,preferred_routes TEXT,availability TEXT NOT NULL DEFAULT 'متاح',company_name TEXT,offer_consent INTEGER NOT NULL DEFAULT 1,consent_date DATE,notes TEXT,created_at TIMESTAMPTZ NOT NULL,updated_at TIMESTAMPTZ NOT NULL)''')
   c.execute('''CREATE TABLE IF NOT EXISTS data_import_batches(id TEXT PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id),dataset_type TEXT NOT NULL,file_name TEXT NOT NULL,rows_json TEXT NOT NULL,valid_count INTEGER NOT NULL,duplicate_count INTEGER NOT NULL,error_count INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'preview',created_at TIMESTAMPTZ NOT NULL,committed_at TIMESTAMPTZ)''')
   c.execute("CREATE TABLE IF NOT EXISTS system_migrations(key TEXT PRIMARY KEY,applied_at TIMESTAMPTZ NOT NULL)")
   reset_key='reset_customers_20260910_v1'
@@ -38,6 +38,16 @@ def _init():
    c.execute("DELETE FROM customer_directory")
    c.execute("DELETE FROM accounts")
    c.execute("INSERT INTO system_migrations(key,applied_at) VALUES(%s,%s)",(reset_key,utcnow()))
+  # Owner policy: registration is enrollment. Preserve historical consent dates.
+  c.execute('SELECT pg_advisory_xact_lock(73002029)')
+  enrollment_key='driver_registration_includes_offers_20260922_v1'
+  if not c.execute('SELECT 1 FROM system_migrations WHERE key=%s',(enrollment_key,)).fetchone():
+   c.execute('ALTER TABLE drivers ALTER COLUMN offer_consent SET DEFAULT 1')
+   c.execute('UPDATE drivers SET offer_consent=1,updated_at=%s WHERE offer_consent<>1',(utcnow(),))
+   c.execute('INSERT INTO system_migrations(key,applied_at) VALUES(%s,%s)',(enrollment_key,utcnow()))
+   c.execute("INSERT INTO activity(action,entity_type,summary,created_at) VALUES(%s,%s,%s,%s)",
+             ('driver_registration_policy','driver','Owner instruction 2026-09-22: all current and future registered drivers receive freight offers; historical dates preserved.',utcnow()))
+
 _init()
 
 def esc(v):
@@ -108,12 +118,11 @@ def _prepare(dataset, matrix, default_country='966'):
    if not _valid_date(raw.get('consent_date')):errors.append('التاريخ يجب أن يكون YYYY-MM-DD')
    key=(raw.get('phone') or '',raw.get('email','').lower())
   else:
-   raw['whatsapp_phone']=_phone(raw.get('whatsapp_phone'),default_country);raw['offer_consent']=_yes(raw.get('offer_consent'))
+   raw['whatsapp_phone']=_phone(raw.get('whatsapp_phone'),default_country);raw['offer_consent']=1
    errors=[]
    if not raw.get('driver_name'):errors.append('اسم السائق مطلوب')
    if not raw.get('whatsapp_phone'):errors.append('رقم واتساب غير صالح')
    if not raw.get('vehicle_type'):errors.append('نوع المركبة مطلوب')
-   if not _valid_date(raw.get('consent_date')):errors.append('التاريخ يجب أن يكون YYYY-MM-DD')
    key=(raw.get('whatsapp_phone'),)
   duplicate=key in seen and any(key);seen.add(key)
   out.append({'row':n,'data':raw,'errors':errors,'duplicate_in_file':duplicate})
@@ -133,7 +142,7 @@ def import_home(request:Request):
 def template(name:str,request:Request):
  _admin(request)
  if name=='customers.csv':headers=['اسم الشركة','اسم المسؤول','الجوال','البريد الإلكتروني','المدينة','النشاط','الخدمة المطلوبة','مصدر البيانات','موافقة التواصل','تاريخ الموافقة','ملاحظات']
- elif name=='drivers.csv':headers=['اسم السائق','رقم واتساب','نوع المركبة','سعة الحمولة','المدينة الحالية','المسارات المفضلة','التوفر','اسم المؤسسة','موافقة استقبال العروض','تاريخ الموافقة','ملاحظات']
+ elif name=='drivers.csv':headers=['اسم السائق','رقم واتساب','نوع المركبة','سعة الحمولة','المدينة الحالية','المسارات المفضلة','التوفر','اسم المؤسسة','ملاحظات']
  else:return Response(status_code=404)
  out=io.StringIO();csv.writer(out).writerow(headers)
  return Response('\ufeff'+out.getvalue(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="{name}"'})
@@ -178,7 +187,7 @@ def commit(batch_id:str,request:Request):
    if x['errors'] or x.get('duplicate'):continue
    d=x['data']
    if batch['dataset_type']=='drivers':
-    saved=c.execute('''INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,capacity,current_city,preferred_routes,availability,company_name,offer_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s) ON CONFLICT(whatsapp_phone) DO NOTHING RETURNING id''',(d.get('driver_name'),d.get('whatsapp_phone'),d.get('vehicle_type'),d.get('capacity'),d.get('current_city'),d.get('preferred_routes'),d.get('availability') or 'متاح',d.get('company_name'),d.get('offer_consent',0),d.get('consent_date',''),d.get('notes'),now,now)).fetchone()
+    saved=c.execute('''INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,capacity,current_city,preferred_routes,availability,company_name,offer_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s) ON CONFLICT(whatsapp_phone) DO NOTHING RETURNING id''',(d.get('driver_name'),d.get('whatsapp_phone'),d.get('vehicle_type'),d.get('capacity'),d.get('current_city'),d.get('preferred_routes'),d.get('availability') or 'متاح',d.get('company_name'),1,'',d.get('notes'),now,now)).fetchone()
    elif batch['dataset_type']=='customers':
     saved=c.execute('''INSERT INTO customer_directory(company_name,contact_name,phone,email,city,activity,service_interest,source,contact_consent,consent_date,notes,created_at,updated_at) VALUES(%s,%s,NULLIF(%s,''),NULLIF(%s,''),%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id''',(d.get('company_name'),d.get('contact_name'),d.get('phone',''),d.get('email',''),d.get('city'),d.get('activity'),d.get('service_interest'),d.get('source'),d.get('contact_consent',0),d.get('consent_date',''),d.get('notes'),now,now)).fetchone()
     c.execute('''INSERT INTO accounts(name,country,phone,email,status,notes,created_at,updated_at)

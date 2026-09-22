@@ -42,10 +42,30 @@ for path in ('/dashboard', '/naqliat', '/commands', '/readiness', '/api/v7/readi
 response = client.post('/commands', data={'csrf': csrf, 'command': 'أضف السائق سائق الاختبار ورقم جواله 0500000002'}, follow_redirects=False)
 assert response.status_code == 303, response.text
 driver = one("SELECT * FROM drivers WHERE whatsapp_phone=?", ('+966500000002',))
-assert driver and driver['driver_name'] == 'سائق الاختبار' and driver['offer_consent'] == 0
+assert driver and driver['driver_name'] == 'سائق الاختبار' and driver['offer_consent'] == 1
 duplicate = client.post('/commands', data={'csrf': csrf, 'command': 'أضف السائق سائق الاختبار ورقم جواله 0500000002'}, follow_redirects=False)
 assert duplicate.status_code == 409
-execute('UPDATE drivers SET offer_consent=1 WHERE id=?', (driver['id'],))
+assert driver['consent_date'] is None  # Enrollment must not invent a historical date.
+
+# Existing drivers enroll once without fabricating or overwriting historical dates.
+from app.data_import import _init as init_driver_policy, _prepare
+execute("UPDATE drivers SET offer_consent=0,consent_date='2026-09-01' WHERE id=?", (driver['id'],))
+execute("DELETE FROM system_migrations WHERE key='driver_registration_includes_offers_20260922_v1'")
+init_driver_policy()
+init_driver_policy()
+enrolled = one('SELECT offer_consent,consent_date FROM drivers WHERE id=?', (driver['id'],))
+assert enrolled['offer_consent'] == 1 and str(enrolled['consent_date']) == '2026-09-01'
+assert one("SELECT COUNT(*) n FROM system_migrations WHERE key='driver_registration_includes_offers_20260922_v1'")['n'] == 1
+for path in ('/drivers', '/drivers/new', f"/drivers/{driver['id']}/edit"):
+    screen = client.get(path)
+    assert screen.status_code == 200 and 'name="offer_consent"' not in screen.text and 'name="consent"' not in screen.text
+    assert 'name="consent_date"' not in screen.text
+prepared = _prepare('drivers', [['اسم السائق','رقم واتساب','نوع المركبة'], ['سائق استيراد','0500000011','سطحة']])
+assert not prepared[0]['errors'] and prepared[0]['data']['offer_consent'] == 1
+assert 'consent_date' not in prepared[0]['data']
+assert 'موافقة استقبال العروض' not in client.get('/data-import/template/drivers.csv').text
+print('PASS: registration enrolls existing/new/imported drivers and preserves historical dates.')
+
 
 raw = 'مدينة التحميل\nالرياض\nمدينة التنزيل\nجدة\nالوزن: ٢٠ طن\nالجوال: ٠٥٠٠٠٠٠٠٠١'
 # Connector calls do not carry browser cookies.

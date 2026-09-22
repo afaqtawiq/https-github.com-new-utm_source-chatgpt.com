@@ -99,7 +99,7 @@ def home(request: Request):
     unassigned = rows("""SELECT s.id,s.reference,s.origin,s.destination,s.service_type
         FROM shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id
         WHERE s.status NOT IN ('delivered','closed') AND COALESCE(x.driver_name,'')='' ORDER BY s.id DESC LIMIT 20""")
-    candidates = one("SELECT COUNT(*) n FROM drivers WHERE availability='متاح' AND offer_consent=1")['n']
+    candidates = one("SELECT COUNT(*) n FROM drivers WHERE availability='متاح'")['n']
     qrows = ''.join('<tr><td>'+str(x['rank_no'])+'</td><td><a href="/sales-workspace/'+str(x['opportunity_id'])+'" style="color:white"><b>'+esc(x['company_name'])+'</b></a><br><span class="muted">'+esc(x['reason'])+'</span></td><td>'+str(x['score'])+'</td><td>'+esc(x.get('priority') or 'غير مجهز')+'</td><td>'+esc(x.get('services') or '—')+'</td><td>'+esc(x.get('message_status') or 'لا توجد')+'</td><td>'+esc(x.get('next_followup') or '—')+'</td><td>'+('<form method="post" action="/daily-command/'+str(x['opportunity_id'])+'/prepare"><button class="btn">تجهيز البيع والمسودة</button></form>' if not x.get('message_id') else '<a class="btn" href="/outbound/'+str(x['message_id'])+'">فتح المسودة</a>')+' <a class="btn secondary" href="/quotes/new/'+str(x['opportunity_id'])+'">عرض سعر</a></td></tr>' for x in queue) or '<tr><td colspan="8" class="muted">اضغط «إنشاء قائمة اليوم» لاختيار أفضل 10 فرص.</td></tr>'
     srows = ''.join('<tr><td>'+esc(x['reference'])+'</td><td>'+esc(x['service_type'])+'</td><td>'+esc(x['origin'])+' ← '+esc(x['destination'])+'</td><td><a class="btn" href="/daily-command/shipment/'+str(x['id'])+'/drivers">ترشيح السائقين</a></td></tr>' for x in unassigned) or '<tr><td colspan="4" class="good">لا توجد شحنات نشطة بلا سائق.</td></tr>'
     body = nav()+'<div class="hero"><h1>مركز العمل اليومي — آفاق طويق</h1><p>قائمة واحدة تنقل العمل من اكتشاف العميل إلى العرض والتشغيل. الإنشاء الداخلي آلي، لكن الموافقة والإرسال الخارجي يظلان بقرار بشري.</p><form method="post" action="/daily-command/build"><button class="btn">إنشاء قائمة اليوم من أفضل 10 فرص</button></form></div>'
@@ -151,7 +151,7 @@ def recommend_drivers(shipment_id: int, request: Request):
     shipment = one('SELECT * FROM shipments WHERE id=?', (shipment_id,))
     if not shipment:
         raise HTTPException(404, 'Shipment not found')
-    drivers = rows("SELECT * FROM drivers WHERE availability='متاح' AND offer_consent=1 ORDER BY driver_name")
+    drivers = rows("SELECT * FROM drivers WHERE availability='متاح' ORDER BY driver_name")
     origin = str(shipment.get('origin') or '').lower()
     destination = str(shipment.get('destination') or '').lower()
     ranked = []
@@ -160,7 +160,7 @@ def recommend_drivers(shipment_id: int, request: Request):
         score = 50 + (25 if origin and origin in haystack else 0) + (20 if destination and destination in haystack else 0)
         ranked.append((score, driver))
     ranked.sort(key=lambda item: (-item[0], str(item[1].get('driver_name') or '')))
-    table = ''.join('<tr><td>'+str(score)+'</td><td>'+esc(driver['driver_name'])+'</td><td>'+esc(driver['vehicle_type'])+'</td><td>'+esc(driver['current_city'])+'</td><td>'+esc(driver['preferred_routes'])+'</td><td>'+esc(driver['whatsapp_phone'])+'</td><td><a class="btn" href="/drivers/'+str(driver['id'])+'/edit">ملف السائق</a></td></tr>' for score,driver in ranked[:20]) or '<tr><td colspan="7">لا يوجد سائق متاح لديه موافقة استقبال عروض.</td></tr>'
+    table = ''.join('<tr><td>'+str(score)+'</td><td>'+esc(driver['driver_name'])+'</td><td>'+esc(driver['vehicle_type'])+'</td><td>'+esc(driver['current_city'])+'</td><td>'+esc(driver['preferred_routes'])+'</td><td>'+esc(driver['whatsapp_phone'])+'</td><td><a class="btn" href="/drivers/'+str(driver['id'])+'/edit">ملف السائق</a></td></tr>' for score,driver in ranked[:20]) or '<tr><td colspan="7">لا يوجد سائق مسجل متاح حاليًا.</td></tr>'
     return shell(nav()+'<h1>السائقون المرشحون للشحنة '+esc(shipment['reference'])+'</h1><div class="card"><b>المسار:</b> '+esc(shipment.get('origin'))+' ← '+esc(shipment.get('destination'))+'<p class="muted">الترتيب داخلي بحسب تطابق المدينة والمسارات. تعيين السائق يتم من مركز العمليات، ولا تُرسل رسالة واتساب من هذه الصفحة.</p><a class="btn" href="/operations/'+str(shipment_id)+'">فتح الشحنة وتعيين السائق</a></div><div class="card scroll"><table><tr><th>الملاءمة</th><th>السائق</th><th>المركبة</th><th>المدينة</th><th>المسارات</th><th>واتساب</th><th></th></tr>'+table+'</table></div>')
 
 

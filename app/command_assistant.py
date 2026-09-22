@@ -265,7 +265,7 @@ async def create_command(request: Request):
             availability,company_name,offer_consent,consent_date,notes,created_at,updated_at
         ) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?)""", (
             parsed["target"], phone, parsed.get("vehicle_type") or "غير محدد", "", "", "",
-            "متاح", "", 0, "أُضيف بواسطة مساعد الأوامر؛ موافقة استقبال العروض غير مسجلة",
+            "متاح", "", 1, "أُضيف بواسطة مساعد الأوامر؛ مسجل لاستقبال عروض الحمولات",
             now, now,
         ))
         log(current["user_id"], "command_driver_created", "driver", driver_id, raw[:300])
@@ -275,7 +275,7 @@ async def create_command(request: Request):
         if not message:
             raise HTTPException(400, "اكتب تفاصيل الرسالة الموجهة للسائقين")
         candidates = rows("""SELECT id,driver_name,whatsapp_phone FROM drivers
-            WHERE offer_consent=1 AND whatsapp_phone IS NOT NULL ORDER BY id""")
+            WHERE whatsapp_phone IS NOT NULL ORDER BY id""")
         valid = []
         seen = set()
         for driver in candidates:
@@ -286,14 +286,14 @@ async def create_command(request: Request):
                 seen.add(phone)
                 valid.append((driver, phone))
         if not valid:
-            raise HTTPException(409, "لا يوجد سائقون بأرقام صالحة وموافقة استقبال عروض مسجلة")
+            raise HTTPException(409, "لا يوجد سائقون مسجلون بأرقام صالحة")
         now = utcnow()
         broadcast_id = execute("""INSERT INTO driver_broadcasts(raw_command,message,status,recipient_count,created_by,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?)""", (raw, message, "draft", len(valid), current["user_id"], now, now))
         for driver, phone in valid:
             execute("""INSERT INTO driver_broadcast_recipients(broadcast_id,driver_id,driver_name,phone,status)
                 VALUES(?,?,?,?,?) ON CONFLICT(broadcast_id,phone) DO NOTHING""", (broadcast_id, driver["id"], driver["driver_name"], phone, "pending"))
-        log(current["user_id"], "driver_broadcast_draft_created", "driver_broadcast", broadcast_id, f"Prepared for {len(valid)} consented unique drivers; not sent")
+        log(current["user_id"], "driver_broadcast_draft_created", "driver_broadcast", broadcast_id, f"Prepared for {len(valid)} registered unique drivers; not sent")
         return RedirectResponse(f"/commands/broadcast/{broadcast_id}", 303)
     matches = find_contact(parsed["target"])
     if len(matches) != 1:
@@ -353,7 +353,7 @@ def broadcast_review(broadcast_id: int, request: Request):
     confirm = ""
     if broadcast["status"] == "draft":
         confirm = f"""<form method=post action=/commands/broadcast/{broadcast_id}/send><input type=hidden name=csrf value="{e(current['csrf'])}"><label><input type=checkbox name=confirmed value=yes required> راجعت نص الرسالة وعدد المستلمين وأؤكد الإرسال مرة واحدة للجميع</label><button>إرسال للجميع</button></form>"""
-    return HTMLResponse(f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>مراجعة حملة السائقين</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;padding:24px}}.card{{max-width:950px;margin:14px auto;background:#102536;padding:22px;border-radius:16px;overflow:auto}}button{{padding:12px 18px;background:#ef4444;color:white;border:0;border-radius:9px;font-weight:bold}}.wa{{display:inline-block;padding:7px 10px;border-radius:8px;background:#22c55e;color:#04130a;text-decoration:none;font-weight:bold;white-space:nowrap}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}input[type=checkbox]{{width:auto}}.msg{{white-space:pre-wrap;background:#081925;padding:14px;border-radius:10px}}</style><div class=card><h1>مراجعة حملة السائقين</h1><p><b>الحالة:</b> {e(broadcast['status'])} | <b>المستلمون:</b> {broadcast['recipient_count']} | <b>نجح:</b> {broadcast['sent_count']} | <b>فشل:</b> {broadcast['failed_count']}</p><div class=msg>{e(broadcast['message'])}</div><p>تشمل القائمة فقط السائقين ذوي موافقة استقبال العروض، مع استبعاد الأرقام غير الصالحة والمكررة.</p><p style="color:#fde68a">يمكنك استخدام «فتح واتساب» لكل سائق يدويًا حتى يكتمل ربط WhatsApp Business API. فتح الرابط لا يعني أن الرسالة أُرسلت.</p>{confirm}</div><div class=card><table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>إرسال يدوي</th><th>الخطأ</th></tr>{table}</table><p><a style="color:#86efac" href=/commands>العودة لمساعد الأوامر</a></p></div></html>""")
+    return HTMLResponse(f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>مراجعة حملة السائقين</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;padding:24px}}.card{{max-width:950px;margin:14px auto;background:#102536;padding:22px;border-radius:16px;overflow:auto}}button{{padding:12px 18px;background:#ef4444;color:white;border:0;border-radius:9px;font-weight:bold}}.wa{{display:inline-block;padding:7px 10px;border-radius:8px;background:#22c55e;color:#04130a;text-decoration:none;font-weight:bold;white-space:nowrap}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}input[type=checkbox]{{width:auto}}.msg{{white-space:pre-wrap;background:#081925;padding:14px;border-radius:10px}}</style><div class=card><h1>مراجعة حملة السائقين</h1><p><b>الحالة:</b> {e(broadcast['status'])} | <b>المستلمون:</b> {broadcast['recipient_count']} | <b>نجح:</b> {broadcast['sent_count']} | <b>فشل:</b> {broadcast['failed_count']}</p><div class=msg>{e(broadcast['message'])}</div><p>تشمل القائمة جميع السائقين المسجلين، مع استبعاد الأرقام غير الصالحة والمكررة.</p><p style="color:#fde68a">يمكنك استخدام «فتح واتساب» لكل سائق يدويًا حتى يكتمل ربط WhatsApp Business API. فتح الرابط لا يعني أن الرسالة أُرسلت.</p>{confirm}</div><div class=card><table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>إرسال يدوي</th><th>الخطأ</th></tr>{table}</table><p><a style="color:#86efac" href=/commands>العودة لمساعد الأوامر</a></p></div></html>""")
 
 
 async def deliver_driver_broadcast(broadcast_id):

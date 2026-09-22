@@ -41,7 +41,7 @@ async def start_owner_negotiation(load_id):
 def _draft_broadcast(load, price):
     existing=one("SELECT broadcast_id FROM naqliat_negotiations WHERE load_id=?",(load['id'],))
     if existing and existing.get('broadcast_id'): return existing['broadcast_id']
-    candidates=rows("SELECT id,driver_name,whatsapp_phone FROM drivers WHERE offer_consent=1 AND whatsapp_phone IS NOT NULL ORDER BY id")
+    candidates=rows("SELECT id,driver_name,whatsapp_phone FROM drivers WHERE whatsapp_phone IS NOT NULL ORDER BY id")
     valid=[]; seen=set()
     for d in candidates:
         phone=re.sub(r'[\s\-()]','',str(d.get('whatsapp_phone') or ''))

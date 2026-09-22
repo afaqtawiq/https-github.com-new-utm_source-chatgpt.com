@@ -276,7 +276,7 @@ def test_duplicate_event_and_driver_do_not_repeat(db, outbound):
     assert receive(p)['duplicate'] is True
     assert len(outbound) == 1
     assert db.execute('SELECT count(*) n FROM drivers').fetchone()['n'] == 1
-    assert db.execute('SELECT offer_consent FROM drivers').fetchone()['offer_consent'] == 0
+    assert db.execute('SELECT offer_consent FROM drivers').fetchone()['offer_consent'] == 1
     p['id'] = 'evt-2'
     receive(p)
     assert 'مسجل' in outbound[-1]['message']

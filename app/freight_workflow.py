@@ -314,14 +314,14 @@ def prepare_driver_offer(shipment_id, user_id):
         if existing:
             return existing["id"]
         drivers = c.execute("""SELECT id,driver_name,whatsapp_phone FROM drivers
-            WHERE offer_consent=1 AND availability<>'غير متاح' AND whatsapp_phone IS NOT NULL ORDER BY id""").fetchall()
+            WHERE whatsapp_phone IS NOT NULL ORDER BY id""").fetchall()
         valid, seen = [], set()
         for driver in drivers:
             phone = _valid_phone(driver.get("whatsapp_phone"))
             if phone and phone not in seen:
                 seen.add(phone); valid.append((driver, phone))
         if not valid:
-            raise HTTPException(409, "تم حفظ الاتفاق، ولا يوجد سائقون متاحون لديهم موافقة استقبال العروض")
+            raise HTTPException(409, "تم حفظ الاتفاق، ولا يوجد سائقون مسجلون بأرقام صالحة")
         price = round(agreed - 150, 2)
         message = (
             f"عرض حمولة من آفاق طويق — {item['reference']}\n"
