@@ -43,7 +43,10 @@ def explicit_agent(text, interactive=""):
 def choose_agent(text, interactive="", previous=None):
     selected = explicit_agent(text, interactive)
     if selected: return selected
-    if is_menu_request(text): return None
+    if is_menu_request(text):
+        if previous == "afaaq" and control_text(text) in {"hi", "hello", "hey", "مرحبا", "اهلا", "أهلا", "السلام عليكم", "السلام عليكم ورحمة الله وبركاته"}:
+            return "afaaq"
+        return None
     return previous if previous in ("afaaq", "shawahid") else None
 
 def response_body(agent):
@@ -191,6 +194,10 @@ def explicit_updates(agent, text):
 
 
 def next_reply(agent, fields, pending, text, selection=False):
+    if agent == "afaaq":
+        from app.afaaq_customer_reply import reply
+        return reply(fields, pending, text, selection,
+                     explicit_updates(agent, text) if not selection else {}, is_menu_request(text))
     fields = dict(fields)
     normalized = text.strip()
     control = normalized.casefold()
