@@ -6,8 +6,10 @@ from app.discovery import fetch_public,run_discovery_cycle,start_discovery_worke
 from app.intelligence import analyze
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.http_errors import operational_http_error, safe_next
+from app.agent_monitor import router as monitor_router, monitor_widget
 
 app=FastAPI(title='Gulf Logistics AI',version='7.6.0-cinematic-studio')
+app.include_router(monitor_router)
 app.add_exception_handler(StarletteHTTPException, operational_http_error)
 ADMIN_EMAIL=os.getenv('ADMIN_EMAIL','admin@afaaqtuwaiq.local'); ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD','ChangeMe-Now-2026!')
 init_db(ADMIN_EMAIL,ADMIN_PASSWORD)
