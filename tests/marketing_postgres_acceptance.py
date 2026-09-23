@@ -127,6 +127,39 @@ with patch('app.bootstrap.mfa_state',return_value={'mfa_enabled':1}),patch('app.
         asyncio.run(m.daily_tick(date1.replace(day=4)))
     assert not one('SELECT enabled FROM customer_campaign_schedule WHERE id=1')['enabled']
     assert len(daily_calls)==7
+from app.mail_delivery import MailRecipientRejected, MailConnectionFailed
+import smtplib
+from email.utils import format_datetime
+with patch.object(spacemail,'password',return_value='fixture'),patch.object(spacemail,'smtp_login',side_effect=TimeoutError('private')):
+    try:spacemail.send(session['user_id'],'fixture@example.com','Subject','Plain')
+    except MailConnectionFailed as exc:assert 'private' not in str(exc)
+    else:raise AssertionError('connection failure must be classified')
+with patch.object(spacemail,'password',return_value='fixture'),patch.object(spacemail,'smtp_login',return_value=smtp),patch.object(smtp,'send_message',side_effect=smtplib.SMTPRecipientsRefused({'fixture@example.com':(550,b'private response')})):
+    try:spacemail.send(session['user_id'],'fixture@example.com','Subject','Plain')
+    except MailRecipientRejected as exc:assert exc.permanent and 'private' not in str(exc)
+    else:raise AssertionError('recipient rejection must be classified')
+repair_cid=m.prepare(session['user_id'],date1.replace(day=5).date())
+execute("UPDATE customer_campaign_channels SET status='sending' WHERE campaign_id=? AND channel='email'",(repair_cid,))
+repair_calls=[]
+def recipient_failure(*args,**kwargs):
+    repair_calls.append(args[1])
+    if len(repair_calls)==1:raise MailRecipientRejected(550)
+    return 'repair-'+str(len(repair_calls))
+with patch.object(m,'official_send',recipient_failure):asyncio.run(m.deliver(repair_cid,'email',session['user_id']))
+assert len(repair_calls)==3
+assert one("SELECT COUNT(*) n FROM customer_campaign_recipients WHERE campaign_id=? AND status='sent'",(repair_cid,))['n']==2
+assert one("SELECT COUNT(*) n FROM marketing_suppressions WHERE channel='email' AND recipient=?",(repair_calls[0],))['n']==1
+assert one("SELECT status FROM customer_campaign_channels WHERE campaign_id=? AND channel='email'",(repair_cid,))['status']=='completed_with_issues'
+notice_recipient=repair_calls[1]
+execute('''INSERT INTO spacemail_inbox(user_id,uidvalidity,uid,sender,subject,body,received,imported_at)
+    VALUES(?,?,?,?,?,?,?,?)''',(session['user_id'],'repair',1,'mailer-daemon@bounces.jellyfish.systems',
+    'Delivery Status Notification (Failure)',
+    'Delivery to the following recipient failed permanently: '+notice_recipient+'\nNo MX server found',
+    format_datetime(utcnow().replace(microsecond=0)+__import__('datetime').timedelta(seconds=2)),utcnow()))
+m.reconcile_bounces(session['user_id']);m.reconcile_bounces(session['user_id'])
+assert one("SELECT status FROM customer_campaign_recipients WHERE campaign_id=? AND recipient=?",(repair_cid,notice_recipient))['status']=='bounced'
+assert one("SELECT COUNT(*) n FROM marketing_suppressions WHERE channel='email' AND recipient=?",(notice_recipient,))['n']==1
+print('PASS: recipient refusal continues batch; pre-send failures classified; bounces reconciled and permanently failed addresses suppressed without resending.')
 print('PASS: daily Riyadh schedule, MFA approval, same-day non-duplication, parallel workers, next-day roster refresh, stop control, approved artwork fingerprint.')
 print('PASS: customer roster deduplication, public PDF, immutable approval, MFA, HTML+PDF MIME, template gate, unsubscribe, receipts, uncertain-send non-retry.')
 with psycopg.connect(url,autocommit=True) as conn:conn.execute('DROP SCHEMA '+schema+' CASCADE')

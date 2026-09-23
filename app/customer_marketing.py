@@ -20,6 +20,7 @@ from app import zernio_whatsapp as wa
 from app.marketing_content import (EMAIL, PHONE, WEBSITE, SUBJECT, TEMPLATE_NAME,
     select_recipients, message_text, message_html)
 from app.outbound import shell, esc
+from app.mail_delivery import MailRecipientRejected, MailConnectionFailed, delivery_notice
 
 router = APIRouter()
 KEY = 'jeddah-port-introduction-20260922-v2'
@@ -108,6 +109,29 @@ def prepare(user_id, day=None):
 
 def counts(campaign):
     return rows('SELECT channel,status,COUNT(*) AS n FROM customer_campaign_recipients WHERE campaign_id=? GROUP BY channel,status ORDER BY channel,status',(campaign,))
+
+
+def reconcile_bounces(user_id):
+    """Match provider notices to this sender's recent accepted campaign recipients."""
+    notices = rows('SELECT id,sender,subject,body,received FROM spacemail_inbox WHERE user_id=? ORDER BY id DESC LIMIT 200', (user_id,))
+    for notice in notices:
+        result = delivery_notice(notice['sender'] or '', notice['subject'] or '', notice['body'] or '', notice['received'])
+        if not result:
+            continue
+        recipient, stamp, permanent, reason = result
+        with db() as c:
+            matched = c.execute("""SELECT r.id FROM customer_campaign_recipients r
+                JOIN customer_campaigns p ON p.id=r.campaign_id
+                WHERE p.created_by=%s AND r.channel='email' AND lower(r.recipient)=%s
+                AND r.status IN ('sent','bounced') AND r.sent_at<=%s
+                AND r.sent_at>=%s""", (user_id, recipient, stamp, stamp-timedelta(days=2))).fetchall()
+            if not matched:
+                continue
+            for item in matched:
+                c.execute("UPDATE customer_campaign_recipients SET status='bounced',last_error=%s WHERE id=%s", (reason,item['id']))
+            if permanent:
+                c.execute("INSERT INTO marketing_suppressions(channel,recipient,created_at) VALUES('email',%s,%s) ON CONFLICT DO NOTHING", (recipient,utcnow()))
+                c.execute("UPDATE customer_campaign_recipients SET status='suppressed',last_error=%s WHERE channel='email' AND lower(recipient)=%s AND status IN ('pending','blocked')", (reason,recipient))
 
 
 def template_spec(campaign):
@@ -257,13 +281,23 @@ async def deliver(cid,channel,user_id):
                 mid=result['messages'][0]['id']
             if not mid:raise RuntimeError('Missing provider receipt')
         except Exception as exc:
+            if channel=='email' and isinstance(exc,MailRecipientRejected):
+                error=str(exc)
+                with db() as c:
+                    c.execute("UPDATE customer_campaign_recipients SET status='rejected',last_error=%s WHERE id=%s", (error,item['id']))
+                    if exc.permanent:
+                        c.execute("INSERT INTO marketing_suppressions(channel,recipient,created_at) VALUES('email',%s,%s) ON CONFLICT DO NOTHING", (item['recipient'],utcnow()))
+                continue
             status='blocked' if isinstance(exc,wa.WhatsAppBlocked) else 'uncertain'
             error=str(exc)[:300] if status=='blocked' else 'تعذر تأكيد نتيجة الإرسال؛ راجع المزود قبل أي إعادة إرسال.'
+            if channel=='email' and isinstance(exc,MailConnectionFailed):
+                status,error='pending',str(exc)
             execute('UPDATE customer_campaign_recipients SET status=?,last_error=? WHERE id=?',(status,error,item['id']))
             execute("UPDATE customer_campaign_channels SET status='paused',last_error=?,updated_at=? WHERE campaign_id=? AND channel=?",(error,utcnow(),cid,channel))
             return
         execute("UPDATE customer_campaign_recipients SET status='sent',provider_message_id=?,sent_at=?,last_error=NULL WHERE id=?",(mid,utcnow(),item['id']))
-    execute("UPDATE customer_campaign_channels SET status='completed',updated_at=? WHERE campaign_id=? AND channel=? AND status='sending'",(utcnow(),cid,channel))
+    issues=one("SELECT COUNT(*) AS n FROM customer_campaign_recipients WHERE campaign_id=? AND channel=? AND status IN ('uncertain','sending','rejected','bounced')",(cid,channel))['n']
+    execute("UPDATE customer_campaign_channels SET status=?,updated_at=? WHERE campaign_id=? AND channel=? AND status='sending'",('completed_with_issues' if issues else 'completed',utcnow(),cid,channel))
     log(user_id,'customer_campaign_channel_finished','customer_campaign',cid,channel+'; provider receipts recorded')
 
 
@@ -321,6 +355,7 @@ async def daily_tick(now=None):
     now=(now or datetime.now(RIYADH)).astimezone(RIYADH)
     schedule=one('SELECT * FROM customer_campaign_schedule WHERE id=1')
     if not schedule or not schedule['enabled'] or now.hour<9:return
+    await run_in_threadpool(reconcile_bounces,schedule['approved_by'])
     if os.getenv('ENABLE_EXTERNAL_ACTIONS','0')!='1':return
     user=one('SELECT id,role,is_active FROM users WHERE id=?',(schedule['approved_by'],))
     from app.mfa_stepup import mfa_state

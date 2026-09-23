@@ -22,6 +22,7 @@ from app.social_publishing import csrf, hidden_csrf
 from app.fine_permissions import has_permission
 from app.mfa_stepup import recent_stepup
 from app.live_activity import observe
+from app.mail_delivery import MailRecipientRejected, MailConnectionFailed
 
 router = APIRouter()
 ADDRESS = 'afaq@shodai.cc'
@@ -121,17 +122,22 @@ def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, au
         filename, media_type, content = attachment
         main, sub = media_type.split('/', 1) if '/' in media_type else ('application', 'octet-stream')
         msg.add_attachment(bytes(content), maintype=main, subtype=sub, filename=filename)
-    client = None
     try:
         client = smtp_login(password(uid))
+    except Exception:
+        raise MailConnectionFailed() from None
+    try:
         refused = client.send_message(msg)
         if refused:
-            raise RuntimeError('Recipient refused')
+            raise smtplib.SMTPRecipientsRefused(refused)
+    except smtplib.SMTPRecipientsRefused as exc:
+        response = next(iter(exc.recipients.values()), (450, b''))
+        raise MailRecipientRejected(response[0]) from None
     except Exception:
         # Do not leak provider responses or credentials. Callers must not retry blindly.
         raise RuntimeError('تعذر تأكيد إرسال البريد الرسمي؛ راجع سجل الإرسال قبل المحاولة مجددًا.') from None
     finally:
-        if client:
+        with suppress(Exception):
             client.close()
     return str(msg['Message-ID'])
 
