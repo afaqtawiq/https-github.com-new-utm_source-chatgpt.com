@@ -14,7 +14,9 @@ from python_multipart.exceptions import MultipartParseError
 
 from app.fasah_documents import MAX_BYTES, extract_document
 from app.fasah_fields import (DOCUMENT_TYPES, FASAH_URL, FIELDS, FIELD_KEYS, LABELS,
-    clean, empty_fields, extract_candidates, merge_candidates, readiness, reject_credentials)
+    clean, empty_fields, extract_candidates, merge_candidates, readiness, reject_credentials, value_problem)
+from app.fasah_checklist import (PROFILE_OPTIONS, PROFILE_KEYS, REQUIREMENTS, STATES, IMPORT_SOURCE,
+    checklist, profile_of, suggested_kind, detected_kinds, classification_issue, document_flags)
 from app.storage import db, get_session, log, one, rows, utcnow
 
 router = APIRouter()
@@ -27,6 +29,7 @@ def init_storage():
             title TEXT NOT NULL, fields_json TEXT NOT NULL, documents_json TEXT NOT NULL,
             revision INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMPTZ NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL)''')
+        connection.execute("ALTER TABLE fasah_workspace_drafts ADD COLUMN IF NOT EXISTS context_json TEXT NOT NULL DEFAULT '{}'")
 
 
 init_storage()
@@ -52,18 +55,22 @@ def get_draft(case_id, session):
         raise HTTPException(404, 'المسودة غير موجودة أو غير متاحة لهذا الموظف.')
     case['fields'] = json.loads(case['fields_json'])
     case['documents'] = json.loads(case['documents_json'])
+    case['context'] = json.loads(case.get('context_json') or '{}')
     return case
 
 
 def persist(case, session, revision, action):
     if str(case['revision']) != str(revision):
         raise HTTPException(409, 'عُدلت المسودة في صفحة أخرى. حدّث الصفحة قبل المتابعة.')
+    context = case.setdefault('context', {})
+    if action != 'fasah_completeness_checked':
+        context.pop('checked_at', None)
     with db() as connection:
         updated = connection.execute('''UPDATE fasah_workspace_drafts
-            SET fields_json=%s,documents_json=%s,revision=revision+1,updated_at=%s
+            SET fields_json=%s,documents_json=%s,context_json=%s,revision=revision+1,updated_at=%s
             WHERE id=%s AND created_by=%s AND revision=%s RETURNING id''',
             (json.dumps(case['fields'], ensure_ascii=False), json.dumps(case['documents'], ensure_ascii=False),
-             utcnow(), case['id'], session['user_id'], case['revision'])).fetchone()
+             json.dumps(context, ensure_ascii=False), utcnow(), case['id'], session['user_id'], case['revision'])).fetchone()
         if not updated:
             raise HTTPException(409, 'عُدلت المسودة بالتزامن. حدّث الصفحة.')
     # Audit identifiers/actions only; never document contents or field values.
@@ -99,6 +106,140 @@ def validate_text(value, maximum=500):
 
 def back(case_id):
     return RedirectResponse('/fasah-workspace/' + str(case_id), 303)
+
+
+def back_documents(case_id):
+    return RedirectResponse('/fasah-workspace/' + str(case_id) + '#document-check', 303)
+
+
+def strict_keys(values, allowed):
+    if set(values) - (set(allowed) | {'csrf', 'revision'}):
+        raise HTTPException(422, 'حقول غير مدعومة.')
+
+
+def documented_reason(values):
+    reason = validate_text(values.get('reason', ''), 500)
+    source = validate_text(values.get('source', ''), 300)
+    if len(reason) < 5 or len(source) < 5:
+        raise HTTPException(422, 'اذكر سبب القرار ومرجع التحقق لهذه المعاملة.')
+    return reason, source
+
+
+@router.post('/fasah-workspace/{case_id}/check')
+async def check_documents(case_id: int, request: Request):
+    session = authorized(request)
+    case = get_draft(case_id, session)
+    values = await small_form(request, session)
+    strict_keys(values, set())
+    case['context']['checked_at'] = str(utcnow())
+    persist(case, session, values.get('revision'), 'fasah_completeness_checked')
+    return back_documents(case_id)
+
+
+@router.post('/fasah-workspace/{case_id}/profile')
+async def save_profile(case_id: int, request: Request):
+    session = authorized(request)
+    case = get_draft(case_id, session)
+    values = await small_form(request, session)
+    strict_keys(values, PROFILE_KEYS)
+    if not PROFILE_KEYS <= set(values):
+        raise HTTPException(422, 'نموذج بيانات الشحنة غير مكتمل.')
+    profile = {key: validate_text(values[key], 500 if key == 'goods' else 120) for key in PROFILE_KEYS}
+    if any(profile[key] not in choices for key, (_, choices) in PROFILE_OPTIONS.items()):
+        raise HTTPException(422, 'نوع معاملة أو وسيلة نقل غير صحيحة.')
+    case['context']['profile'] = profile
+    persist(case, session, values.get('revision'), 'fasah_profile_saved')
+    return back_documents(case_id)
+
+
+@router.post('/fasah-workspace/{case_id}/requirements/{key}')
+async def save_requirement(case_id: int, key: str, request: Request):
+    session = authorized(request)
+    case = get_draft(case_id, session)
+    values = await small_form(request, session)
+    strict_keys(values, {'choice', 'reason', 'source'})
+    if key not in REQUIREMENTS or values.get('choice') not in {'auto', 'required', 'not_required', 'review'}:
+        raise HTTPException(422, 'متطلب غير صحيح.')
+    decisions = case['context'].setdefault('decisions', {})
+    if values['choice'] == 'auto':
+        decisions.pop(key, None)
+    else:
+        reason, source = documented_reason(values)
+        decisions[key] = {'choice': values['choice'], 'reason': reason, 'source': source,
+                          'profile': profile_of(case['context'])}
+    persist(case, session, values.get('revision'), 'fasah_requirement_reviewed')
+    return back_documents(case_id)
+
+
+@router.post('/fasah-workspace/{case_id}/scope-review')
+async def scope_review(case_id: int, request: Request):
+    session = authorized(request)
+    case = get_draft(case_id, session)
+    values = await small_form(request, session)
+    strict_keys(values, {'reason', 'source', 'confirmed'})
+    reason, source = documented_reason(values)
+    profile = profile_of(case['context'])
+    if values.get('confirmed') != 'yes' or not all(profile[k] for k in ('transaction', 'mode', 'goods', 'dispatch_country')):
+        raise HTTPException(422, 'أكمل وصف المعاملة وأكد مراجعة اشتراطات جميع أصناف البضاعة.')
+    case['context']['scope_review'] = {'profile': profile, 'reason': reason, 'source': source}
+    persist(case, session, values.get('revision'), 'fasah_goods_requirements_reviewed')
+    return back_documents(case_id)
+
+
+@router.post('/fasah-workspace/{case_id}/extra-requirements')
+async def save_extra(case_id: int, request: Request):
+    session = authorized(request)
+    case = get_draft(case_id, session)
+    values = await small_form(request, session)
+    strict_keys(values, {'extra_id', 'label', 'choice', 'document_id', 'reason', 'source'})
+    extras = case['context'].setdefault('extras', [])
+    extra_id = values.get('extra_id')
+    previous = next((e for e in extras if e['id'] == extra_id), None)
+    if extra_id and not previous:
+        raise HTTPException(404, 'المتطلب غير موجود.')
+    if not previous and len(extras) >= 12:
+        raise HTTPException(422, 'الحد الأقصى 12 متطلبًا إضافيًا.')
+    label = validate_text(values.get('label', ''), 120)
+    document_id = values.get('document_id', '')
+    if not label or values.get('choice') not in {'required', 'not_required'}:
+        raise HTTPException(422, 'حدد اسم المتطلب وانطباقه.')
+    if document_id and not any(d['id'] == document_id for d in case['documents']):
+        raise HTTPException(422, 'المستند المحدد لا يتبع هذه المعاملة.')
+    reason, source = documented_reason(values)
+    extra = {'id': extra_id or uuid.uuid4().hex, 'label': label, 'required': values['choice'] == 'required',
+             'document_id': document_id, 'reason': reason, 'source': source, 'profile': profile_of(case['context'])}
+    if previous:
+        previous.update(extra)
+    else:
+        extras.append(extra)
+    case['context'].pop('scope_review', None)
+    persist(case, session, values.get('revision'), 'fasah_extra_requirement_saved')
+    return back_documents(case_id)
+
+
+@router.post('/fasah-workspace/{case_id}/documents/{document_id}/review')
+async def review_document(case_id: int, document_id: str, request: Request):
+    session = authorized(request)
+    case = get_draft(case_id, session)
+    values = await small_form(request, session)
+    strict_keys(values, {'kind', 'reviewed', 'note'} | {'covers_' + key for key in REQUIREMENTS})
+    document = next((d for d in case['documents'] if d['id'] == document_id), None)
+    if not document:
+        raise HTTPException(404, 'المستند غير موجود.')
+    if values.get('kind') not in DOCUMENT_TYPES:
+        raise HTTPException(422, 'اختر نوع المستند الصحيح.')
+    if values.get('reviewed') == 'yes' and document_flags(document):
+        raise HTTPException(422, 'لا يمكن تعليم مستند غير رسمي أو غير مقروء كمكتمل؛ راجع التنبيه وأضف نسخة صالحة.')
+    note = validate_text(values.get('note', ''), 500)
+    hint = suggested_kind(document)
+    if hint and hint != values['kind'] and len(note) < 5:
+        raise HTTPException(422, 'النوع المختار يخالف دلالة الملف؛ اذكر سبب التصنيف بعد مراجعة الأصل.')
+    document.update(kind=values['kind'], classification_confirmed=True, reviewed=values.get('reviewed') == 'yes',
+                    review_note=note,
+                    covers=[key for key in REQUIREMENTS if values.get('covers_' + key) == 'yes'])
+    # Changing the document type does not silently change or confirm extracted fields.
+    persist(case, session, values.get('revision'), 'fasah_document_classified')
+    return back_documents(case_id)
 
 
 def render(title, body):
@@ -249,6 +390,8 @@ async def save_fields(case_id: int, request: Request):
         raise HTTPException(422, 'نموذج غير مكتمل. حدّث الصفحة.')
     for key in FIELD_KEYS:
         value = validate_text(values['value_' + key])
+        if values.get('review_' + key) == 'yes' and value_problem(key, value):
+            raise HTTPException(422, LABELS[key] + ': ' + value_problem(key, value))
         case['fields'][key]['value'] = value
         case['fields'][key]['reviewed'] = bool(value and values.get('review_' + key) == 'yes')
     persist(case, session, values.get('revision'), 'fasah_fields_reviewed')
@@ -280,40 +423,45 @@ def detail(case_id: int, request: Request):
     session = authorized(request)
     case = get_draft(case_id, session)
     from app.main import esc
+    from app.fasah_workspace_view import document_panel
     status = readiness(case['fields'], case['documents'])
     hidden = token(session) + f'<input type="hidden" name="revision" value="{case["revision"]}">'
-    options = ''.join(f'<option value="{key}">{label}</option>' for key, label in DOCUMENT_TYPES.items())
-    body = intro() + f'<h2>{esc(case["title"])}</h2><div class="grid"><div class="kpi">حقول أساسية ناقصة<b>{len(status["missing"])}</b></div><div class="kpi">حقول تحتاج مراجعة<b>{len(status["unreviewed"])}</b></div><div class="kpi">تعارضات غير محسومة<b>{len(status["conflicts"])}</b></div></div>'
+    options = '<option value="" selected disabled>اختر نوع المستند</option>' + ''.join(f'<option value="{key}">{label}</option>' for key, label in DOCUMENT_TYPES.items())
+    body = intro() + f'<h2>{esc(case["title"])}</h2>' + document_panel(case, hidden, esc)
+    body += f'<div class="grid"><div class="kpi">حقول أساسية ناقصة<b>{len(status["missing"])}</b></div><div class="kpi">حقول تحتاج مراجعة<b>{len(status["unreviewed"])}</b></div><div class="kpi">تعارضات غير محسومة<b>{len(status["conflicts"])}</b></div></div>'
     body += '<div class="card warn"><h2>مراجعة التجهيز</h2>'
     if status['missing']:
         body += '<p>الحقول الناقصة: ' + esc('، '.join(status['missing'])) + '</p>'
     if status['conflicts']:
         body += '<p>قيم مختلفة بين المستندات: ' + esc('، '.join(status['conflicts'])) + ' — اختر القيمة الصحيحة بعد مطابقة الأصل.</p>'
-    if status['document_types_missing']:
-        body += '<p>مستندات لم تُضف: ' + esc('، '.join(status['document_types_missing'])) + '.</p>'
+    if status['invalid']:
+        body += '<p>قيم مستخرجة غير صالحة للاستخدام قبل التصحيح: ' + esc('، '.join(status['invalid'])) + '.</p>'
     if status['review_complete']:
         body += '<p class="good">اكتملت مراجعة الحقول الأساسية داخليًا.</p>'
     body += '<p class="muted">قائمة تجهيز داخلية وليست تحققًا رسميًا من اكتمال متطلبات فسح. راجع بنود البضاعة تفصيليًا والمستندات والتصاريح المطلوبة للمعاملة داخل فسح؛ لا يحدد الوكيل تصنيفًا جمركيًا أو رسومًا.</p></div>'
     body += f'''<div class="card"><h2>1. أضف مستندات المعاملة</h2><p class="muted">PDF أو PNG أو JPEG، حتى 10 ميجابايت و10 صفحات لكل ملف. القراءة محلية؛ يُحفظ النص المستخرج ومصادر الحقول داخل آفاق، وتُحذف نسخة المعالجة المؤقتة. لا ترفع بيانات الدخول.</p>
-    <form method="post" enctype="multipart/form-data" action="/fasah-workspace/{case_id}/documents">{hidden}<label for="doc-kind">نوع المستند</label><select id="doc-kind" name="kind">{options}</select><label for="doc-file">الملف</label><input id="doc-file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required><button class="btn">قراءة المستند وتجهيز الحقول</button></form>
+    <form method="post" enctype="multipart/form-data" action="/fasah-workspace/{case_id}/documents">{hidden}<label for="doc-kind">نوع المستند</label><select id="doc-kind" name="kind" required>{options}</select><label for="doc-file">الملف</label><input id="doc-file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required><button class="btn">قراءة المستند وتجهيز الحقول</button></form>
     <details><summary>أو الصق نصًا من مستند المعاملة</summary><form method="post" action="/fasah-workspace/{case_id}/text">{hidden}<label>نوع المستند<select name="kind">{options}</select></label><label>اسم المصدر<input name="name" maxlength="180" required></label><label>نص المستند<textarea name="text" maxlength="15000" required></textarea></label><button class="btn">استخراج من النص</button></form></details></div>'''
     field_rows = ''
     last_group = None
     for key, label, group, required, _ in FIELDS:
         field = case['fields'][key]
+        problem = value_problem(key, field['value'])
+        problem_html = '<p class="warn">' + esc(problem) + '</p>' if problem else ''
         if group != last_group:
             field_rows += f'<h3>{group}</h3>'
             last_group = group
         evidence = ''
         for candidate in field['candidates']:
-            evidence += f'<li><b>{esc(candidate["value"])}</b> — {esc(candidate["source"])}، صفحة {candidate["page"]}، {esc(candidate["method"])}<br><small>{esc(candidate["evidence"])}</small> <button type="button" class="pick" data-target="v-{key}" data-value="{esc(candidate["value"])}">اختيار هذه القيمة</button></li>'
-        field_rows += f'''<div class="field-row"><label for="v-{key}">{label}{' *' if required else ''}</label><div class="field-input"><input id="v-{key}" data-key="{key}" name="value_{key}" maxlength="500" value="{esc(field['value'])}" dir="auto"><button type="button" class="copy" data-target="v-{key}">نسخ</button></div><label class="review"><input id="review-{key}" type="checkbox" name="review_{key}" value="yes" {'checked' if field['reviewed'] else ''}> راجعت هذه القيمة مع الأصل وحسمت أي تعارض</label><details><summary>مصادر القيمة ({len(field['candidates'])})</summary><ul>{evidence or '<li>لا توجد قيمة مستخرجة موثوقة؛ أكملها يدويًا من المستند.</li>'}</ul></details></div>'''
+            invalid_candidate = value_problem(key, candidate['value'])
+            evidence += f'<li><b>{esc(candidate["value"])}</b> — {esc(candidate["source"])}، صفحة {candidate["page"]}، {esc(candidate["method"])}<br><small>{esc(candidate["evidence"])}</small> <button type="button" class="pick" data-target="v-{key}" data-value="{esc(candidate["value"])}" {"disabled" if invalid_candidate else ""}>اختيار هذه القيمة</button>{esc(invalid_candidate)}</li>'
+        field_rows += f'''<div class="field-row"><label for="v-{key}">{label}{' *' if required else ''}</label><div class="field-input"><input id="v-{key}" data-key="{key}" name="value_{key}" maxlength="500" value="{esc(field['value'])}" dir="auto"><button type="button" class="copy" data-target="v-{key}" {'disabled' if problem else ''}>نسخ</button></div>{problem_html}<label class="review"><input id="review-{key}" type="checkbox" name="review_{key}" value="yes" {'checked' if field['reviewed'] and not problem else ''}> راجعت هذه القيمة مع الأصل وحسمت أي تعارض</label><details><summary>مصادر القيمة ({len(field['candidates'])})</summary><ul>{evidence or '<li>لا توجد قيمة مستخرجة موثوقة؛ أكملها يدويًا من المستند.</li>'}</ul></details></div>'''
     body += f'<div class="card"><h2>2. راجع الحقول ورتبها للإدخال اليدوي</h2><p>النجمة تعني حقلًا أساسيًا في قائمة التجهيز الداخلية. جميع القيم المستخرجة تحتاج مراجعتك.</p><form id="field-form" method="post" action="/fasah-workspace/{case_id}/fields">{hidden}{field_rows}<button class="btn">حفظ المراجعة الداخلية</button><span id="dirty-message" role="status"></span></form><p id="copy-status" role="status" aria-live="polite"></p></div>'
     body += '<div class="card"><h2>3. أدخل المعاملة في فسح</h2><ol><li>احفظ مراجعتك وافتح فسح من الزر الرسمي.</li><li>سجّل الدخول وأكمل التحقق بنفسك داخل فسح.</li><li>انسخ القيم التي راجعتها والصقها في الحقول المقابلة؛ راجع أيضًا بنود الأصناف والكميات والوحدات.</li><li>راجع المعاملة كاملة في فسح؛ الاعتماد والإرسال الرسمي للموظف المخوّل فقط.</li></ol></div>'
     for document in case['documents']:
         notes = ''.join('<p class="warn">' + esc(n) + '</p>' for n in document['notes'])
         text = ''.join(f'<h4>صفحة {p["page"]} — {esc(p["method"])}</h4><pre dir="auto">{esc(p["text"])}</pre>' for p in document['pages'])
-        body += f'<div class="card"><h3>{esc(document["name"])}</h3><p>{DOCUMENT_TYPES[document["kind"]]} · {len(document["pages"])} صفحة · {document["candidate_count"]} قيمة مرشحة</p>{notes}<details><summary>عرض النص المستخرج لمراجعة التفاصيل والبنود</summary>{text}</details><form method="post" action="/fasah-workspace/{case_id}/documents/{document["id"]}/remove">{hidden}<button class="btn">إزالة المستند ونتائجه من المسودة</button></form></div>'
+        body += f'<div class="card" id="doc-{esc(document["id"])}"><h3>{esc(document["name"])}</h3><p>{DOCUMENT_TYPES[document["kind"]]} · {len(document["pages"])} صفحة · {document["candidate_count"]} قيمة مرشحة</p>{notes}<details><summary>عرض النص المستخرج لمراجعة التفاصيل والبنود</summary>{text}</details><form method="post" action="/fasah-workspace/{case_id}/documents/{document["id"]}/remove">{hidden}<button class="btn">إزالة المستند ونتائجه من المسودة</button></form></div>'
     body += '''<style>.field-row{border-bottom:1px solid var(--line);padding:16px 0}.field-input{display:flex;gap:8px}.field-input input{flex:1;min-width:0}.review{display:flex;align-items:center;gap:8px}.review input{width:auto}.field-row button{padding:8px;border-radius:8px;cursor:pointer}details{margin:12px 0}summary{cursor:pointer;color:var(--gold2)}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto}#dirty-message{margin:12px;color:var(--gold2)}</style>
     <script>
     (()=>{
@@ -325,11 +473,12 @@ def detail(case_id: int, request: Request):
       document.querySelectorAll('.pick').forEach(button=>button.addEventListener('click',()=>{const input=document.getElementById(button.dataset.target);input.value=button.dataset.value;input.dispatchEvent(new Event('input'));input.focus();}));
       document.querySelectorAll('.copy').forEach(button=>button.addEventListener('click',async()=>{
         const input=document.getElementById(button.dataset.target),status=document.getElementById('copy-status');
+        if(dirty){status.textContent='احفظ مراجعتك أولاً للتحقق من القيم قبل النسخ.';return;}
         if(!input.value || !document.getElementById('review-'+input.dataset.key).checked){status.textContent='راجع القيمة وحدد مربع المراجعة قبل نسخها.';return;}
         try{await navigator.clipboard.writeText(input.value);status.textContent='نُسخت القيمة فقط؛ الصقها يدويًا في فسح.';}catch(_){input.focus();input.select();status.textContent='تم تحديد القيمة؛ انسخها يدويًا باستخدام Ctrl+C.';}
       }));
       form.addEventListener('submit',()=>{dirty=false;});
-      document.querySelectorAll('form').forEach(other=>{if(other!==form)other.addEventListener('submit',event=>{if(dirty){event.preventDefault();document.getElementById('dirty-message').textContent='احفظ مراجعة الحقول قبل إضافة مستند أو إزالته.';form.scrollIntoView({behavior:'smooth'});}});});
+      document.querySelectorAll('form').forEach(other=>{if(other!==form)other.addEventListener('submit',event=>{if(dirty){event.preventDefault();document.getElementById('dirty-message').textContent='احفظ مراجعة الحقول أولاً حتى لا تفقد تعديلاتك.';form.scrollIntoView({behavior:'smooth'});}});});
       window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
     })();
     </script>'''

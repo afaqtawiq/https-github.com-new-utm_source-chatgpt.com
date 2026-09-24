@@ -104,3 +104,100 @@ def test_source_has_no_external_channel_or_fasah_automation():
     assert "frame-src 'none'" in workspace and "form-action 'self'" in workspace
     for forbidden in ('<iframe', 'requests.', 'httpx.', 'urlopen(', 'playwright', 'selenium', 'postMessage(', 'window.open(', '/submit', '/approve', 'localStorage', 'sessionStorage'):
         assert forbidden not in workspace + documents
+
+
+def checklist_document(name, kind, text, reviewed=False):
+    return {'id': name, 'name': name, 'kind': kind, 'pages': [{'page': 1, 'text': text, 'method': 'PDF'}],
+            'reviewed': reviewed, 'classification_confirmed': reviewed, 'candidate_count': 0}
+
+
+def import_context():
+    return {'profile': {'transaction': 'commercial_import', 'mode': 'land', 'goods': 'mixed goods',
+                        'dispatch_country': 'UAE', 'origin_marking': ''}}
+
+
+def test_unknown_case_does_not_invent_a_fixed_missing_list():
+    from app.fasah_checklist import checklist
+    result = checklist([], {})
+    assert result['counts']['missing'] == 0 and result['blockers']
+    assert all(row['state'] == 'review' for row in result['rows'])
+
+
+def test_conditional_origin_and_required_missing_invoice():
+    from app.fasah_checklist import checklist
+    context = import_context()
+    context['profile']['origin_marking'] = 'yes'
+    rows = {r['key']: r for r in checklist([], context)['rows']}
+    assert rows['invoice']['state'] == 'missing'
+    assert rows['origin']['state'] == 'not_required'
+    assert rows['packing']['state'] == rows['road_transport']['state'] == 'review'
+    context['profile']['origin_marking'] = 'no'
+    rows = {r['key']: r for r in checklist([], context)['rows']}
+    assert rows['origin']['state'] == 'missing'
+
+
+def test_wrong_named_bill_is_recognized_as_unofficial_declaration():
+    from app.fasah_checklist import checklist, suggested_kind, classification_issue, document_flags
+    doc = checklist_document('بوليصة شحن.pdf', 'origin', 'DEC TYPE Re-Export\nDEC NO: TEST-01\nA copy for review, unofficial')
+    assert suggested_kind(doc) == 'export_declaration'
+    assert classification_issue(doc) and document_flags(doc)
+    context = import_context()
+    context['decisions'] = {'export_declaration': {'choice': 'required', 'reason': 'case review', 'source': 'test source', 'profile': context['profile'].copy()}}
+    row = next(r for r in checklist([doc], context)['rows'] if r['key'] == 'export_declaration')
+    assert row['state'] == 'review' and row['documents'] == [doc]
+    doc.update(kind='export_declaration', reviewed=True, classification_confirmed=True)
+    assert next(r for r in checklist([doc], context)['rows'] if r['key'] == 'export_declaration')['state'] == 'review'
+
+
+def test_embedded_invoice_is_present_even_without_separate_upload():
+    from app.fasah_checklist import checklist, detected_kinds
+    doc = checklist_document('شهادة منشاء.pdf', 'origin', 'Certification of Origin')
+    doc['pages'].append({'page': 3, 'text': 'INVOICE\nINV NO: TEST-22', 'method': 'PDF'})
+    assert detected_kinds(doc) == {'origin': [1], 'invoice': [3]}
+    row = next(r for r in checklist([doc], import_context())['rows'] if r['key'] == 'invoice')
+    assert row['state'] == 'review' and row['documents'] == [doc]
+    doc.update(reviewed=True, classification_confirmed=True, covers=['invoice'])
+    assert next(r for r in checklist([doc], import_context())['rows'] if r['key'] == 'invoice')['state'] == 'complete'
+
+
+def test_changing_profile_invalidates_requirement_and_scope_decisions():
+    from app.fasah_checklist import checklist
+    context = import_context()
+    context['scope_review'] = {'profile': context['profile'].copy()}
+    context['decisions'] = {'packing': {'choice': 'not_required', 'reason': 'verified no need', 'source': 'case reference', 'profile': context['profile'].copy()}}
+    assert next(r for r in checklist([], context)['rows'] if r['key'] == 'packing')['state'] == 'not_required'
+    context['profile']['goods'] = 'different goods'
+    result = checklist([], context)
+    assert next(r for r in result['rows'] if r['key'] == 'packing')['state'] == 'review'
+    assert any('اشتراطات البضاعة' in b for b in result['blockers'])
+
+
+def test_custom_permit_missing_complete_and_removed_document():
+    from app.fasah_checklist import checklist
+    context = import_context()
+    context['extras'] = [{'id': 'extra1', 'label': 'specific permit', 'required': True, 'reason': 'applies to item', 'source': 'official reference', 'profile': context['profile'].copy(), 'document_id': 'permit.pdf'}]
+    assert checklist([], context)['rows'][-1]['state'] == 'missing'
+    doc = checklist_document('permit.pdf', 'other', 'permit issued for test goods', reviewed=True)
+    assert checklist([doc], context)['rows'][-1]['state'] == 'complete'
+    assert checklist([], context)['rows'][-1]['state'] == 'missing'
+
+
+def test_empty_marker_and_column_headings_never_become_candidates():
+    from app.fasah_fields import value_problem
+    result = candidates('CONSIGNEE :-\nGross Weight: الوزن القائم10 INTERCESSOR CO.\nNet Weight: 7 IMPORTER / EXPORTER\nPort of Discharge: 20ميناء التفريغ')
+    assert not any(result.values())
+    for key, value in [('importer', '-'), ('gross_weight', 'الوزن القائم10 INTERCESSOR CO.'), ('arrival_port', '20ميناء التفريغ')]:
+        assert value_problem(key, value)
+    assert not value_problem('gross_weight', '١٤١٠ كيلوجرام')
+
+
+def test_inventory_shows_zero_extraction_and_escapes_names():
+    import html
+    from app.fasah_workspace_view import document_panel
+    doc = checklist_document('وثيقة نقل<script>.pdf', 'other', 'وثيقة نقل دولية')
+    case = {'id': 1, 'context': {}, 'documents': [doc]}
+    markup = document_panel(case, '<input type="hidden" name="revision" value="1">', html.escape)
+    assert 'فحص اكتمال المستندات' in markup and 'مرفوع' in markup
+    assert 'هذا لا يعني أن الملف غير مرفوع' in markup
+    assert '<script>' not in markup and '&lt;script&gt;' in markup
+    assert all(label in markup for label in ['مكتمل', 'ناقص', 'غير مطلوب', 'يحتاج مراجعة'])
