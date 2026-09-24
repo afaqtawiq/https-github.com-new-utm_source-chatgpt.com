@@ -7,10 +7,11 @@ RUN ./node_modules/.bin/esbuild retell-entry.js --bundle --format=esm --platform
 
 FROM python:3.12-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng poppler-utils ffmpeg fonts-noto-core fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng tesseract-ocr-ara poppler-utils ffmpeg fonts-noto-core fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app
 COPY --from=webbuild /web/retell-web-client.js /app/app/static/retell-web-client.js
 EXPOSE 8000
 CMD ["python","run_api.py"]
+

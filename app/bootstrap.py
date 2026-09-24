@@ -131,3 +131,8 @@ app.include_router(customer_marketing_router)
 register_customer_marketing_worker(app)
 
 from app import publication_reports
+
+
+# Internal document preparation; deliberately no Fasah connector or worker.
+from app.fasah_workspace import router as fasah_workspace_router
+app.include_router(fasah_workspace_router)
