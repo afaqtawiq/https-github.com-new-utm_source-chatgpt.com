@@ -64,7 +64,8 @@ def extract_route(raw):
     # Label order can differ in RTL screenshots. Bind each value to its label.
     labeled = {key: set(values) for key, values in short_labels.items()}
     label_pattern = re.compile(r"(?<!\w)(?:موقع|مدينة|مكان|نقطة)?\s*(التحميل|الاستلام|الانطلاق|التنزيل|التسليم|الوصول|الوجهة)\s*[:：]?\s*")
-    labels = list(label_pattern.finditer(text))
+    labels = [match for match in label_pattern.finditer(text)
+              if not re.search(r"(?:موعد|تاريخ|وقت|ساعة)\s+$", text[:match.start()])]
     for i, match in enumerate(labels):
         end = labels[i + 1].start() if i + 1 < len(labels) else len(text)
         value = clean_location(text[match.end():end].strip())
