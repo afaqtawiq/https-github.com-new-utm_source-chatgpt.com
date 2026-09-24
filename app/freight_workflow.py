@@ -392,7 +392,8 @@ def _page(title, body):
 def workflow_detail(shipment_id: int, request: Request):
     current = session(request)
     item = one("""SELECT s.*,n.record_kind,n.id negotiation_id,n.owner_phone,n.status negotiation_status,n.asking_price,
-        n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.unloading_location,n.payment_method,n.notes,n.last_error
+        n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.unloading_location,n.payment_method,n.notes,n.last_error,
+        n.provider_message_id,n.provider_call_id,n.naqliat_load_id
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404)
     classification = f"""<h2>تصنيف السجل</h2>
@@ -411,6 +412,44 @@ def workflow_detail(shipment_id: int, request: Request):
         <p>محفوظ كعرض ناقل؛ لا يُرسل له طلب تسعير بصفته صاحب حمولة، ولا يُجهز منه عرض للسائقين.</p>
         {classification}</div>"""))
     broadcast = one("SELECT * FROM driver_broadcasts WHERE shipment_id=? ORDER BY id DESC LIMIT 1", (shipment_id,))
+    source = one("SELECT raw_text,description,capture_method,captured_at FROM naqliat_loads WHERE id=?",
+                 (item.get('naqliat_load_id'),)) if item.get('naqliat_load_id') else None
+    source_text = ((source or {}).get('raw_text') or (source or {}).get('description') or '').strip()
+    owner_states = {
+        'ready_to_contact': 'لم يُرسل؛ جاهز لتجهيز التواصل',
+        'contact_ready': 'لم يُرسل؛ بانتظار اعتماد التواصل',
+        'needs_contact_approval': 'لم يُرسل؛ استكمال البيانات بانتظار اعتماد التواصل',
+        'contact_blocked': 'لم يُرسل؛ قناة التواصل تمنع الإرسال',
+        'contact_failed': 'تعذر بدء التواصل؛ راجع سبب التوقف',
+        'contacting': 'جارٍ التواصل؛ لا تكرر الإرسال',
+        'contact_uncertain': 'نتيجة الإرسال غير مؤكدة؛ يلزم التحقق قبل إعادة المحاولة',
+    }
+    owner_state = ('قبل مزود التواصل الطلب؛ هذا لا يثبت وصوله للمستلم'
+                   if item.get('provider_message_id') or item.get('provider_call_id') else
+                   owner_states.get(item['negotiation_status'], 'لا يوجد معرّف إرسال موثق في هذا السجل'))
+    driver_state = (f"عرض موجود — {broadcast['status']}؛ راجع سجل المستلمين" if broadcast else
+                    'لم يُجهز عرض للسائقين بعد؛ يلزم استكمال بيانات الشحنة وتوثيق السعر وطريقة الدفع')
+    progress = f"""<section class=card id=shipment-progress><h2>ماذا تم في هذه الشحنة؟</h2>
+    <p>الاستلام: محفوظة بالمرجع {esc(item['reference'])}.</p>
+    <p>صاحب الشحنة: {esc(owner_state)}.</p><p>السائقون: {esc(driver_state)}.</p></section>"""
+    if source:
+        from app.transport_intake import extract_transport
+        extracted = extract_transport(source_text)
+        source_html = f"""<section class=card id=source-review><h2>النص الذي وصل من الهاتف</h2>
+        <p>وقت الاستلام: {esc(source.get('captured_at'))}. إعادة القراءة تستخدم نفس الشحنة.</p>
+        <textarea readonly rows=8 aria-label='النص الأصلي المستلم'>{esc(source_text)}</textarea>
+        <p>نتيجة قراءة النص الآن — التحميل: {esc(extracted.get('origin') or 'يحتاج مراجعة')}؛
+        التنزيل: {esc(extracted.get('destination') or 'يحتاج مراجعة')}.</p>"""
+        if not source_text:
+            source_html += '<p class=warn>وصل سجل دون نص قابل للاستخراج؛ لا يمكن معرفة المسار من رقم الهاتف وحده.</p>'
+        elif current.get('role') in ('admin', 'transport'):
+            source_html += f"""<form method=post action='/freight-workflow/{shipment_id}/reextract'>
+            <input type=hidden name=csrf value='{esc(current['csrf'])}'>
+            <button>إعادة استخراج البيانات الناقصة من النص المحفوظ</button></form>
+            <p>يملأ الحقول الناقصة فقط. راجع النتيجة ثم تابع التواصل من نفس الصفحة.</p>"""
+        source_html += '</section>'
+    else:
+        source_html = ''
     missing_contact = _shipment_requirements(item)
     readiness = ("<p class=good>بيانات المسار والتواصل مكتملة.</p>" if not missing_contact else
                  "<p class=warn>يلزم استكمال: " + esc("، ".join(missing_contact)) + "</p>")
@@ -421,7 +460,7 @@ def workflow_detail(shipment_id: int, request: Request):
     replies = rows("SELECT summary,happened_at FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply' ORDER BY id DESC LIMIT 10", (shipment_id,))
     reply_html = "<h2>ردود صاحب الحمولة عبر واتساب</h2>" + ("".join("<p>" + esc(x['happened_at']) + "</p><p style='white-space:pre-wrap'>" + esc(x['summary']) + "</p>" for x in replies) or "<p>لم يصل رد مرتبط بهذه الشحنة بعد.</p>")
     classification += "<p><a href='/settings/whatsapp/channel'>حالة قناة واتساب وقوالب Meta</a></p>" + reply_html
-    controls = classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
+    controls = progress + source_html + classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
     <p>راجع نتيجة الاستخراج. عند نقص المسار يمكنك تجهيز طلب استكمال لصاحب الشحنة إذا كان رقمه صحيحًا.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
     <input name=origin required placeholder='مدينة أو موقع التحميل' value='{esc(item.get('origin'))}'>
@@ -435,6 +474,59 @@ def workflow_detail(shipment_id: int, request: Request):
     if broadcast:
         controls += f"<p><a href='/commands/broadcast/{broadcast['id']}'>مراجعة العرض وتأكيد الإرسال الجماعي مرة واحدة</a> — الحالة: {esc(broadcast['status'])}</p>"
     return HTMLResponse(_page(item["reference"], f"<div class=card><h1>{esc(item['reference'])}</h1><p>{esc(item['origin'])} → {esc(item['destination'])}</p><p>صاحب الشحنة: <span dir=ltr>{esc(item['owner_phone'])}</span> | الحالة: {esc(item['negotiation_status'])}</p><p class=warn>{esc(item.get('last_error'))}</p>{controls}</div>"))
+
+
+@router.post('/freight-workflow/{shipment_id}/reextract')
+async def reextract_saved_source(shipment_id: int, request: Request):
+    current = session(request)
+    data = form(await request.body())
+    if current.get('role') not in ('admin', 'transport') or data.get('csrf') != current['csrf']:
+        raise HTTPException(403)
+    from app.transport_intake import extract_transport
+    with db() as c:
+        item = c.execute("""SELECT s.id,s.origin,s.destination,n.* FROM shipments s
+            JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=%s FOR UPDATE OF s,n""",
+            (shipment_id,)).fetchone()
+        if not item:
+            raise HTTPException(404, 'الشحنة غير موجودة')
+        if (item.get('record_kind') != 'shipment_request' or item.get('provider_message_id') or
+            item.get('provider_call_id') or item.get('agreed_owner_price') is not None or
+            item['status'] not in ('ready_to_contact', 'contact_ready', 'needs_contact_approval',
+                                   'contact_blocked', 'contact_failed', 'needs_manual_data', 'missing_owner_phone') or
+            c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1",
+                      (shipment_id,)).fetchone()):
+            raise HTTPException(409, 'بدأ تنفيذ هذا السجل أو تغير تصنيفه؛ راجع بياناته قبل إعادة الاستخراج')
+        source = c.execute('SELECT raw_text,description FROM naqliat_loads WHERE id=%s FOR UPDATE',
+                           (item.get('naqliat_load_id'),)).fetchone()
+        raw = ((source or {}).get('raw_text') or (source or {}).get('description') or '').strip()
+        if not raw:
+            raise HTTPException(409, 'لم يصل نص قابل للاستخراج مع الالتقاط؛ السجل محفوظ ولم يتغير')
+        extracted = extract_transport(raw)
+        for key in ('origin', 'destination'):
+            if (_usable_text(item.get(key)) and extracted.get(key) and
+                _usable_text(item[key]) != extracted[key]):
+                raise HTTPException(409, 'النص يتعارض مع المسار المسجل؛ راجع المصدر قبل التعديل')
+        updates = {}
+        for key in ('origin', 'destination', 'owner_phone', 'weight_tons'):
+            existing = (_valid_phone(item.get(key)) if key == 'owner_phone' else
+                        item.get(key) if key == 'weight_tons' else _usable_text(item.get(key)))
+            if not existing and extracted.get(key):
+                updates[key] = extracted[key]
+        if not updates:
+            raise HTTPException(409, 'لم تُستخرج بيانات جديدة موثوقة؛ راجع النص المعروض. لم يتغير السجل ولم تُرسل رسائل')
+        item.update(updates)
+        now = utcnow()
+        c.execute('UPDATE shipments SET origin=%s,destination=%s,updated_at=%s WHERE id=%s',
+                  (item['origin'], item['destination'], now, shipment_id))
+        c.execute('UPDATE naqliat_loads SET origin=%s,destination=%s,owner_phone=%s,weight_tons=%s WHERE id=%s',
+                  (item['origin'], item['destination'], item.get('owner_phone'), item.get('weight_tons'), item['naqliat_load_id']))
+        status = 'needs_contact_approval' if _shipment_requirements(item) else 'contact_ready'
+        c.execute('UPDATE freight_negotiations SET owner_phone=%s,weight_tons=%s,status=%s,last_error=NULL,updated_at=%s WHERE shipment_id=%s',
+                  (item.get('owner_phone'), item.get('weight_tons'), status, now, shipment_id))
+        c.execute("""INSERT INTO activity(user_id,action,entity_type,entity_id,summary,created_at)
+            VALUES(%s,'freight_source_reextracted','shipment',%s,%s,%s)""",
+                  (current['user_id'], shipment_id, 'Filled missing fields: ' + ', '.join(sorted(updates)), now))
+    return RedirectResponse(f'/freight-workflow/{shipment_id}#source-review', 303)
 
 
 @router.post("/freight-workflow/{shipment_id}/classification")

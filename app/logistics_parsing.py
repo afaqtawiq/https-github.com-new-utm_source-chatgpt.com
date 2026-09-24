@@ -39,8 +39,30 @@ def clean_location(value):
 def extract_route(raw):
     text = re.sub(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", str(raw or ""))
     text = text.replace("\u00a0", " ").replace("\r", "\n")
+    # Mobile captures often place the short direction label on its own line.
+    # Bind the next line only; adjacent labels or an unlabeled list of cities
+    # do not provide a reliable direction.
+    short_labels = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    direction = re.compile(r"^(من|إلى|الى|إلي|الي)\s*[:：]?\s*(.*)$")
+    for index, line in enumerate(lines):
+        match = direction.fullmatch(line)
+        if not match or (match.group(2) and not re.match(r"^(?:من|إلى|الى|إلي|الي)(?:\s|[:：])", line)):
+            continue
+        value = match.group(2).strip()
+        if not value and index + 1 < len(lines):
+            value = lines[index + 1]
+        if (not value or direction.fullmatch(value) or
+            re.search(r"(?:^|\s)(?:إلى|الى|إلي|الي)(?:\s|[:：]|$)", value) or
+            re.match(LOCATION_LABELS + r"\s*[:：]?", value) or
+            re.match(STOP_LABELS + r"\s*[:：]", value)):
+            continue
+        value = clean_location(value)
+        if value:
+            key = "origin" if match.group(1) == "من" else "destination"
+            short_labels.setdefault(key, set()).add(value)
     # Label order can differ in RTL screenshots. Bind each value to its label.
-    labeled = {}
+    labeled = {key: set(values) for key, values in short_labels.items()}
     label_pattern = re.compile(r"(?<!\w)(?:موقع|مدينة|مكان|نقطة)?\s*(التحميل|الاستلام|الانطلاق|التنزيل|التسليم|الوصول|الوجهة)\s*[:：]?\s*")
     labels = list(label_pattern.finditer(text))
     for i, match in enumerate(labels):
@@ -49,18 +71,24 @@ def extract_route(raw):
         key = "origin" if match.group(1) in {"التحميل", "الاستلام", "الانطلاق"} else "destination"
         if value:
             labeled.setdefault(key, set()).add(value)
+    if any(len(values) > 1 for values in labeled.values()):
+        return "", ""
+    routes = set()
     if all(len(labeled.get(k, set())) == 1 for k in ("origin", "destination")):
-        return next(iter(labeled["origin"])), next(iter(labeled["destination"]))
+        routes.add((next(iter(labeled["origin"])), next(iter(labeled["destination"]))))
     patterns = [
         r"(?:^|\s)من\s*[:：]?\s*(.+?)\s+(?:إلى|الى|إلي|الي)\s*[:：]?\s*(.+?)(?=\n|[،|]|$)",
         r"(?:المسار|خط السير|الطريق)\s*[:：]?\s*(.+?)\s*(?:→|->|إلى|الى|–|—|-)\s*(.+?)(?=\n|[،|]|$)",
     ]
     for pattern in patterns:
         matches = re.findall(pattern, text, re.I)
-        routes = {(clean_location(a), clean_location(b)) for a, b in matches}
-        routes = {(a, b) for a, b in routes if a and b}
-        if len(routes) == 1:
-            return routes.pop()
+        routes.update((clean_location(a), clean_location(b)) for a, b in matches
+                      if clean_location(a) and clean_location(b))
+    if len(routes) == 1:
+        result = next(iter(routes))
+        if all(not labeled.get(key) or value in labeled[key]
+               for key, value in zip(("origin", "destination"), result)):
+            return result
     # Unlabelled city mentions do not establish shipment direction.
     return "", ""
 

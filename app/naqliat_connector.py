@@ -181,7 +181,8 @@ def _save(payload: NaqliatLoad):
         return load_id, created, shipment["id"]
 
 
-_repair_missing_routes()
+# Existing captures are reprocessed explicitly from their shipment page. A
+# parser update must not rewrite agreed or dispatched shipments at startup.
 
 
 @router.get("/naqliat", response_class=HTMLResponse)
