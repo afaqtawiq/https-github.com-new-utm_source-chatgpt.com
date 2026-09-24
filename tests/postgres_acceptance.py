@@ -79,6 +79,38 @@ sid = shipment['id']
 assert one('SELECT status FROM freight_negotiations WHERE shipment_id=?', (sid,))['status'] == 'contact_ready'
 repeat = connector.post('/api/v7/naqliat/ocr', json={'raw_text': raw}, headers={'Authorization': 'Bearer local-ci-connector'})
 assert repeat.status_code == 200 and not repeat.json()['created']
+# Recover the existing capture from its saved source, without re-upload,
+# re-creating a shipment, changing completed fields or contacting anyone.
+source_text = 'إلى: جدة\nمن: الرياض\nالوزن: ٢٠ طن\nالجوال: 0500000001\n<script>alert(1)</script>'
+execute('UPDATE naqliat_loads SET raw_text=?,origin=?,destination=? WHERE id=?',
+        (source_text, 'غير محدد', 'غير محدد', load['id']))
+execute("UPDATE shipments SET origin='غير محدد',destination='غير محدد' WHERE id=?", (sid,))
+execute("UPDATE freight_negotiations SET status='needs_contact_approval' WHERE shipment_id=?", (sid,))
+before_count = one('SELECT COUNT(*) n FROM shipments')['n']
+detail = client.get(f'/freight-workflow/{sid}')
+assert detail.status_code == 200 and 'النص الذي وصل من الهاتف' in detail.text
+assert '&lt;script&gt;alert(1)&lt;/script&gt;' in detail.text and '<script>alert(1)</script>' not in detail.text
+assert 'لم يُجهز عرض للسائقين' in detail.text
+path = f'/freight-workflow/{sid}/reextract'
+assert connector.post(path, follow_redirects=False).status_code == 401
+assert client.post(path, data={}, follow_redirects=False).status_code == 403
+assert client.post(path, data={'csrf':csrf}, follow_redirects=False).status_code == 303
+repaired = one('SELECT origin,destination FROM shipments WHERE id=?', (sid,))
+assert repaired == {'origin':'الرياض', 'destination':'جدة'}
+assert one('SELECT COUNT(*) n FROM shipments')['n'] == before_count
+assert one('SELECT raw_text FROM naqliat_loads WHERE id=?', (load['id'],))['raw_text'] == source_text
+negotiation = one('SELECT * FROM freight_negotiations WHERE shipment_id=?', (sid,))
+assert negotiation['status'] == 'contact_ready' and negotiation['provider_message_id'] is None
+assert not one('SELECT id FROM driver_broadcasts WHERE shipment_id=?', (sid,))
+assert client.post(path, data={'csrf':csrf}, follow_redirects=False).status_code == 409  # no-op
+execute("UPDATE shipments SET origin='الدمام' WHERE id=?", (sid,))
+assert client.post(path, data={'csrf':csrf}, follow_redirects=False).status_code == 409  # conflict
+assert one('SELECT origin FROM shipments WHERE id=?', (sid,))['origin'] == 'الدمام'
+execute("UPDATE shipments SET origin='الرياض' WHERE id=?", (sid,))
+execute("UPDATE freight_negotiations SET status='contact_uncertain' WHERE shipment_id=?", (sid,))
+assert client.post(path, data={'csrf':csrf}, follow_redirects=False).status_code == 409
+execute("UPDATE freight_negotiations SET status='contact_ready' WHERE shipment_id=?", (sid,))
+print('PASS: saved-source recovery preserves shipment identity, blocks conflicts and uncertain sends, escapes source and sends nothing.')
 # A shared contact (even on the same route) is not a duplicate shipment.
 second_raw = raw + '\nوصف الحمولة: طلب مستقل رقم 2'
 second_response = connector.post('/api/v7/naqliat/ocr', json={'raw_text': second_raw}, headers={'Authorization': 'Bearer local-ci-connector'})
@@ -121,6 +153,7 @@ assert sync_retell_negotiation({'shipment_id': sid, 'freight_negotiation': True}
 assert one('SELECT revenue,cost FROM shipments WHERE id=?', (sid,)) == {'revenue': 2000, 'cost': 1850}
 assert client.get(f'/commands/broadcast/{bid}').status_code == 200
 assert client.get(f'/freight-workflow/{sid}').status_code == 200
+assert client.post(f'/freight-workflow/{sid}/reextract', data={'csrf':csrf}, follow_redirects=False).status_code == 409
 assert client.post(f'/commands/broadcast/{bid}/send', data={'csrf': csrf, 'confirmed': 'yes'}, follow_redirects=False).status_code == 428
 
 # Provider stub exercises database transitions, not an actual message delivery.
@@ -208,4 +241,3 @@ from official_replies_acceptance import run as run_official_replies_acceptance
 run_official_replies_acceptance(client, app)
 from publication_reports_acceptance import run as run_publication_reports_acceptance
 run_publication_reports_acceptance(client, app)
-
