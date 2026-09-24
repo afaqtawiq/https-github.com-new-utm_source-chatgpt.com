@@ -26,7 +26,7 @@ def current(r):
 def require(r):
  try:return current(r)
  except:return None
-def nav(): return '<div class="nav"><a class="primary" href="/dashboard">⌂ الرئيسية</a><a href="/readiness">جاهزية التشغيل</a><a href="/whatsapp-requests">طلبات واتساب</a><a href="/commands">🎙 مساعد الأوامر</a><a href="/naqliat">🚚 شحنات نقليات</a><a href="/freight-workflow">عروض الشحن</a><a href="/shipping-agents">⚓ وكلاء الملاحة</a><a href="/saber">سابر</a><a href="/content-center">✦ صناعة المحتوى</a><a href="/discovery">اكتشاف الفرص</a><a href="/intelligence-v2">الذكاء</a><a href="/sales-copilot">مساعد المبيعات</a><a href="/accounts">العملاء</a><a href="/customer-campaigns">حملات العملاء</a><a href="/drivers">السائقون</a><a href="/data-import">استيراد البيانات</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">مسار المبيعات</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a class="logout" href="/logout">تسجيل الخروج</a></div>'
+def nav(): return '<div class="nav"><a class="primary" href="/dashboard">⌂ الرئيسية</a><a href="/readiness">جاهزية التشغيل</a><a href="/whatsapp-requests">طلبات واتساب</a><a href="/commands">🎙 مساعد الأوامر</a><a href="/naqliat">🚚 شحنات نقليات</a><a href="/freight-workflow">عروض الشحن</a><a href="/shipping-agents">⚓ وكلاء الملاحة</a><a href="/saber">سابر</a><a href="/fasah-workspace">مساحة فسح</a><a href="/content-center">✦ صناعة المحتوى</a><a href="/discovery">اكتشاف الفرص</a><a href="/intelligence-v2">الذكاء</a><a href="/sales-copilot">مساعد المبيعات</a><a href="/accounts">العملاء</a><a href="/customer-campaigns">حملات العملاء</a><a href="/drivers">السائقون</a><a href="/data-import">استيراد البيانات</a><a href="/opportunities">الفرص</a><a href="/shipments">الشحنات</a><a href="/pipeline">مسار المبيعات</a><a href="/approvals">الموافقات</a><a href="/activity">السجل</a><a class="logout" href="/logout">تسجيل الخروج</a></div>'
 def head(s,t): return '<div class="top"><div class="brand"><div class="brandmark">آط</div><div><div class="eyebrow">AFAQ TUWAIQ OPERATIONS</div><h1>'+esc(t)+'</h1><div class="muted">من الحدود... إلى وجهة تجارتك</div></div></div><div class="account"><span class="good">● النظام متصل</span><br><span class="muted">'+esc(s['email'])+'</span></div></div>'+nav()+monitor_widget()
 def parse(raw): return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def rl(): return RedirectResponse('/login',303)
@@ -156,3 +156,4 @@ def api_accounts(r:Request): current(r);return rows('SELECT * FROM accounts ORDE
 def api_opps(r:Request): current(r);return rows('SELECT * FROM opportunities ORDER BY id DESC')
 @app.get('/api/v7/shipments')
 def api_shipments(r:Request): current(r);return rows('SELECT * FROM shipments ORDER BY id DESC')
+
