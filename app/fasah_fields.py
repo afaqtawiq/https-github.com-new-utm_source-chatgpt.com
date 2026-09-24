@@ -1,8 +1,9 @@
 """Conservative document candidates. No customs decisions or external actions."""
 import re
+import unicodedata
 
 FASAH_URL = 'https://fasah.zatca.gov.sa/ar/broker/2.0/'
-DOCUMENT_TYPES = {'invoice': 'فاتورة تجارية', 'packing': 'قائمة تعبئة', 'transport': 'بوليصة / مستند نقل', 'origin': 'شهادة منشأ', 'other': 'مستند مساند'}
+DOCUMENT_TYPES = {'invoice': 'فاتورة تجارية', 'packing': 'قائمة تعبئة', 'transport': 'بوليصة شحن', 'road_transport': 'وثيقة نقل', 'export_declaration': 'بيان تصدير / إعادة تصدير', 'origin': 'شهادة منشأ', 'other': 'مستند مساند / شهادة أو تصريح آخر'}
 # This is an internal preparation checklist, not Fasah's regulatory schema.
 FIELDS = [
     ('importer', 'المستورد / المرسل إليه', 'الأطراف', True, r'importer(?:\s+name)?|consignee|اسم المستورد|المستورد|المرسل إليه'),
@@ -41,6 +42,20 @@ def empty_fields():
     return {key: {'value': '', 'reviewed': False, 'candidates': []} for key in FIELD_KEYS}
 
 
+def value_problem(key, value):
+    value = unicodedata.normalize('NFKC', str(value or '')).strip()
+    if not value:
+        return ''
+    if not re.search(r'[\w\u0600-\u06ff]', value) or value.casefold() in {'n/a', 'na', 'none', 'null'}:
+        return 'القيمة علامة فارغة وليست بيانات؛ راجع الأصل.'
+    if key in ('gross_weight', 'net_weight') and not re.fullmatch(
+            r'[\d\s.,٬٫]+\s*(?:kg|kgs|kilograms?|g|grams?|t|tons?|tonnes?|lbs?|pounds?|كجم|كغ|كيلو\s*جرام|طن|أطنان|غرام|جرام)\.?', value, re.I):
+        return 'الوزن يحتاج رقمًا ووحدة واضحة؛ قد يكون النص المستخرج عنوانًا من الجدول.'
+    if key == 'arrival_port' and re.search(r'ميناء التفريغ|port of discharge|منفذ الوصول|ميناء الوصول', value, re.I):
+        return 'القيمة تبدو عنوان حقل وليست اسم منفذ؛ راجع الأصل.'
+    return ''
+
+
 def extract_candidates(pages, source, document_id):
     """Only explicitly labelled values; preserve competing values and page evidence."""
     result = {key: [] for key in FIELD_KEYS}
@@ -61,7 +76,7 @@ def extract_candidates(pages, source, document_id):
                     continue
                 # A second label suggests a multi-column row needing manual interpretation.
                 value = clean(re.split(r'\t| {2,}|\s\|\s', value)[0])
-                if not value or any(re.search(r'(?:' + f[4] + r')\s*[:：]', value, re.I) for f in FIELDS):
+                if not value or value_problem(key, value) or any(re.search(r'(?:' + f[4] + r')\s*[:：]', value, re.I) for f in FIELDS):
                     continue
                 evidence = clean(line + (' / ' + value if not match else ''), 600)
                 item = {'value': value, 'source': source, 'page': page['page'], 'method': page['method'], 'evidence': evidence, 'document_id': document_id}
@@ -84,9 +99,9 @@ def merge_candidates(fields, candidates):
 
 
 def readiness(fields, documents):
-    missing = [label for key, label, _, required, _ in FIELDS if required and not fields[key]['value']]
+    invalid = [LABELS[key] for key, field in fields.items() if value_problem(key, field['value'])]
+    missing = [label for key, label, _, required, _ in FIELDS if required and (not fields[key]['value'] or label in invalid)]
     unreviewed = [LABELS[key] for key, field in fields.items() if field['value'] and not field['reviewed']]
     conflicts = [LABELS[key] for key, field in fields.items() if len({c['value'].casefold() for c in field['candidates']}) > 1 and not field['reviewed']]
-    return {'missing': missing, 'unreviewed': unreviewed, 'conflicts': conflicts,
-            'document_types_missing': [label for key, label in DOCUMENT_TYPES.items() if key != 'other' and not any(d['kind'] == key for d in documents)],
-            'review_complete': not (missing or unreviewed or conflicts)}
+    return {'missing': missing, 'unreviewed': unreviewed, 'conflicts': conflicts, 'invalid': invalid,
+            'review_complete': not (missing or unreviewed or conflicts or invalid)}

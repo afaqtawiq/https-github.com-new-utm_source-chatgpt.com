@@ -77,6 +77,42 @@ try:
     client.headers['origin'] = 'https://untrusted.invalid'
     assert client.post(path + '/fields', data={'csrf': csrf}).status_code == 403
     client.headers['origin'] = 'http://testserver'
+    # New document checklist routes operate on the same existing draft and revisions.
+    from app.fasah_checklist import checklist
+    def checked():
+        row = draft()
+        return checklist(row['documents'], json.loads(row['context_json']))
+    def post_review(endpoint, **values):
+        return client.post(path + endpoint, data={'csrf': csrf, 'revision': draft()['revision'], **values})
+    profile = {'transaction': 'commercial_import', 'mode': 'land', 'goods': 'mixed goods', 'dispatch_country': 'UAE', 'origin_marking': 'yes'}
+    assert post_review('/profile', **profile).status_code == 303
+    assert post_review('/check').status_code == 303
+    assert json.loads(draft()['context_json'])['checked_at']
+    assert 'فحص اكتمال المستندات' in client.get(path).text
+    assert post_review('/requirements/packing', choice='not_required', reason='', source='').status_code == 422
+    decision = {'choice': 'not_required', 'reason': 'Confirmed for this case', 'source': 'Specific case reference'}
+    assert post_review('/requirements/packing', **decision).status_code == 303
+    assert not json.loads(draft()['context_json']).get('checked_at')
+    assert next(r for r in checked()['rows'] if r['key'] == 'packing')['state'] == 'not_required'
+    assert post_review('/profile', **{**profile, 'goods': 'changed goods'}).status_code == 303
+    assert next(r for r in checked()['rows'] if r['key'] == 'packing')['state'] == 'review'
+    assert post_review('/scope-review', confirmed='yes', reason='Checked all commodity requirements', source='Specific tariff reference').status_code == 303
+    assert post_review('/extra-requirements', label='Specific certificate', choice='required', document_id='', reason='Required for this product', source='Specific official reference').status_code == 303
+    assert checked()['rows'][-1]['state'] == 'missing'
+    assert not json.loads(draft()['context_json']).get('scope_review')
+    response = client.post(path + '/text', data={'csrf': csrf, 'revision': draft()['revision'], 'kind': 'origin', 'name': 'بوليصة شحن.pdf', 'text': 'DEC TYPE Re-Export\nDEC NO: EX-TEST\nA copy for review, unofficial'})
+    assert response.status_code == 303
+    draft_doc = draft()['documents'][-1]['id']
+    assert post_review('/documents/' + draft_doc + '/review', kind='export_declaration', reviewed='yes').status_code == 422
+    assert post_review('/documents/' + draft_doc + '/review', kind='export_declaration').status_code == 303
+    assert draft()['documents'][-1]['kind'] == 'export_declaration'
+    assert draft()['documents'][-1]['reviewed'] is False
+    current_doc = draft()['documents'][0]['id']
+    assert post_review('/documents/' + current_doc + '/review', kind='invoice', reviewed='yes').status_code == 303
+    assert draft()['documents'][0]['reviewed'] is True
+    assert post_review('/extra-requirements', label='Invalid reference', choice='required', document_id='not-owned', reason='reason here', source='source here').status_code == 422
+    assert client.post(path + '/check', data={'csrf': 'wrong', 'revision': draft()['revision']}).status_code == 403
+    assert client.post(path + '/check', data={'csrf': csrf, 'revision': 1}).status_code == 409
     for role in ('sales', 'transport', 'finance', 'viewer', 'customs', 'admin'):
         new_uid = execute('INSERT INTO users(email,name,password_hash,role,created_at) VALUES(?,?,?,?,?)',
                           (role + '@example.invalid', 'Test', 'unused', role, utcnow()))
@@ -85,12 +121,14 @@ try:
         assert client.get('/fasah-workspace').status_code == (200 if role in ('admin', 'customs') else 403)
         assert client.get(path).status_code == (404 if role in ('admin', 'customs') else 403)
         assert client.post(path + '/fields', data={'csrf': other_csrf}).status_code in (403, 404)
+        for endpoint in ('/check', '/profile', '/requirements/packing', '/scope-review', '/extra-requirements', '/documents/' + current_doc + '/review'):
+            assert client.post(path + endpoint, data={'csrf': other_csrf}).status_code in (403, 404)
         if role == 'customs':
             assert client.post('/fasah-workspace', data={'csrf': other_csrf, 'title': 'Customs draft'}).status_code == 303
     forbidden_routes = ['/fasah-workspace/login', path + '/submit', path + '/approve', path + '/otp']
     for route in forbidden_routes:
         assert client.post(route, data={'csrf': other_csrf}).status_code in (404, 405)
-    print('PASS: PostgreSQL persistence, real PDF upload, provenance, conflicts, review invalidation, stale updates, CSRF, role and owner isolation, credential rejection, escaping, document removal, no official action routes.')
+    print('PASS: document inventory, contextual completeness, existing-draft migration, classification correction, unofficial-document block, requirement/scope invalidation, custom certificates, persistence, real PDF upload, stale updates, CSRF, owner isolation, no official action routes.')
 finally:
     with psycopg.connect(url, autocommit=True) as connection:
         connection.execute('DROP SCHEMA ' + schema + ' CASCADE')
