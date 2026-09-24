@@ -87,9 +87,7 @@ def communications(request:Request):
     sess=get_session(request.cookies.get('gla_session'))
     if not sess:return HTMLResponse('<meta http-equiv="refresh" content="0;url=/login">',status_code=401)
     with db() as c:
-        c.execute('''SELECT r.*,o.title AS opportunity_title FROM retell_calls r LEFT JOIN opportunities o ON o.id=r.opportunity_id ORDER BY r.updated_at DESC LIMIT 100''')
-        rows=c.fetchall();cols=[d.name for d in c.description] if c.description else []
-    items=[dict(zip(cols,row)) for row in rows]
+        items=[dict(row) for row in c.execute('''SELECT r.*,o.company_name AS opportunity_title FROM retell_calls r LEFT JOIN opportunities o ON o.id=r.opportunity_id ORDER BY r.updated_at DESC LIMIT 100''').fetchall()]
     cards=''.join(f'''<tr><td>{_esc(x.get('updated_at'))}</td><td>{_esc(x.get('opportunity_title') or ('#'+str(x.get('opportunity_id'))) if x.get('opportunity_id') else 'غير مرتبط')}</td><td>{_esc(x.get('status') or x.get('event_type'))}</td><td>{_esc(x.get('outcome'))}</td><td>{_esc(x.get('requested_service'))}</td><td>{'نعم' if x.get('quote_requested') else '—'}</td><td>{'نعم' if x.get('callback_requested') else '—'}</td><td>{_esc(x.get('preferred_follow_up'))}</td><td>{_esc(x.get('summary'))}</td></tr>''' for x in items)
     body=f'''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>مركز الاتصالات</title><style>body{{font-family:Arial;margin:32px;background:#f6f7f9;color:#17202a}}.box{{background:white;padding:24px;border-radius:14px;box-shadow:0 2px 12px #0001}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{padding:10px;border-bottom:1px solid #eee;vertical-align:top}}th{{text-align:right;background:#fafafa}}.note{{background:#eef7ff;padding:12px;border-radius:10px;margin:12px 0}}</style><body><div class="box"><h1>مركز اتصالات المبيعات</h1><div class="note">Retell → Gulf Logistics AI → CRM. لا توجد مكالمات خارجية تلقائية؛ هذه الصفحة تعرض النتائج المستلمة فقط.</div><table><thead><tr><th>آخر تحديث</th><th>الفرصة</th><th>الحالة</th><th>النتيجة</th><th>الخدمة</th><th>طلب عرض</th><th>طلب اتصال</th><th>المتابعة</th><th>الملخص</th></tr></thead><tbody>{cards or '<tr><td colspan="9">لا توجد مكالمات مسجلة بعد.</td></tr>'}</tbody></table></div></body></html>'''
     return HTMLResponse(body)
@@ -99,9 +97,8 @@ def communications_api(request:Request):
     sess=get_session(request.cookies.get('gla_session'))
     if not sess:return JSONResponse({'detail':'authentication required'},status_code=401)
     with db() as c:
-        c.execute('''SELECT id,call_id,agent_id,opportunity_id,event_type,status,direction,summary,outcome,interested,requested_service,preferred_follow_up,quote_requested,callback_requested,started_at,ended_at,updated_at FROM retell_calls ORDER BY updated_at DESC LIMIT 100''')
-        rows=c.fetchall();cols=[d.name for d in c.description] if c.description else []
-    return {'items':[dict(zip(cols,r)) for r in rows]}
+        items=[dict(row) for row in c.execute('''SELECT id,call_id,agent_id,opportunity_id,event_type,status,direction,summary,outcome,interested,requested_service,preferred_follow_up,quote_requested,callback_requested,started_at,ended_at,updated_at FROM retell_calls ORDER BY updated_at DESC LIMIT 100''').fetchall()]
+    return {'items':items}
 
 @router.get('/api/v7/retell/status')
 async def retell_status():
