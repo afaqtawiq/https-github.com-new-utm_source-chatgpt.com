@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, Request
 from starlette.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
-from app.storage import db, get_session, one, log
+from app.storage import db, get_session
 from fastapi.responses import HTMLResponse, RedirectResponse
 from html import escape
 
@@ -192,15 +192,19 @@ async def receive(request: Request):
             elif advanced and advanced.get('broadcast_id'):
                 reply = {'message': 'تم تسجيل الاتفاق وتجهيز وإرسال عرض الحمولة للسائقين المسجلين. سنعتمد أول سائق يوافق على العرض.'}
             else:
-                saved = one("SELECT fields FROM zernio_requests WHERE conversation_id=? AND agent='afaaq'", (conversation_id,))
-                ref = (saved or {}).get('fields', {}).get('_last_transport_reference') if saved else None
-                if ref:
-                    shipment = one("SELECT id FROM shipments WHERE reference=?", (ref,))
-                    if shipment:
-                        await contact_owner(shipment['id'], approved=True, user_id=None)
+                with db() as c:
+                    saved = c.execute("SELECT fields FROM zernio_requests WHERE conversation_id=%s AND agent='afaaq'", (conversation_id,)).fetchone()
+                    ref = (saved or {}).get('fields', {}).get('_last_transport_reference') if saved else None
+                    shipment = c.execute("SELECT id FROM shipments WHERE reference=%s", (ref,)).fetchone() if ref else None
+                if shipment:
+                    await contact_owner(shipment['id'], approved=True, user_id=None)
         except Exception as exc:
             # Preserve the inbound reply even when the external provider is blocked.
-            log(None, 'transport_auto_advance_failed', 'whatsapp_conversation', None, str(exc)[:500])
+            with db() as c:
+                c.execute("""INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
+                    SELECT n.shipment_id,'transport_auto_advance_failed',%s,n.status,NOW()
+                    FROM freight_negotiations n WHERE n.owner_phone=%s ORDER BY n.id DESC LIMIT 1""",
+                    (str(exc)[:500], '+' + inbound_phone if inbound_phone else ''))
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",
