@@ -4,12 +4,13 @@ import math
 import os
 import re
 import urllib.parse
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.storage import db, get_session, utcnow
+from app.storage import db, get_session
 from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
@@ -17,6 +18,11 @@ from app.logistics_parsing import phone as normalize_phone, accepts_offer
 
 
 router = APIRouter()
+
+
+def utcnow():
+    """UTC timestamp without depending on storage helpers in isolated WhatsApp tests."""
+    return datetime.now(timezone.utc)
 
 
 def execute(query, params=()):
