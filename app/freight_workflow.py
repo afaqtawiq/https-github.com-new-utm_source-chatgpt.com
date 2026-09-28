@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.storage import db, execute, get_session, log, one, rows, utcnow
+from app.storage import db, get_session, log, one, rows, utcnow
 from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
@@ -17,6 +17,20 @@ from app.logistics_parsing import phone as normalize_phone, accepts_offer
 
 
 router = APIRouter()
+
+
+def execute(query, params=()):
+    """Execute through db() so isolated WhatsApp tests need only the storage db stub."""
+    with db() as connection:
+        cursor = connection.execute(query, params)
+        if getattr(cursor, "description", None):
+            row = cursor.fetchone()
+            if row:
+                try:
+                    return row[0]
+                except (KeyError, TypeError):
+                    return next(iter(row.values())) if hasattr(row, "values") else row
+        return getattr(cursor, "lastrowid", None)
 
 
 def _init_storage():
