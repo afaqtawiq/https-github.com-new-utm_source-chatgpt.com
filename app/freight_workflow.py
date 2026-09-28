@@ -145,9 +145,9 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
         execute("UPDATE freight_negotiations SET status=?,last_error=?,updated_at=? WHERE shipment_id=?",
                 (status, "رسالة استكمال البيانات جاهزة لاعتماد التواصل" if missing else "التواصل جاهز للاعتماد", utcnow(), shipment_id))
         return
-    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1" or os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") != "1":
+    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1":
         execute("UPDATE freight_negotiations SET status='contact_blocked',last_error=?,updated_at=? WHERE shipment_id=?",
-                ("قناة التواصل الخارجي غير مفعلة؛ المسودة محفوظة ولم تُرسل", utcnow(), shipment_id))
+                ("الإرسال الخارجي غير مفعّل على الخادم؛ لم تُرسل رسالة صاحب الشحنة", utcnow(), shipment_id))
         return
     # Claim before any network request. Concurrent invocations cannot send twice.
     with db() as c:
@@ -157,7 +157,7 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
             (utcnow(), shipment_id)).fetchone()
     if not claimed:
         return
-    channel = os.getenv("FREIGHT_OWNER_CONTACT_CHANNEL", "retell").lower()
+    channel = os.getenv("FREIGHT_OWNER_CONTACT_CHANNEL", "whatsapp").lower()
     attempted = False
     try:
         if channel == "retell":
@@ -344,6 +344,83 @@ def prepare_driver_offer(shipment_id, user_id):
                   (shipment_id, 'driver_offer_prepared', f"Draft {bid}; margin 150 SAR; {len(valid)} recipients", 'driver_offer_pending_approval', now, user_id))
     log(user_id, 'freight_driver_offer_prepared', 'shipment', shipment_id, f'Draft {bid}; not sent')
     return bid
+
+
+async def start_driver_broadcast(broadcast_id, user_id=None):
+    """Start an already prepared freight offer without a second manual approval.
+
+    The owner agreement is the business trigger; ENABLE_EXTERNAL_ACTIONS remains the
+    global kill switch. Claims make this idempotent.
+    """
+    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1":
+        return False
+    now = utcnow()
+    with db() as c:
+        claim = c.execute("""UPDATE driver_broadcasts SET status='sending',confirmed_by=COALESCE(confirmed_by,%s),
+            confirmed_at=COALESCE(confirmed_at,%s),updated_at=%s
+            WHERE id=%s AND status='draft' AND shipment_id IS NOT NULL RETURNING id""",
+            (user_id, now, now, broadcast_id)).fetchone()
+    if not claim:
+        return False
+    from app.command_assistant import deliver_driver_broadcast
+    await deliver_driver_broadcast(broadcast_id)
+    return True
+
+
+def _number_after(pattern, text):
+    match = re.search(pattern + r"[^0-9٠-٩]{0,20}([0-9٠-٩][0-9٠-٩,.]*)", str(text or ""), re.I)
+    if not match:
+        return None
+    value = match.group(1).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")).replace(",", "")
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+async def advance_owner_whatsapp_reply(owner_phone, text):
+    """Turn a real owner's WhatsApp reply into an agreement and driver broadcast when complete."""
+    owner_phone = _valid_phone(owner_phone)
+    if not owner_phone:
+        return None
+    item = one("""SELECT s.*,n.shipment_id,n.status negotiation_status,n.weight_tons,n.payment_method,n.unloading_location
+        FROM freight_negotiations n JOIN shipments s ON s.id=n.shipment_id
+        WHERE n.owner_phone=? AND n.contact_channel='whatsapp' AND n.status='awaiting_owner'
+        ORDER BY n.id DESC LIMIT 1""", (owner_phone,))
+    if not item:
+        return None
+    price = (_number_after(r"(?:السعر(?: النهائي)?|اجرة|أجرة|قيمة النقل|النقل)", text)
+             or _number_after(r"(?:مطلوب|المطلوب)", text))
+    weight = _number_after(r"(?:الوزن|وزن)", text)
+    payment = ""
+    pay = re.search(r"(?:الدفع|طريقة الدفع)\s*[:：-]?\s*([^\n،.]{2,120})", str(text or ""), re.I)
+    if pay:
+        payment = pay.group(1).strip()
+    unloading = ""
+    unload = re.search(r"(?:التنزيل|مكان التنزيل|موقع التنزيل)\s*[:：-]?\s*([^\n،.]{2,200})", str(text or ""), re.I)
+    if unload:
+        unloading = unload.group(1).strip()
+    execute("""UPDATE freight_negotiations SET weight_tons=COALESCE(?,weight_tons),
+        payment_method=COALESCE(NULLIF(?,''),payment_method),
+        unloading_location=COALESCE(NULLIF(?,''),unloading_location),notes=?,updated_at=?
+        WHERE shipment_id=?""", (weight, payment, unloading, str(text or "")[:3000], utcnow(), item["shipment_id"]))
+    refreshed = one("""SELECT s.*,n.weight_tons,n.payment_method,n.unloading_location FROM shipments s
+        JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (item["shipment_id"],))
+    if not price or price <= 150:
+        return {"shipment_id": item["shipment_id"], "broadcast_id": None, "missing": ["السعر النهائي"]}
+    missing = _shipment_requirements(refreshed, agreement=True)
+    if missing:
+        return {"shipment_id": item["shipment_id"], "broadcast_id": None, "missing": missing}
+    now = utcnow()
+    driver_price = round(price - 150, 2)
+    execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=COALESCE(asking_price,?),
+        agreed_owner_price=?,driver_offer_price=?,agreed_at=?,updated_at=?,last_error=NULL WHERE shipment_id=?""",
+        (price, price, driver_price, now, now, item["shipment_id"]))
+    execute("UPDATE shipments SET revenue=?,cost=?,updated_at=? WHERE id=?",
+            (price, driver_price, now, item["shipment_id"]))
+    bid = prepare_driver_offer(item["shipment_id"], None)
+    await start_driver_broadcast(bid, None)
+    return {"shipment_id": item["shipment_id"], "broadcast_id": bid, "missing": []}
 
 
 def accept_driver_reply(phone, text, connection=None):
