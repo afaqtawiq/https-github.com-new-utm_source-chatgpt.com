@@ -90,7 +90,7 @@ def publication(content_id):
 def selected_platforms(item):
     platforms = PLATFORMS.get(item.get('platform'))
     if not platforms or item.get('content_type') not in ('video', 'reel'):
-        raise PublishingError('الجدولة متاحة لمسودة فيديو أو ريلز مخصصة لـ YouTube أو TikTok أو كليهما.')
+        raise PublishingError('الجدولة متاحة لفيديو أو ريلز مخصص لحسابات آفاق المرتبطة.')
     return platforms
 
 
@@ -100,6 +100,42 @@ def checked_connection(platforms):
     if any(saved.get(p) != live[p] for p in platforms):
         raise PublishingError('تغير اتصال الحساب. راجع إعدادات الربط واحفظها مجددًا قبل الجدولة.')
     return key, live
+
+
+def auto_publish_instagram(content_id, user_id):
+    if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
+        raise PublishingError('الإرسال الخارجي متوقف على الخادم.')
+    item = one('SELECT * FROM social_content WHERE id=?', (content_id,))
+    if not item or item.get('platform') != 'Instagram' or item.get('content_type') not in ('post', 'video', 'reel'):
+        raise PublishingError('النشر التلقائي الحالي مخصص لمحتوى Instagram ذي الوسائط.')
+    if not item.get('media_url'):
+        raise PublishingError('Instagram يحتاج ملف وسائط للنشر التلقائي.')
+    key, accounts = checked_connection(('instagram',))
+    account = accounts['instagram']
+    url = str(item['media_url']).strip()
+    payload = {'content': str(item.get('body') or '').strip(),
+               'mediaItems': [{'type': 'video' if url.lower().split('?')[0].endswith(('.mp4', '.mov', '.webm')) else 'image', 'url': url}],
+               'platforms': [{'platform': 'instagram', 'accountId': identifier(account['accountId'])}],
+               'publishNow': True}
+    request_id = str(uuid.uuid4())
+    now = utcnow()
+    with db() as c:
+        claim = c.execute("""INSERT INTO social_publications(content_id,request_id,status,scheduled_at,
+            payload_json,approved_by,created_at,updated_at) VALUES(%s,%s,'submitting',%s,%s,%s,%s,%s)
+            ON CONFLICT(content_id) DO NOTHING RETURNING id""",
+            (content_id, request_id, now, json.dumps(payload), user_id, now, now)).fetchone()
+        if not claim:
+            raise PublishingError('سبق إرسال طلب نشر لهذه المسودة. لن يتكرر الإرسال.')
+        c.execute("UPDATE social_content SET status='submitting',updated_at=%s WHERE id=%s", (now, content_id))
+    try:
+        response = provider_request(key, 'POST', '/posts', payload=payload, request_id=request_id)
+        post_id, state, results = publication_result(response, payload['platforms'])
+        save_result(content_id, post_id, state, results)
+    except PublishingError as exc:
+        save_result(content_id, None, 'needs_review', [], str(exc))
+        raise
+    log(user_id, 'social_auto_publish_requested', 'social_content', content_id, state)
+    return state
 
 
 def message_page(message, status=400):
@@ -122,7 +158,7 @@ def settings_page(request: Request):
     session = admin(request)
     status = connection_status()
     body = '<div class="nav"><a href="/content-center">مركز المحتوى</a><a href="/settings/media">إعدادات الإنتاج</a></div><div class="hero"><h1>ربط النشر لآفاق طويق</h1>'
-    body += '<p>YouTube: <b dir="ltr">@afaqtaw</b> · TikTok: <b dir="ltr">@afaqtawaiq6</b></p></div>'
+    body += '<p>YouTube: <b dir="ltr">@afaqtaw</b> · TikTok: <b dir="ltr">@afaqt79</b> · Instagram: <b dir="ltr">@afaqwaiq</b></p></div>'
     if status['configured']:
         body += '<div class="card"><b class="ok">مفتاح الربط محفوظ ومشفّر</b><p>آخر تحقق: ' + e(status['verified_at']) + '</p></div>'
     else:
@@ -156,7 +192,7 @@ async def save_settings(request: Request):
         VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET api_key_enc=excluded.api_key_enc,
         accounts_json=excluded.accounts_json,verified_at=excluded.verified_at,updated_by=excluded.updated_by''',
         (encrypted, json.dumps(accounts), utcnow(), session['user_id']))
-    log(session['user_id'], 'social_connection_verified', 'social_publishing', None, 'Verified Afaaq YouTube and TikTok')
+    log(session['user_id'], 'social_connection_verified', 'social_publishing', None, 'Verified Afaaq YouTube, TikTok and Instagram')
     return RedirectResponse('/settings/social', 303)
 
 
