@@ -179,6 +179,28 @@ async def receive(request: Request):
     if prepared is None:
         return {"ok":True,"duplicate":True}
     agent, reply = prepared
+    if agent == 'afaaq':
+        # Close the transport loop after the intake transaction has committed.
+        from app.zernio_whatsapp import phone as transport_phone
+        from app.freight_workflow import contact_owner, advance_owner_whatsapp_reply
+        identity = message.get('sender') or {}
+        inbound_phone = transport_phone(identity.get('phoneNumber') or identity.get('id') or '')
+        try:
+            advanced = await advance_owner_whatsapp_reply('+' + inbound_phone if inbound_phone else '', str(message.get('text') or ''))
+            if advanced and advanced.get('missing'):
+                reply = {'message': 'وصل ردك. لاستكمال عرض النقل للسائقين أرسل: ' + '، '.join(advanced['missing']) + '.'}
+            elif advanced and advanced.get('broadcast_id'):
+                reply = {'message': 'تم تسجيل الاتفاق وتجهيز وإرسال عرض الحمولة للسائقين المسجلين. سنعتمد أول سائق يوافق على العرض.'}
+            else:
+                saved = one("SELECT fields FROM zernio_requests WHERE conversation_id=? AND agent='afaaq'", (conversation_id,))
+                ref = (saved or {}).get('fields', {}).get('_last_transport_reference') if saved else None
+                if ref:
+                    shipment = one("SELECT id FROM shipments WHERE reference=?", (ref,))
+                    if shipment:
+                        await contact_owner(shipment['id'], approved=True, user_id=None)
+        except Exception as exc:
+            # Preserve the inbound reply even when the external provider is blocked.
+            log(None, 'transport_auto_advance_failed', 'whatsapp_conversation', None, str(exc)[:500])
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",
