@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.storage import db, get_session, rows, utcnow
+from app.storage import db, get_session, utcnow
 from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
@@ -37,6 +37,12 @@ def one(query, params=()):
     """Fetch one row through db() for compatibility with isolated WhatsApp tests."""
     with db() as connection:
         return connection.execute(query, params).fetchone()
+
+
+def rows(query, params=()):
+    """Fetch rows through db() for compatibility with isolated WhatsApp tests."""
+    with db() as connection:
+        return connection.execute(query, params).fetchall()
 
 
 def log(user_id, action, entity_type, entity_id=None, details=""):
