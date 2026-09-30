@@ -86,17 +86,17 @@ def _search(c, query):
     digits = re.sub(r'\D', '', q)
     lines = []
     for r in c.execute('''SELECT id,name,phone,status FROM accounts WHERE name ILIKE %s
-            OR (%s<>'' AND regexp_replace(coalesce(phone,''),'\D','','g') LIKE %s) ORDER BY id DESC LIMIT 5''',
+            OR (%s<>'' AND regexp_replace(coalesce(phone,''),'[^0-9]','','g') LIKE %s) ORDER BY id DESC LIMIT 5''',
                        (like, digits, '%' + (digits[-9:] if digits else '#') + '%')).fetchall():
         lines.append(f"عميل {r['id']} · {r['name']} · {r['phone'] or '-'} · {r['status']}")
     for r in c.execute('''SELECT id,driver_name,whatsapp_phone,availability FROM drivers WHERE driver_name ILIKE %s
-            OR (%s<>'' AND regexp_replace(coalesce(whatsapp_phone,''),'\D','','g') LIKE %s) ORDER BY id DESC LIMIT 5''',
+            OR (%s<>'' AND regexp_replace(coalesce(whatsapp_phone,''),'[^0-9]','','g') LIKE %s) ORDER BY id DESC LIMIT 5''',
                        (like, digits, '%' + (digits[-9:] if digits else '#') + '%')).fetchall():
         lines.append(f"سائق {r['id']} · {r['driver_name']} · {r['whatsapp_phone']} · {r['availability']}")
     for r in c.execute('''SELECT reference,origin,destination,status FROM shipments WHERE reference ILIKE %s
             OR origin ILIKE %s OR destination ILIKE %s ORDER BY id DESC LIMIT 5''', (like, like, like)).fetchall():
         lines.append(f"شحنة {r['reference']} · {r['origin']} ← {r['destination']} · {r['status']}")
-    return (f'نتائج «{q}»:' + '\n'.join(lines)) if lines else f'لم أجد نتائج لـ «{q}».'
+    return (f'نتائج «{q}»:\n' + '\n'.join(lines)) if lines else f'لم أجد نتائج لـ «{q}».'
 
 
 def _count(c, sql, args=()):
