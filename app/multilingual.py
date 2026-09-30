@@ -62,7 +62,7 @@ def translate(items, target):
               '(e.g. AF-12, NQ-5, WA-...), phone numbers, emails, URLs, numbers, amounts, dates, company and place names '
               '(you may add the local name in brackets). Keep line breaks and bullet symbols. Do not add or remove information. '
               'Return ONLY a JSON array of strings, same length and order as the input.')
-    body = {'model': MODEL, 'max_tokens': 1500, 'system': system,
+    body = {'model': MODEL, 'max_tokens': 2000, 'thinking': {'type': 'disabled'}, 'system': system,
             'messages': [{'role': 'user', 'content': json.dumps(items, ensure_ascii=False)}]}
     try:
         with httpx.Client(timeout=20) as client:
