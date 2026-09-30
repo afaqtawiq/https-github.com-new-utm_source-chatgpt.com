@@ -58,7 +58,7 @@ def ask_claude(actions, text):
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None
-    body = {'model': MODEL, 'max_tokens': 400, 'system': SYSTEM + '\n\n' + actions,
+    body = {'model': MODEL, 'max_tokens': 600, 'thinking': {'type': 'disabled'}, 'system': SYSTEM + '\n\n' + actions,
             'messages': [{'role': 'user', 'content': text[:1500]}]}
     try:
         with httpx.Client(timeout=25) as client:

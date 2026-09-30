@@ -75,7 +75,7 @@ async def extract(data, mime):
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         raise ValueError('قراءة الصور غير مفعّلة: يلزم ضبط ANTHROPIC_API_KEY على الخادم. أرسل تفاصيل الحمولة كتابةً مؤقتًا.')
-    body = {'model': os.getenv('LOAD_VISION_MODEL', 'claude-sonnet-5'), 'max_tokens': 800,
+    body = {'model': os.getenv('LOAD_VISION_MODEL', 'claude-sonnet-5'), 'max_tokens': 1200, 'thinking': {'type': 'disabled'},
             'messages': [{'role': 'user', 'content': [
                 {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': base64.b64encode(data).decode()}},
                 {'type': 'text', 'text': PROMPT}]}]}
