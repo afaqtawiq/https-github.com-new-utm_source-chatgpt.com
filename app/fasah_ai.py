@@ -181,17 +181,21 @@ def page(case, session, error=''):
              '<div class="scroll"><table><tr><th>#</th><th>الوصف</th><th>الكمية</th><th>القيمة</th><th>المنشأ</th><th>البند والرسم</th><th>الاشتراطات</th><th></th></tr>'
              + (items_html or '<tr><td colspan="8">لم تُستخرج بنود.</td></tr>') + '</table></div></div>')
     prompt = esc(chrome_prompt(case, ai))
-    body += f'''<div class="card"><h2>الإدخال في فسح عبر Claude in Chrome</h2>
-      <ol><li>افتح فسح بالزر أعلاه، وسجّل دخولك بنفسك، وافتح شاشة البيان.</li>
-      <li>افتح Claude in Chrome من شريط المتصفح (يتطلب تثبيت الإضافة واشتراكًا مدفوعًا في Claude).</li>
-      <li>انسخ التعليمات أدناه والصقها في Claude in Chrome. سيملأ الحقول أمامك دون أن يضغط تقديم.</li>
+    body += f'''<div class="card"><h2>🤖 الإدخال في فسح بواسطة Claude in Chrome</h2>
+      <p><button type="button" class="btn" id="launchFasah" data-url="{FASAH_URL}">نسخ التعليمات وفتح فسح ↗</button></p>
+      <ol><li>الزر أعلاه ينسخ تعليمات البيان كاملة ويفتح فسح في تبويب جديد. سجّل دخولك بنفسك وافتح شاشة البيان.</li>
+      <li>افتح Claude من أيقونته في شريط المتصفح (أو بالاختصار الذي تضبطه من chrome://extensions/shortcuts)، وتأكد أن تبويب فسح ضمن مجموعة تبويبات Claude.</li>
+      <li>الصق التعليمات (Ctrl + V) وأرسلها. سيملأ الحقول أمامك دون أن يضغط تقديم.</li>
       <li>راجع كل حقل، ثم قدّم البيان بنفسك.</li></ol>
-      <textarea id="chromePrompt" rows="12" style="width:100%;direction:rtl">{prompt}</textarea>
-      <p><button type="button" class="btn copy" data-target="chromePrompt">نسخ التعليمات</button>
-      <a class="btn" href="{CHROME_HELP}" target="_blank" rel="noopener noreferrer">طريقة تثبيت Claude in Chrome ↗</a></p></div>
+      <details><summary>عرض التعليمات</summary><textarea id="chromePrompt" rows="12" style="width:100%;direction:rtl">{prompt}</textarea></details>
+      <p class="muted">المتصفح لا يسمح لأي موقع بفتح لوحة Claude تلقائيًا؛ فتحها يكون بضغطتك على الأيقونة أو الاختصار. <a href="{CHROME_HELP}" target="_blank" rel="noopener noreferrer">مساعدة Claude in Chrome ↗</a></p></div>
       <script>document.querySelectorAll('.copy').forEach(function(b){{b.addEventListener('click',function(){{
         var v=b.dataset.target?document.getElementById(b.dataset.target).value:b.dataset.v;
-        navigator.clipboard.writeText(v).then(function(){{var t=b.textContent;b.textContent='تم النسخ ✓';setTimeout(function(){{b.textContent=t}},1500)}});}})}});</script>'''
+        navigator.clipboard.writeText(v).then(function(){{var t=b.textContent;b.textContent='تم النسخ ✓';setTimeout(function(){{b.textContent=t}},1500)}});}})}});
+      var L=document.getElementById('launchFasah');if(L){{L.addEventListener('click',function(){{
+        var open=function(){{window.open(L.dataset.url,'_blank','noopener,noreferrer');}};
+        navigator.clipboard.writeText(document.getElementById('chromePrompt').value).then(function(){{
+          L.textContent='تم نسخ التعليمات ✓ — الصقها في Claude داخل تبويب فسح';open();}},open);}})}}</script>'''
     return ws.render('مساعد المخلص', body)
 
 
