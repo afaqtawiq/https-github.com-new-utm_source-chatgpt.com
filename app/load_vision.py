@@ -127,7 +127,7 @@ def _start_workflow(shipment_id):
 
     def run():
         try:
-            asyncio.run(contact_owner(shipment_id))
+            asyncio.run(contact_owner(shipment_id, approved=True))
         except Exception:
             pass  # the workflow records its own status; the owner can retry from /freight-workflow
     threading.Thread(target=run, daemon=True).start()
