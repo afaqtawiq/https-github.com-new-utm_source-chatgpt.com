@@ -140,6 +140,14 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
                 ("رقم صاحب الشحنة غير متوفر", utcnow(), shipment_id))
         return
     missing = _shipment_requirements(item)
+    # Never cross the WhatsApp sending boundary with an unknown route. The approved
+    # owner template requires real origin/destination values; ask the operator to
+    # repair extraction on the same shipment instead of producing a non-matching
+    # free-form message that will be blocked by Meta.
+    if any(name in missing for name in ('مدينة أو موقع التحميل', 'مدينة أو موقع التنزيل')):
+        execute("UPDATE freight_negotiations SET status='needs_manual_data',last_error=?,updated_at=? WHERE shipment_id=?",
+                ("المسار غير مكتمل؛ صحح مدينة التحميل والتنزيل من النص المحفوظ ثم أعد التواصل. لم تُرسل رسالة", utcnow(), shipment_id))
+        return
     if not approved:
         status = 'needs_contact_approval' if missing else 'contact_ready'
         execute("UPDATE freight_negotiations SET status=?,last_error=?,updated_at=? WHERE shipment_id=?",
