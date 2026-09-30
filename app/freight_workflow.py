@@ -429,6 +429,12 @@ def workflow_detail(shipment_id: int, request: Request):
                    owner_states.get(item['negotiation_status'], 'لا يوجد معرّف إرسال موثق في هذا السجل'))
     driver_state = (f"عرض موجود — {broadcast['status']}؛ راجع سجل المستلمين" if broadcast else
                     'لم يُجهز عرض للسائقين بعد؛ يلزم استكمال بيانات الشحنة وتوثيق السعر وطريقة الدفع')
+    diagnostics = f"""<section class=card id=contact-diagnostics><h2>تشخيص التواصل</h2>
+    <p><b>status:</b> {esc(item.get('negotiation_status'))}</p>
+    <p><b>contact_channel:</b> {esc(item.get('contact_channel') or 'غير مسجل')}</p>
+    <p><b>provider_message_id:</b> {esc(item.get('provider_message_id') or 'لا يوجد')}</p>
+    <p><b>provider_call_id:</b> {esc(item.get('provider_call_id') or 'لا يوجد')}</p>
+    <p><b>last_error:</b> {esc(item.get('last_error') or 'لا يوجد')}</p></section>"""
     progress = f"""<section class=card id=shipment-progress><h2>ماذا تم في هذه الشحنة؟</h2>
     <p>الاستلام: محفوظة بالمرجع {esc(item['reference'])}.</p>
     <p>صاحب الشحنة: {esc(owner_state)}.</p><p>السائقون: {esc(driver_state)}.</p></section>"""
