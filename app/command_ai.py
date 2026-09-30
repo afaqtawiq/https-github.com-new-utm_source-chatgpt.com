@@ -35,6 +35,7 @@ WA_ACTIONS = """Allowed actions (WhatsApp, Afaq Tuwaiq logistics platform):
 - report {"period": "today"|"week"}           # activity summary: campaign sends/replies, new conversations, loads, shipments, drivers
 - tariff {"ar": [str], "en": [str]}          # customs code (HS/بند) and duty: up to 3 search phrasings each, in customs tariff wording
 - help {}
+- question {"text": str}                     # a question about customs procedures, requirements, documents or official links
 - unsupported {"reason": str}                 # anything that would send messages to customers, delete, pay, publish, or is not listed"""
 
 PAGE_ACTIONS = """Allowed action_type values (web command page):
@@ -133,6 +134,28 @@ def _report(c, period):
     return f'تقرير {label}:\n' + '\n'.join(lines)
 
 
+def answer_question(question):
+    """Management question answered from the customs knowledge base (same facts customers get)."""
+    from app.customs_knowledge import KNOWLEDGE
+    key = os.getenv('ANTHROPIC_API_KEY', '')
+    if not key:
+        return None
+    system = ('You answer questions from the management of Afaq Tuwaiq, a Saudi customs clearance and logistics company, '
+              'in clear Arabic, using ONLY the knowledge below. Send official links exactly as written, one per line. '
+              'If the knowledge does not cover it, say so briefly. Never invent facts, rates or links.\n\n' + KNOWLEDGE)
+    body = {'model': MODEL, 'max_tokens': 1200, 'thinking': {'type': 'disabled'}, 'system': system,
+            'messages': [{'role': 'user', 'content': str(question)[:2000]}]}
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.post('https://api.anthropic.com/v1/messages', json=body,
+                                   headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
+            response.raise_for_status()
+        text = ''.join(p.get('text', '') for p in response.json().get('content', []) if p.get('type') == 'text').strip()
+        return text[:3500] or None
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
+
+
 def run_ai_command(c, raw):
     parsed = ask_claude(WA_ACTIONS, raw)
     if not parsed:
@@ -161,6 +184,8 @@ def run_ai_command(c, raw):
     elif action == 'tariff':
         from app import tariff_lookup
         return '📘 ' + tariff_lookup.as_text(tariff_lookup.search_many(parsed.get('ar'), parsed.get('en')))
+    elif action == 'question':
+        return answer_question(parsed.get('text') or raw) or 'تعذر الرد على السؤال الآن؛ أعد المحاولة بعد قليل.'
     elif action == 'help':
         return wa.HELP
     else:
