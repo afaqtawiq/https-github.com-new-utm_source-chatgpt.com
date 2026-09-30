@@ -393,7 +393,7 @@ def workflow_detail(shipment_id: int, request: Request):
     current = session(request)
     item = one("""SELECT s.*,n.record_kind,n.id negotiation_id,n.owner_phone,n.status negotiation_status,n.asking_price,
         n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.unloading_location,n.payment_method,n.notes,n.last_error,
-        n.provider_message_id,n.provider_call_id,n.naqliat_load_id
+        n.provider_message_id,n.provider_call_id,n.contact_channel,n.naqliat_load_id
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404)
     classification = f"""<h2>تصنيف السجل</h2>
@@ -429,6 +429,12 @@ def workflow_detail(shipment_id: int, request: Request):
                    owner_states.get(item['negotiation_status'], 'لا يوجد معرّف إرسال موثق في هذا السجل'))
     driver_state = (f"عرض موجود — {broadcast['status']}؛ راجع سجل المستلمين" if broadcast else
                     'لم يُجهز عرض للسائقين بعد؛ يلزم استكمال بيانات الشحنة وتوثيق السعر وطريقة الدفع')
+    diagnostics = f"""<section class=card id=contact-diagnostics><h2>تشخيص التواصل</h2>
+    <p><b>status:</b> {esc(item.get('negotiation_status'))}</p>
+    <p><b>contact_channel:</b> {esc(item.get('contact_channel') or 'غير مسجل')}</p>
+    <p><b>provider_message_id:</b> {esc(item.get('provider_message_id') or 'لا يوجد')}</p>
+    <p><b>provider_call_id:</b> {esc(item.get('provider_call_id') or 'لا يوجد')}</p>
+    <p><b>last_error:</b> {esc(item.get('last_error') or 'لا يوجد')}</p></section>"""
     progress = f"""<section class=card id=shipment-progress><h2>ماذا تم في هذه الشحنة؟</h2>
     <p>الاستلام: محفوظة بالمرجع {esc(item['reference'])}.</p>
     <p>صاحب الشحنة: {esc(owner_state)}.</p><p>السائقون: {esc(driver_state)}.</p></section>"""
@@ -460,7 +466,15 @@ def workflow_detail(shipment_id: int, request: Request):
     replies = rows("SELECT summary,happened_at FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply' ORDER BY id DESC LIMIT 10", (shipment_id,))
     reply_html = "<h2>ردود صاحب الحمولة عبر واتساب</h2>" + ("".join("<p>" + esc(x['happened_at']) + "</p><p style='white-space:pre-wrap'>" + esc(x['summary']) + "</p>" for x in replies) or "<p>لم يصل رد مرتبط بهذه الشحنة بعد.</p>")
     classification += "<p><a href='/settings/whatsapp/channel'>حالة قناة واتساب وقوالب Meta</a></p>" + reply_html
-    controls = progress + source_html + classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
+    diagnostics = f"""<section class=card id=freight-diagnostics><h2>تشخيص مسار النقل</h2>
+    <table>
+    <tr><th>status</th><td>{esc(item.get('negotiation_status'))}</td></tr>
+    <tr><th>contact_channel</th><td>{esc(item.get('contact_channel') or '—')}</td></tr>
+    <tr><th>provider_message_id</th><td dir=ltr>{esc(item.get('provider_message_id') or '—')}</td></tr>
+    <tr><th>provider_call_id</th><td dir=ltr>{esc(item.get('provider_call_id') or '—')}</td></tr>
+    <tr><th>last_error</th><td>{esc(item.get('last_error') or '—')}</td></tr>
+    </table></section>"""
+    controls = diagnostics + progress + source_html + classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
     <p>راجع نتيجة الاستخراج. عند نقص المسار يمكنك تجهيز طلب استكمال لصاحب الشحنة إذا كان رقمه صحيحًا.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
     <input name=origin required placeholder='مدينة أو موقع التحميل' value='{esc(item.get('origin'))}'>
