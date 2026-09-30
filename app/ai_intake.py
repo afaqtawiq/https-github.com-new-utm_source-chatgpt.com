@@ -17,6 +17,7 @@ import httpx
 
 from app import afaaq_customer_reply as base
 from app.customs_knowledge import KNOWLEDGE
+from app import tariff_lookup
 
 MODEL = os.getenv('INTAKE_MODEL', 'claude-sonnet-5')
 KEYS = ('service', 'route', 'cargo', 'deadline')
@@ -43,25 +44,35 @@ Rules you must never break:
   duties and VAT work, using ONLY the knowledge below. Give the general requirement for the goods type, say the Afaq
   team confirms the exact requirement for their specific product (by HS code) before shipping, then ask the next
   missing detail. If the knowledge does not cover it, say the team will confirm; never guess.
-- Never state a duty rate or an amount for a specific product; explain the general structure only.
+- Customs code (البند الجمركي) and duty rate questions for a specific product: if no tariff_candidates are given,
+  set "tariff_lookup" to up to 3 search phrasings in Arabic and 3 in English using customs tariff wording
+  (for example sofa -> "مقاعد بهياكل خشب" / "seats with wooden frames"), and keep the reply to one short line.
+  If tariff_candidates are given, answer from them ONLY: the 1 to 3 best matching 12-digit codes with their duty,
+  say it is a preliminary classification from the GCC unified customs tariff and the broker confirms the final code,
+  add the general requirements for that goods type from the knowledge, then ask the next missing detail.
+  If no candidate fits, say the team will classify it. Never state a duty rate that is not in tariff_candidates,
+  and never calculate an amount.
 - Use correct Arabic spelling (for example يؤكد, not يأكد).
 
 Return ONLY a JSON object:
 {"new_request": true|false,   // true only if the message clearly describes a different shipment from the saved request
  "fields": {"service": str|null, "route": str|null, "cargo": str|null, "deadline": str|null, "company": str|null},  // only what THIS message states
+ "tariff_lookup": {"ar": [str], "en": [str]} | null,
  "reply": str}"""
 
 
 SYSTEM = SYSTEM + '\n\nKnowledge (Arabic):\n' + KNOWLEDGE
 
 
-def ask(fields, pending, text):
+def ask(fields, pending, text, candidates=None):
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None
     saved = {k: fields.get(k) for k in KEYS + ('company',) if fields.get(k)}
-    user = json.dumps({'saved_request': saved, 'last_question_asked': pending, 'customer_message': text[:4000]},
-                      ensure_ascii=False)
+    payload = {'saved_request': saved, 'last_question_asked': pending, 'customer_message': text[:4000]}
+    if candidates is not None:
+        payload['tariff_candidates'] = candidates or 'no matching lines found'
+    user = json.dumps(payload, ensure_ascii=False)
     body = {'model': MODEL, 'max_tokens': 1000, 'thinking': {'type': 'disabled'}, 'system': SYSTEM, 'messages': [{'role': 'user', 'content': user}]}
     try:
         with httpx.Client(timeout=25) as client:
@@ -89,6 +100,13 @@ def reply(fields, pending, text, selection, updates, greeting):
     ai = ask(fields, pending, raw)
     if not ai:
         return _fallback(fields, pending, text, selection, updates, greeting)
+    lookup = ai.get('tariff_lookup')
+    if isinstance(lookup, dict) and (lookup.get('ar') or lookup.get('en')):
+        items = tariff_lookup.search_many(lookup.get('ar'), lookup.get('en'))
+        second = ask(fields, pending, raw, candidates=tariff_lookup.as_prompt(items))
+        if second:
+            second['fields'] = {**(ai.get('fields') or {}), **(second.get('fields') or {})}
+            ai = second
     fields = dict(fields)
     if ai.get('new_request') and any(fields.get(k) for k in KEYS):
         history = list(fields.get('_previous_requests') or [])
