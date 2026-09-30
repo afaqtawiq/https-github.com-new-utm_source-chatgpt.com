@@ -14,6 +14,7 @@ from app import load_vision  # noqa: F401  (owner load screenshots on WhatsApp a
 from app import command_ai  # noqa: F401  (management messages are understood in free Arabic)
 from app import multilingual  # noqa: F401  (customers are answered in Arabic, English or Chinese)
 from app import ai_intake  # noqa: F401  (customer conversations understood by Claude, rule-based fallback)
+from app import fasah_ai  # broker assistant inside the FASAH workspace
 
 
 def _afaq_only(text, interactive="", previous=None):
@@ -21,3 +22,4 @@ def _afaq_only(text, interactive="", previous=None):
 
 
 _receiver.choose_agent = _afaq_only
+app.include_router(fasah_ai.router)
