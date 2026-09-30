@@ -33,6 +33,7 @@ WA_ACTIONS = """Allowed actions (WhatsApp, Afaq Tuwaiq logistics platform):
 - list_customers {}
 - search {"query": str}                      # find a customer, driver or shipment by name, phone or reference
 - report {"period": "today"|"week"}           # activity summary: campaign sends/replies, new conversations, loads, shipments, drivers
+- tariff {"ar": [str], "en": [str]}          # customs code (HS/بند) and duty: up to 3 search phrasings each, in customs tariff wording
 - help {}
 - unsupported {"reason": str}                 # anything that would send messages to customers, delete, pay, publish, or is not listed"""
 
@@ -157,6 +158,9 @@ def run_ai_command(c, raw):
         return '🔎 ' + _search(c, parsed.get('query'))
     elif action == 'report':
         return '📊 ' + _report(c, parsed.get('period'))
+    elif action == 'tariff':
+        from app import tariff_lookup
+        return '📘 ' + tariff_lookup.as_text(tariff_lookup.search_many(parsed.get('ar'), parsed.get('en')))
     elif action == 'help':
         return wa.HELP
     else:
