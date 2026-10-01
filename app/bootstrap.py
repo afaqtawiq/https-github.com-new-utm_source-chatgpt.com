@@ -65,6 +65,8 @@ def sensitive_permission(request):
   if path.endswith('/send/email') or path=='/customer-campaigns/schedule':return 'send_email'
   if path.endswith('/send/whatsapp') or path.endswith('/template'):return 'send_whatsapp'
  if request.method=='POST' and path=='/settings/whatsapp/channel/templates':return 'send_whatsapp'
+ if request.method=='POST' and path.startswith('/freight-workflow/') and path.endswith('/test-owner-inquiry'):
+  return 'send_whatsapp'
  if request.method=='POST' and path.startswith('/freight-workflow/') and path.endswith('/contact-owner'):
   return 'send_whatsapp' if os.getenv('FREIGHT_OWNER_CONTACT_CHANNEL','retell').lower()=='whatsapp' else 'make_phone_call'
  if request.method=='POST' and path.startswith('/tracking-updates/') and path.endswith('/send'):return 'send_whatsapp'
@@ -89,7 +91,7 @@ async def enterprise_security_guard(request,call_next):
   if not has_permission(sess,perm):return JSONResponse({'detail':'Permission does not permit this action','permission':perm},status_code=403)
   m=mfa_state(sess['user_id'])
   if not m or not m.get('mfa_enabled'):return JSONResponse({'detail':'MFA enrollment required for this sensitive action','mfa_setup':'/mfa','permission':perm},status_code=428)
-  if not recent_stepup(sess['id']):return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+(request.url.path.rsplit('/',1)[0] if request.url.path.endswith('/contact-owner') else '/settings/whatsapp/channel' if request.url.path=='/settings/whatsapp/channel/templates' else request.url.path),'permission':perm},status_code=428)
+  if not recent_stepup(sess['id']):return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+(request.url.path.rsplit('/',1)[0] if request.url.path.endswith(('/contact-owner','/test-owner-inquiry')) else '/settings/whatsapp/channel' if request.url.path=='/settings/whatsapp/channel/templates' else request.url.path),'permission':perm},status_code=428)
  from app.live_activity import tracked_request
  response=await tracked_request(request,call_next,sess);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(self), geolocation=()' if request.url.path in ('/retell-web-test','/commands') else 'camera=(), microphone=(), geolocation=()';return response
 for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router,mfa_stepup_router,security_operations_router,incident_response_router,retell_integration_router,phone_sales_router,crm_contacts_router):app.include_router(r)

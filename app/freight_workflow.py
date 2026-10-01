@@ -14,7 +14,7 @@ from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
 from app.logistics_parsing import phone as normalize_phone, accepts_offer, digits
-from app.transport_test import DISCLAIMER, display_reference, accepts_test_offer
+from app.transport_test import DISCLAIMER, display_reference, accepts_test_offer, owner_inquiry, owner_inquiry_digest
 
 
 router = APIRouter()
@@ -44,6 +44,9 @@ def _init_storage():
             created_at TIMESTAMPTZ NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL
         )""",
+        "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS test_owner_contact_status TEXT NOT NULL DEFAULT 'not_sent'",
+        "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS test_owner_approved_by BIGINT",
+        "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS test_owner_preview_digest TEXT",
         "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS record_kind TEXT NOT NULL DEFAULT 'shipment_request'",
         "ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS shipment_id BIGINT REFERENCES shipments(id) ON DELETE SET NULL",
         "ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS accepted_driver_id BIGINT REFERENCES drivers(id) ON DELETE SET NULL",
@@ -97,7 +100,7 @@ def ensure_negotiation(shipment_id, load_id=None, owner_phone="", weight_tons=No
 
 def _owner_message(item):
     if item.get('is_test'):
-        return DISCLAIMER + '\n' + item['reference'] + ': أرسل بيانات المحاكاة مع المرجع. لا يوجد اتفاق نقل فعلي.'
+        return owner_inquiry(item)
     origin = _usable_text(item.get('origin'))
     destination = _usable_text(item.get('destination'))
     route = (f"من {origin} إلى {destination}" if origin and destination else
@@ -542,7 +545,7 @@ def workflow_detail(shipment_id: int, request: Request):
     current = session(request)
     item = one("""SELECT s.*,n.record_kind,n.id negotiation_id,n.owner_phone,n.status negotiation_status,n.asking_price,
         n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.unloading_location,n.payment_method,n.notes,n.last_error,
-        n.provider_message_id,n.provider_call_id,n.contact_channel,n.naqliat_load_id
+        n.provider_message_id,n.provider_call_id,n.contact_channel,n.naqliat_load_id,n.test_owner_contact_status
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404)
     classification = f"""<h2>تصنيف السجل</h2>
@@ -623,6 +626,16 @@ def workflow_detail(shipment_id: int, request: Request):
     <tr><th>provider_call_id</th><td dir=ltr>{esc(item.get('provider_call_id') or '—')}</td></tr>
     <tr><th>last_error</th><td>{esc(item.get('last_error') or '—')}</td></tr>
     </table></section>"""
+    owner_contact_control = f"""<form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>اعتماد التواصل مع صاحب الشحنة</button></form>"""
+    if item.get('is_test'):
+        owner_contact_control = '<p>حالة استفسار الاختبار: ' + esc(item.get('test_owner_contact_status')) + '</p>'
+        if (current.get('role') == 'admin' and item.get('test_owner_contact_status') in ('not_sent', 'blocked')
+                and not item.get('provider_message_id') and item['negotiation_status'] == 'awaiting_owner'):
+            owner_contact_control += f"""<form method=post action='/freight-workflow/{shipment_id}/test-owner-inquiry'>
+            <input type=hidden name=csrf value='{esc(current['csrf'])}'>
+            <input type=hidden name=test_owner_preview value='{owner_inquiry_digest(item)}'>
+            <label><input type=checkbox name=test_owner_confirmed value=yes required> راجعت استفسار الاختبار أعلاه ورقم صاحبه وأعتمد إرساله مرة واحدة</label>
+            <button>إرسال استفسار الاختبار المعلن لصاحبه</button></form>"""
     controls = diagnostics + progress + source_html + classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
     <p>راجع نتيجة الاستخراج. عند نقص المسار يمكنك تجهيز طلب استكمال لصاحب الشحنة إذا كان رقمه صحيحًا.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
@@ -632,7 +645,7 @@ def workflow_detail(shipment_id: int, request: Request):
     <input name=weight_tons type=number min=.01 step=.01 placeholder='الوزن بالطن' value='{esc(item.get('weight_tons'))}'>
     </div><button>حفظ البيانات المصححة يدويًا</button></form>{readiness}{manual_contact}<hr>
     <div class=card><h3>رسالة التواصل المقترحة</h3><p style='white-space:pre-wrap'>{esc(_owner_message(item))}</p></div>
-    <form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>اعتماد التواصل مع صاحب الشحنة</button></form>
+    {owner_contact_control}
     <form method=post action='/freight-workflow/{shipment_id}/agreement'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid><input name=asking_price type=number step=.01 placeholder='السعر المطلوب' value='{esc(item.get('asking_price'))}'><input name=agreed_owner_price type=number step=.01 required placeholder='السعر المتفق مع صاحب الشحنة' value='{esc(item.get('agreed_owner_price'))}'><input name=weight_tons type=number step=.01 placeholder='الوزن طن' value='{esc(item.get('weight_tons'))}'><input name=unloading_location placeholder='مكان التنزيل' value='{esc(item.get('unloading_location'))}'><input name=payment_method placeholder='طريقة الدفع' value='{esc(item.get('payment_method'))}'></div><textarea name=notes placeholder='ملخص التفاوض'>{esc(item.get('notes'))}</textarea><button>حفظ الاتفاق وتجهيز عرض السائقين ناقص 150 ريال</button></form>"""
     if item.get('is_test'):
         controls = '<h2 class=warn>' + DISCLAIMER + '</h2><p>قيم المحاكاة لا تمثل التزامًا ماليًا. أرسل شروط الاختبار مع المرجع من رقم صاحبه المسجل. لا يُرسل عرض السائقين تلقائيًا.</p>' + controls
@@ -751,7 +764,9 @@ async def save_manual_data(shipment_id: int, request: Request):
     now = utcnow()
     with db() as c:
         c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
-        locked = c.execute('SELECT record_kind FROM freight_negotiations WHERE shipment_id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        locked = c.execute('SELECT record_kind,test_owner_contact_status FROM freight_negotiations WHERE shipment_id=%s FOR UPDATE', (shipment_id,)).fetchone()
+        if item.get('is_test') and locked and locked['test_owner_contact_status'] not in ('not_sent', 'blocked'):
+            raise HTTPException(409, 'بدأ إرسال استفسار الاختبار؛ لا تغيّر صاحبه أو مساره أثناء انتظار النتيجة')
         if locked and locked['record_kind'] == 'carrier_offer':
             raise HTTPException(409, 'هذا عرض ناقل وليس طلب حمولة')
         if c.execute("SELECT id FROM driver_broadcasts WHERE shipment_id=%s AND status NOT IN ('cancelled','rejected') LIMIT 1", (shipment_id,)).fetchone():
@@ -766,6 +781,61 @@ async def save_manual_data(shipment_id: int, request: Request):
     log(current["user_id"], "freight_manual_data_updated", "shipment", shipment_id,
         origin + " → " + destination)
     return RedirectResponse(f"/freight-workflow/{shipment_id}", 303)
+
+
+async def send_test_owner_inquiry(shipment_id, user_id, preview):
+    """Single-flight disclosed inquiry; uncertain results never retry themselves."""
+    if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
+        raise HTTPException(409, 'الإرسال الخارجي غير مفعّل؛ لم تُرسل الرسالة')
+    with db() as c:
+        item = c.execute("""SELECT s.*,n.owner_phone,n.status negotiation_status,n.provider_message_id,
+            n.test_owner_contact_status FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
+            WHERE s.id=%s FOR UPDATE OF s,n""", (shipment_id,)).fetchone()
+        if not item or not item.get('is_test'):
+            raise HTTPException(409, 'هذا الإجراء مخصص لسجل اختبار معلن فقط')
+        if (not user_id or not _valid_phone(item.get('owner_phone'))
+                or preview != owner_inquiry_digest(item)):
+            raise HTTPException(400, 'راجع نص الاختبار ورقم صاحبه من الصفحة الحالية قبل الإرسال')
+        if (item['negotiation_status'] != 'awaiting_owner' or item.get('provider_message_id')
+                or item['test_owner_contact_status'] not in ('not_sent', 'blocked')):
+            raise HTTPException(409, 'بدأ إرسال استفسار الاختبار أو وصلت نتيجته أو تقدم الاختبار؛ لا تكرر الإرسال')
+        c.execute("""UPDATE freight_negotiations SET test_owner_contact_status='sending',
+            test_owner_approved_by=%s,test_owner_preview_digest=%s,last_error=NULL,updated_at=%s WHERE shipment_id=%s""",
+            (user_id, preview, utcnow(), shipment_id))
+    try:
+        # The existing adapter verifies the configured account and current owner
+        # conversation window, or requires an exact approved template match.
+        result = await send_text_message(item['owner_phone'], owner_inquiry(item))
+        messages = result.get('messages') or []
+        receipt = str(messages[0].get('id') or '') if messages else ''
+        if not receipt:
+            raise RuntimeError('لم يرجع المزود معرفًا؛ تحقق من المحادثة قبل أي محاولة أخرى')
+        with db() as c:
+            now = utcnow()
+            c.execute("""UPDATE freight_negotiations SET test_owner_contact_status='sent',provider_message_id=%s,
+                contact_channel='whatsapp',contacted_at=%s,last_error=NULL,updated_at=%s WHERE shipment_id=%s""",
+                (receipt, now, now, shipment_id))
+            c.execute("""INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at,created_by)
+                VALUES(%s,'test_owner_inquiry_submitted',%s,'test_pending',%s,%s)""",
+                (shipment_id, 'اختبار معلن؛ قبول المزود لا يثبت التسليم أو القراءة. Provider ID: ' + receipt, now, user_id))
+        return receipt
+    except Exception as exc:
+        state = 'blocked' if isinstance(exc, WhatsAppBlocked) else 'uncertain'
+        execute("""UPDATE freight_negotiations SET test_owner_contact_status=?,last_error=?,updated_at=?
+            WHERE shipment_id=? AND test_owner_contact_status='sending'""", (state, str(exc)[:500], utcnow(), shipment_id))
+        return None
+
+
+@router.post('/freight-workflow/{shipment_id}/test-owner-inquiry')
+async def test_owner_inquiry_now(shipment_id: int, request: Request):
+    current = session(request)
+    data = form(await request.body())
+    if current.get('role') != 'admin' or data.get('csrf') != current['csrf']:
+        raise HTTPException(403)
+    if data.get('test_owner_confirmed') != 'yes':
+        raise HTTPException(400, 'يلزم اعتماد استفسار الاختبار المعلن صراحة')
+    await send_test_owner_inquiry(shipment_id, current['user_id'], data.get('test_owner_preview'))
+    return RedirectResponse(f'/freight-workflow/{shipment_id}', 303)
 
 
 @router.post("/freight-workflow/{shipment_id}/contact-owner")

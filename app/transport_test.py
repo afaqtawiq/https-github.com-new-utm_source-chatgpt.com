@@ -46,3 +46,19 @@ def test_broadcast_context(campaign, *, approved=False):
                      or campaign.get('test_preview_digest') != digest):
         raise HTTPException(409, 'يلزم اعتماد صريح لمعاينة الاختبار الحالية ومستلميها؛ لم تُرسل الرسالة')
     return {'digest': digest, 'disclaimer': DISCLAIMER}
+
+
+def owner_inquiry(item):
+    if not item.get('is_test'):
+        raise HTTPException(409, 'هذا الإجراء مخصص لسجل اختبار معلن فقط')
+    return (DISCLAIMER + '\n'
+            + 'مرجع التجربة: ' + item['reference'] + '\n'
+            + 'المسار الافتراضي: ' + item['origin'] + ' → ' + item['destination'] + '\n'
+            + 'هل الحمولة الافتراضية متاحة للمحاكاة؟ أرسل مرجع التجربة مع بيانات محاكاة فقط:\n'
+            + 'السعر النهائي: رقم أكبر من 150 ريال\nالوزن: رقم بالطن\nالتنزيل: موقع تجريبي\nطريقة الدفع: محاكاة دون دفع\n'
+            + 'لن يترتب على الرد اتفاق نقل أو دفع، ولن يرسل عرض السائقين قبل مراجعته واعتماد الاختبار.')
+
+
+def owner_inquiry_digest(item):
+    return hashlib.sha256(json.dumps([item['owner_phone'], owner_inquiry(item)],
+                                     ensure_ascii=False).encode()).hexdigest()

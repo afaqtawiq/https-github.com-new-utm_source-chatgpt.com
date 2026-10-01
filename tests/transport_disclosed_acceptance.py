@@ -13,7 +13,7 @@ def run_disclosed(providers, inbound):
     from app import command_assistant as commands, freight_workflow as workflow
     from app.naqliat_connector import NaqliatLoad, _save
     from app.storage import one, rows, execute
-    from app.transport_test import DISCLAIMER, display_reference, test_broadcast_context
+    from app.transport_test import DISCLAIMER, display_reference, test_broadcast_context, owner_inquiry_digest
     from app.zernio_whatsapp import required_templates, template_parameters
 
     owner = '+966509999998'
@@ -32,6 +32,49 @@ def run_disclosed(providers, inbound):
     asyncio.run(workflow.contact_owner(sid, approved=True))
     assert len(providers.owner_calls) == before_owner_calls
     assert not workflow.sync_retell_negotiation({'shipment_id': sid, 'freight_negotiation': True}, {'agreed_price': 5000})
+
+    # Exercise the runnable browser route, with real middleware and single-flight
+    # PostgreSQL claims. The provider remains the fixture fake.
+    from app.bootstrap import app
+    from app.storage import create_session
+    from fastapi.testclient import TestClient
+    uid = one("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1")['id']
+    session_id, csrf, _ = create_session(uid)
+    web = TestClient(app, base_url='http://testserver', follow_redirects=False)
+    web.cookies.set('gla_session', session_id)
+    web.headers['origin'] = 'http://testserver'
+    inquiry_item = one('SELECT s.*,n.owner_phone FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?', (sid,))
+    inquiry_form = {'csrf':csrf, 'test_owner_confirmed':'yes', 'test_owner_preview':owner_inquiry_digest(inquiry_item)}
+    inquiry_path = f'/freight-workflow/{sid}/test-owner-inquiry'
+    detail = web.get(f'/freight-workflow/{sid}')
+    assert detail.status_code == 200 and inquiry_path in detail.text and DISCLAIMER in detail.text, detail.text
+    assert web.post(inquiry_path, data=inquiry_form).status_code == 428
+    assert len(providers.owner_calls) == before_owner_calls
+    with patch('app.bootstrap.mfa_state', return_value={'mfa_enabled':1}), patch('app.bootstrap.recent_stepup', return_value=False):
+        stepped = web.post(inquiry_path, data=inquiry_form)
+        assert stepped.status_code == 428 and f'/freight-workflow/{sid}' in stepped.json()['step_up']
+    with patch('app.bootstrap.mfa_state', return_value={'mfa_enabled':1}), patch('app.bootstrap.recent_stepup', return_value=True):
+        assert web.post(inquiry_path, data={**inquiry_form,'csrf':'wrong'}).status_code == 403
+        assert web.post(inquiry_path, data={**inquiry_form,'test_owner_confirmed':''}).status_code == 400
+        assert web.post(inquiry_path, data={**inquiry_form,'test_owner_preview':'stale'}).status_code == 400
+        barrier = Barrier(2)
+        def inquiry_once(_):
+            barrier.wait()
+            return web.post(inquiry_path, data=inquiry_form).status_code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(inquiry_once, range(2))) == [303,409]
+    assert len(providers.owner_calls) == before_owner_calls + 1
+    assert providers.owner_calls[-1][0] == owner and providers.owner_calls[-1][1].startswith(DISCLAIMER)
+    assert ref in providers.owner_calls[-1][1] and 'جدة → الشارقة' in providers.owner_calls[-1][1]
+    contacted = one('SELECT test_owner_contact_status,provider_message_id,status FROM freight_negotiations WHERE shipment_id=?', (sid,))
+    assert contacted['test_owner_contact_status'] == 'sent' and contacted['provider_message_id'].startswith('fake-owner-')
+    assert contacted['status'] == 'awaiting_owner'
+    assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='test_owner_inquiry_submitted'", (sid,))['n'] == 1
+    assert not rows('SELECT id FROM driver_broadcasts WHERE shipment_id=?', (sid,))
+    assert web.post(f'/freight-workflow/{sid}/manual-data', data={'csrf':csrf,'origin':'جدة','destination':'دبي','owner_phone':owner}).status_code == 409
+    before_owner_calls += 1
+    web.close()
+    print('PASS: disclosed owner inquiry UI, admin/CSRF/MFA checks, concurrent single send and persisted actual provider receipt.')
 
     def terms(reference=ref):
         return (reference + '\nالسعر النهائي: 2000 ريال\nالوزن: 20 طن'
