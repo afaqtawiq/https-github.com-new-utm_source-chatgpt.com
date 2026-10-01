@@ -168,7 +168,7 @@ def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
     return brand(result) if agent == 'afaaq' else result
 
 
-HEADER = os.getenv('AFAQ_MESSAGE_HEADER', '🌐 *Afaq Tuwaiq | آفاق طويق*')
+HEADER = os.getenv('AFAQ_MESSAGE_HEADER', '\U0001F310 *Afaq Tuwaiq | آفاق طويق*')
 
 
 def brand(result):
