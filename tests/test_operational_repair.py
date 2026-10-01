@@ -41,7 +41,7 @@ class Database:
         CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER,naqliat_load_id INTEGER,
             record_kind TEXT NOT NULL DEFAULT 'shipment_request',owner_phone TEXT,status TEXT,contact_channel TEXT,provider_call_id TEXT,provider_message_id TEXT,
             asking_price REAL,agreed_owner_price REAL,driver_offer_price REAL,weight_tons REAL,
-            unloading_location TEXT,payment_method TEXT,notes TEXT,last_error TEXT,contacted_at TEXT,agreed_at TEXT,updated_at TEXT);
+            unloading_location TEXT,payment_method TEXT,notes TEXT,last_error TEXT,contacted_at TEXT,agreed_at TEXT,updated_at TEXT,test_owner_contact_status TEXT DEFAULT 'not_sent',test_owner_approved_by INTEGER,test_owner_preview_digest TEXT);
         CREATE TABLE drivers(id INTEGER PRIMARY KEY,driver_name TEXT,whatsapp_phone TEXT,availability TEXT,offer_consent INTEGER);
         CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,raw_command TEXT,message TEXT,status TEXT,recipient_count INTEGER,
             sent_count INTEGER DEFAULT 0,failed_count INTEGER DEFAULT 0,created_by INTEGER,created_at TEXT,updated_at TEXT,
@@ -432,3 +432,57 @@ def test_disclosed_workflow_requires_explicit_approval_and_never_assigns_real_dr
     assert not freight.accept_driver_reply('+966500000003', 'موافق ' + display_reference('NQ-16', True))
     assert database.one('SELECT status,revenue,cost FROM shipments') == {'status':'test_completed','revenue':0,'cost':0}
     assert database.one('SELECT stage,driver_name,driver_phone FROM shipment_operations') == {'stage':'test_completed','driver_name':None,'driver_phone':None}
+
+
+@pytest.mark.parametrize('mode,state,receipt', [('success','sent','owner-receipt'), ('missing','uncertain',None), ('timeout','uncertain',None), ('blocked','blocked',None)])
+def test_disclosed_owner_inquiry_preserves_real_receipt_and_blocks_duplicate_send(modules, monkeypatch, mode, state, receipt):
+    _, freight, database = modules
+    from app.transport_test import DISCLAIMER, owner_inquiry_digest
+    from app.zernio_whatsapp import WhatsAppBlocked
+    database.execute("UPDATE shipments SET is_test=1,status='test_pending'")
+    database.execute("UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='whatsapp',agreed_owner_price=NULL")
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    calls = []
+    async def send(number, message):
+        calls.append((number, message))
+        if mode == 'blocked': raise WhatsAppBlocked('No verified window or matching approved template')
+        if mode == 'timeout': raise TimeoutError('uncertain')
+        return {'messages': [{'id':'owner-receipt'}]} if mode == 'success' else {'messages': []}
+    monkeypatch.setattr(freight, 'send_text_message', send)
+    item = database.one('SELECT s.*,n.owner_phone FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id')
+    digest = owner_inquiry_digest(item)
+    assert asyncio.run(freight.send_test_owner_inquiry(1, 1, digest)) == receipt
+    result = database.one('SELECT test_owner_contact_status,provider_message_id,status FROM freight_negotiations')
+    assert result == {'test_owner_contact_status':state,'provider_message_id':receipt,'status':'awaiting_owner'}
+    assert len(calls) == 1 and calls[0][1].startswith(DISCLAIMER)
+    assert 'NQ-16' in calls[0][1] and 'الرياض → جدة' in calls[0][1]
+    assert not database.rows('SELECT * FROM driver_broadcasts')
+    if mode != 'blocked':
+        with pytest.raises(HTTPException): asyncio.run(freight.send_test_owner_inquiry(1, 1, digest))
+        assert len(calls) == 1
+    assert database.one('SELECT COUNT(*) n FROM shipment_events')["n"] == (1 if receipt else 0)
+
+
+def test_disclosed_owner_inquiry_checks_role_csrf_preview_and_real_record(modules, monkeypatch):
+    _, freight, database = modules
+    from app.transport_test import owner_inquiry_digest
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','1')
+    async def forbidden(*args): raise AssertionError('Unauthorized owner send')
+    monkeypatch.setattr(freight, 'send_text_message', forbidden)
+    with pytest.raises(HTTPException): asyncio.run(freight.send_test_owner_inquiry(1,1,'irrelevant'))
+    database.execute("UPDATE shipments SET is_test=1,status='test_pending'")
+    database.execute("UPDATE freight_negotiations SET status='awaiting_owner'")
+    item = database.one('SELECT s.*,n.owner_phone FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id')
+    digest = owner_inquiry_digest(item)
+    async def body(): return urllib.parse.urlencode({'csrf':'csrf','test_owner_confirmed':'yes','test_owner_preview':digest}).encode()
+    request = types.SimpleNamespace(body=body)
+    monkeypatch.setattr(freight,'session',lambda _: {'role':'transport','user_id':1,'csrf':'csrf'})
+    with pytest.raises(HTTPException) as exc: asyncio.run(freight.test_owner_inquiry_now(1,request))
+    assert exc.value.status_code == 403
+    monkeypatch.setattr(freight,'session',lambda _: {'role':'admin','user_id':1,'csrf':'different'})
+    with pytest.raises(HTTPException) as exc: asyncio.run(freight.test_owner_inquiry_now(1,request))
+    assert exc.value.status_code == 403
+    database.execute("UPDATE freight_negotiations SET owner_phone='+966500000005'")
+    with pytest.raises(HTTPException) as exc: asyncio.run(freight.send_test_owner_inquiry(1,1,digest))
+    assert exc.value.status_code == 400
+    assert database.one('SELECT test_owner_contact_status FROM freight_negotiations')['test_owner_contact_status'] == 'not_sent'
