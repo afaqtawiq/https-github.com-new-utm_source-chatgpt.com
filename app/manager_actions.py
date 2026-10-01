@@ -188,6 +188,15 @@ def ask_claude(actions, text):
 def run_ai_command(c, raw):
     parsed = _original_ask(command_ai.WA_ACTIONS, raw)
     if parsed and parsed.get('action') == 'send_message':
+        if not command_ai.explicit_action_request(raw, 'send_message'):
+            return command_ai.clarify_action('send_message')
+        # Do not let an incomplete request acquire an invented recipient or
+        # message from the classifier. Ask for explicit wording instead.
+        target = admin.normalize(parsed.get('to'))
+        content = admin.normalize(parsed.get('text'))
+        request = admin.normalize(raw)
+        if not target or not content or target not in request or content not in request:
+            return 'لمن تريد إرسال الرسالة، وما نصها بالضبط؟ اذكر المستلم والنص في رسالة واحدة.'
         return send_message(c, parsed)
     _answers[(command_ai.WA_ACTIONS, raw)] = parsed
     try:
