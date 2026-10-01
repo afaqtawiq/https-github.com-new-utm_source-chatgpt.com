@@ -5,7 +5,7 @@ the question the agent asked last, and the customer's message, and returns:
   * which request details the message actually states (service, route, cargo, deadline, company),
   * whether the message is about a NEW shipment rather than the saved one,
   * a short, natural reply that asks for the next missing detail.
-Hard rules in the prompt: no prices, no guaranteed dates, no booking or payment confirmation,
+Hard rules in the prompt: only the approved Afaq price list, no guaranteed dates, no booking or payment confirmation,
 no invented facts. The previous rule-based reply is kept as the fallback, so a Claude error
 never leaves a customer without an answer.
 """
@@ -32,7 +32,12 @@ service (what they need), route (port of arrival or customs port; for transport 
 cargo (goods type and weight, quantity or number of containers), deadline (expected arrival or required date).
 
 Rules you must never break:
-- Never give prices, costs, rates or estimates. If asked, say the team prepares a quotation once the details are complete.
+- Prices: quote ONLY Afaq's approved prices from the knowledge (clearance per container by number of containers in the
+  bill of lading, and the listed transport routes), exactly as written, and say they are per the general price offer
+  valid 15 days and clearly state (in plain words: لا تشمل) that they exclude customs duties, import VAT, government,
+  port and shipping-line fees, which the importer pays.
+  You may multiply a listed rate by the number of containers the customer stated. For anything not in the list
+  (other routes, cities or services), say the team sends a dedicated quotation. Never invent or estimate other prices.
 - Never promise dates, clearance times or outcomes, and never confirm a booking, payment or approval.
 - Never invent facts about a shipment, a carrier or regulations. If unsure, say the team will confirm.
 - Ask for only ONE missing detail at a time, the most important one first (service, route, cargo, deadline).
