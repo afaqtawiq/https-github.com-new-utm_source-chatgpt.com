@@ -118,7 +118,7 @@ def run(providers):
 
     def inbound(event, sender, text, *, account=ACCOUNT, conversation=None,
                 participant=None, sender_id=None, conversation_group=False,
-                message_group=False, direction='incoming', signature=True):
+                message_group=False, direction='incoming', signature=True, metadata=None):
         sender = sender.lstrip('+')
         payload = {
             'id': event, 'event': 'message.received',
@@ -133,6 +133,8 @@ def run(providers):
                 'sender': {'phoneNumber': sender, 'id': sender_id if sender_id is not None else sender},
             },
         }
+        if metadata is not None:
+            payload['metadata'] = metadata
         body = json.dumps(payload, ensure_ascii=False).encode()
         digest = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
         response = client.post('/webhooks/zernio', content=body, headers={
@@ -319,6 +321,44 @@ def run(providers):
         assert negotiation(guarded) == baseline
         print('PASS: wrong account, group messages, mismatched identities and unrelated Afaaq replies cannot advance freight.')
 
+        # Signed quote metadata resolves the older pending row without any visible
+        # reference. A stale quote cannot fall back to the remaining unique row.
+        quote_owner = '+966500000151'
+        older, _ = create_request('quote-older', quote_owner)
+        newer, _ = create_request('quote-newer', quote_owner)
+        older_receipt = negotiation(older)['provider_message_id']
+        quote = {'quotedMessageId':'different-meta-perspective',
+                 'quotedMessage':{'messageId':'internal-zernio-id','platformMessageId':older_receipt}}
+        untouched = negotiation(newer)
+        inbound('quote-older-terms', quote_owner, terms(2800), metadata=quote)
+        assert_offer(older, 2800)
+        assert negotiation(newer) == untouched
+        assert inbound('quote-older-terms', quote_owner, terms(2800), metadata=quote)['duplicate']
+        inbound('quote-stale', quote_owner, terms(9900), metadata=quote)
+        inbound('quote-unknown', quote_owner, terms(9900), metadata={'quotedMessageId':'unknown'})
+        inbound('quote-malformed', quote_owner, terms(9900), metadata={'quotedMessage':{'messageId':'internal-only'}})
+        assert negotiation(newer) == untouched and not broadcasts(newer)
+        assert not asyncio.run(workflow.advance_owner_whatsapp_reply(quote_owner, terms(9900),
+            shipment_id=newer['id'], quoted_message_id=older_receipt))
+        inbound('quote-newer-unique', quote_owner, terms(2900))
+        assert_offer(newer, 2900)
+        # A route can disambiguate, but only terms from that same new message count.
+        route_owner = '+966500000152'
+        route_a, _ = create_request('route-a', route_owner, weight=None)
+        route_b, _ = create_request('route-b', route_owner, weight=None)
+        execute('UPDATE shipments SET origin=?,destination=? WHERE id=?', ('جدة','الشارقة',route_b['id']))
+        route_before = negotiation(route_a)
+        inbound('route-ambiguous', route_owner, terms(9000))
+        assert not broadcasts(route_a) and not broadcasts(route_b)
+        assert 'NQ-' not in providers.replies['route-ambiguous']['message']
+        assert 'WA-' not in providers.replies['route-ambiguous']['message']
+        inbound('route-only', route_owner, 'جدة إلى الشارقة')
+        assert negotiation(route_b)['asking_price'] is None and not broadcasts(route_b)
+        inbound('route-terms', route_owner, 'جدة إلى الشارقة\n' + terms(3100))
+        assert_offer(route_b, 3100)
+        assert negotiation(route_a) == route_before
+        print('PASS: reference-free owner quote/route/unique correlation; stale quotes and ambiguous terms stay isolated.')
+
         # Multiple independent shipments for one owner require an explicit,
         # unique matching reference. No newest-shipment fallback is permitted.
         shared_owner = '+966500000103'
@@ -328,8 +368,9 @@ def run(providers):
         first_before, second_before = negotiation(first), negotiation(second)
         ambiguous = terms(2400)
         inbound('shared-ambiguous', shared_owner, ambiguous)
-        assert first['reference'] in providers.replies['shared-ambiguous']['message']
-        assert second['reference'] in providers.replies['shared-ambiguous']['message']
+        assert first['reference'] not in providers.replies['shared-ambiguous']['message']
+        assert second['reference'] not in providers.replies['shared-ambiguous']['message']
+        assert 'رد مباشرة' in providers.replies['shared-ambiguous']['message']
         assert negotiation(first) == first_before and negotiation(second) == second_before
         assert not asyncio.run(workflow.advance_owner_whatsapp_reply(shared_owner, ambiguous))
         inbound('shared-wrong-reference', shared_owner, terms(2400, 'WA-000000000000'))

@@ -58,10 +58,17 @@ async def templates(c):
 
 
 def required_templates():
-    from app.freight_workflow import _owner_message
+    from app.transport_owner import inquiry
+    from app.transport_test import DISCLAIMER
     return [
+        {'name': 'afaaq_transport_owner_inquiry_v3_ar', 'language': 'ar', 'category': 'MARKETING',
+         'components': [{'type': 'body', 'text': inquiry('{{1}}', '{{2}}'),
+                         'example': {'body_text': [['جدة', 'الشارقة']]}}]},
+        {'name': 'afaaq_transport_test_owner_inquiry_v1_ar', 'language': 'ar', 'category': 'MARKETING',
+         'components': [{'type': 'body', 'text': DISCLAIMER + '\n' + inquiry('{{1}}', '{{2}}'),
+                         'example': {'body_text': [['جدة', 'الشارقة']]}}]},
         {'name': 'afaaq_transport_owner_inquiry_v2_ar', 'language': 'ar', 'category': 'MARKETING',
-         'components': [{'type': 'body', 'text': _owner_message({'origin': '{{1}}', 'destination': '{{2}}'}),
+         'components': [{'type': 'body', 'text': 'السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n\nبخصوص الحمولة من {{1}} إلى {{2}}، هل ما زالت متاحة؟\n\nنرجو توضيح:\n• موقع التحميل في {{1}}: هل داخل الميناء أم خارجه؟\n• موقع التنزيل في {{2}}.\n• نوع البضاعة ووزنها الفعلي ونوع الشاحنة المطلوبة.\n• موعد التحميل.\n• السعر المعروض للنقل وطريقة وموعد الدفع.\n\nللتواصل مع آفاق طويق عبر واتساب فقط:\n+966530130435',
                          'example': {'body_text': [['رابغ', 'دبي']]}}]},
         {'name': 'afaaq_transport_driver_offer_v1_ar', 'language': 'ar', 'category': 'MARKETING',
          'components': [{'type': 'body', 'text': 'عرض حمولة من آفاق طويق — {{1}}\nالمسار: {{2}} → {{3}}\nالوزن: {{4}} طن\nسعر السائق: {{5}} ريال\nالتنزيل: {{6}}\nالدفع: {{7}}\nللرغبة اكتب: موافق {{1}}\nشكرًا لتعاونك.',

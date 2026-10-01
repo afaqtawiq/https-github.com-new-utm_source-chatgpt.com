@@ -14,6 +14,7 @@ from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
 from app.logistics_parsing import phone as normalize_phone, accepts_offer, digits
+from app.transport_owner import inquiry, select_pending, loading_port_status
 from app.transport_test import DISCLAIMER, display_reference, accepts_test_offer, owner_inquiry, owner_inquiry_digest
 
 
@@ -44,6 +45,7 @@ def _init_storage():
             created_at TIMESTAMPTZ NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL
         )""",
+        "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS loading_port_status TEXT",
         "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS test_owner_contact_status TEXT NOT NULL DEFAULT 'not_sent'",
         "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS test_owner_approved_by BIGINT",
         "ALTER TABLE freight_negotiations ADD COLUMN IF NOT EXISTS test_owner_preview_digest TEXT",
@@ -101,24 +103,8 @@ def ensure_negotiation(shipment_id, load_id=None, owner_phone="", weight_tons=No
 def _owner_message(item):
     if item.get('is_test'):
         return owner_inquiry(item)
-    origin = _usable_text(item.get('origin'))
-    destination = _usable_text(item.get('destination'))
-    route = (f"من {origin} إلى {destination}" if origin and destination else
-             f"من {origin}" if origin else f"إلى {destination}" if destination else '')
-    loading = (f"موقع التحميل في {origin}" if origin else 'مدينة التحميل وموقعها')
-    unloading = (f"موقع التنزيل في {destination}" if destination else 'مدينة التنزيل وموقعها')
-    return (
-        "السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n\n"
-        f"بخصوص الحمولة{(' ' + route) if route else ''}، هل ما زالت متاحة؟\n\n"
-        "نرجو توضيح:\n"
-        f"• {loading}: هل داخل الميناء أم خارجه؟\n"
-        f"• {unloading}.\n"
-        "• نوع البضاعة ووزنها الفعلي ونوع الشاحنة المطلوبة.\n"
-        "• موعد التحميل.\n"
-        "• السعر المعروض للنقل وطريقة وموعد الدفع.\n\n"
-        "للتواصل مع آفاق طويق عبر واتساب فقط:\n"
-        "+966530130435"
-    )
+    return inquiry(_usable_text(item.get('origin')) or 'مدينة التحميل',
+                   _usable_text(item.get('destination')) or 'مدينة التنزيل')
 
 
 def _whatsapp_link(phone, message):
@@ -399,7 +385,7 @@ def _text_after(pattern, text):
     return match.group(1).strip() if match else ""
 
 
-async def advance_owner_whatsapp_reply(owner_phone, text, shipment_id=None):
+async def advance_owner_whatsapp_reply(owner_phone, text, shipment_id=None, quoted_message_id=None):
     """Advance only the identified owner's unambiguous pending shipment.
 
     The receiver passes its verified selection. Recheck identity and state under
@@ -409,18 +395,14 @@ async def advance_owner_whatsapp_reply(owner_phone, text, shipment_id=None):
     text = str(text or "")
     if not owner_phone:
         return None
-    references = set(re.findall(r"(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)", text.upper()))
     with db() as c:
         pending = c.execute("""SELECT s.*,n.shipment_id,n.owner_phone,n.record_kind,n.asking_price,
-            n.weight_tons,n.payment_method,n.unloading_location FROM freight_negotiations n
+            n.weight_tons,n.payment_method,n.unloading_location,n.loading_port_status,n.provider_message_id FROM freight_negotiations n
             JOIN shipments s ON s.id=n.shipment_id
             WHERE n.owner_phone=%s AND n.contact_channel='whatsapp' AND n.status='awaiting_owner'
               AND n.record_kind='shipment_request' ORDER BY s.id FOR UPDATE OF s,n""", (owner_phone,)).fetchall()
-        selected = [x for x in pending if x['reference'].upper() in references] if references else pending
-        if len(references) > 1 or len(selected) != 1:
-            return None
-        item = selected[0]
-        if item.get('is_test') and item['reference'].upper() not in references:
+        item = select_pending(pending, text, quoted_message_id)
+        if item is None:
             return None
         if shipment_id is not None and item['shipment_id'] != shipment_id:
             return None
@@ -437,13 +419,14 @@ async def advance_owner_whatsapp_reply(owner_phone, text, shipment_id=None):
         if re.search(r'(?<!\w)(?:الوزن|وزن)', text) and (weight is None or not 0 < weight <= 1000 or re.search(r'(?:الوزن|وزن)[^\n،]*?(?:كجم|كيلو|kg)', text, re.I)):
             weight = 0  # Invalid or unsupported units must request clarification.
         payment = _text_after(r"(?:طريقة الدفع|الدفع)", text)
+        port = loading_port_status(text)
         unloading = _text_after(r"(?:مكان التنزيل|موقع التنزيل|التنزيل)", text)
         item.update(weight_tons=weight if weight is not None else item['weight_tons'],
                     payment_method=payment or item['payment_method'],
                     unloading_location=unloading or item['unloading_location'])
         c.execute("""UPDATE freight_negotiations SET asking_price=%s,weight_tons=%s,
-            payment_method=%s,unloading_location=%s,notes=%s,updated_at=%s WHERE shipment_id=%s""",
-            (price, item['weight_tons'], item['payment_method'], item['unloading_location'], text[:3000], utcnow(), sid))
+            payment_method=%s,unloading_location=%s,loading_port_status=%s,notes=%s,updated_at=%s WHERE shipment_id=%s""",
+            (price, item['weight_tons'], item['payment_method'], item['unloading_location'], port or item.get('loading_port_status'), text[:3000], utcnow(), sid))
         missing = _shipment_requirements(item, agreement=True)
         if not price or not math.isfinite(float(price)) or price <= 150:
             missing.insert(0, "السعر النهائي")
@@ -644,11 +627,11 @@ def workflow_detail(shipment_id: int, request: Request):
     <input name=owner_phone required dir=ltr placeholder='+9665xxxxxxxx' value='{esc(item.get('owner_phone'))}'>
     <input name=weight_tons type=number min=.01 step=.01 placeholder='الوزن بالطن' value='{esc(item.get('weight_tons'))}'>
     </div><button>حفظ البيانات المصححة يدويًا</button></form>{readiness}{manual_contact}<hr>
-    <div class=card><h3>رسالة التواصل المقترحة</h3><p style='white-space:pre-wrap'>{esc(_owner_message(item))}</p></div>
+    <div class=card><h3>رسالة التواصل المقترحة</h3><p style='white-space:pre-wrap'>{esc(_owner_message(item)) if not item.get('provider_message_id') else 'سبق إرسال الاستفسار؛ لم يُعد إرساله أو تغيير الرسالة السابقة.'}</p></div>
     {owner_contact_control}
     <form method=post action='/freight-workflow/{shipment_id}/agreement'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid><input name=asking_price type=number step=.01 placeholder='السعر المطلوب' value='{esc(item.get('asking_price'))}'><input name=agreed_owner_price type=number step=.01 required placeholder='السعر المتفق مع صاحب الشحنة' value='{esc(item.get('agreed_owner_price'))}'><input name=weight_tons type=number step=.01 placeholder='الوزن طن' value='{esc(item.get('weight_tons'))}'><input name=unloading_location placeholder='مكان التنزيل' value='{esc(item.get('unloading_location'))}'><input name=payment_method placeholder='طريقة الدفع' value='{esc(item.get('payment_method'))}'></div><textarea name=notes placeholder='ملخص التفاوض'>{esc(item.get('notes'))}</textarea><button>حفظ الاتفاق وتجهيز عرض السائقين ناقص 150 ريال</button></form>"""
     if item.get('is_test'):
-        controls = '<h2 class=warn>' + DISCLAIMER + '</h2><p>قيم المحاكاة لا تمثل التزامًا ماليًا. أرسل شروط الاختبار مع المرجع من رقم صاحبه المسجل. لا يُرسل عرض السائقين تلقائيًا.</p>' + controls
+        controls = '<h2 class=warn>' + DISCLAIMER + '</h2><p>قيم المحاكاة لا تمثل التزامًا ماليًا. أرسل شروط الاختبار من رقم صاحبه المسجل، أو رد مباشرة على رسالة الاستفسار. لا يُرسل عرض السائقين تلقائيًا.</p>' + controls
     if broadcast:
         controls += f"<p><a href='/commands/broadcast/{broadcast['id']}'>مراجعة العرض وتأكيد الإرسال الجماعي مرة واحدة</a> — الحالة: {esc(broadcast['status'])}</p>"
     return HTMLResponse(_page(item["reference"], f"<div class=card><h1>{esc(item['reference'])}</h1><p>{esc(item['origin'])} → {esc(item['destination'])}</p><p>صاحب الشحنة: <span dir=ltr>{esc(item['owner_phone'])}</span> | الحالة: {esc(item['negotiation_status'])}</p><p class=warn>{esc(item.get('last_error'))}</p>{controls}</div>"))
