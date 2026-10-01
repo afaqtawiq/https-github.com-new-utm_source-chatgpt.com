@@ -79,6 +79,11 @@ def db(monkeypatch):
             yield c
     monkeypatch.setattr(receiver, 'db', context)
     monkeypatch.setattr(storage, 'db', context)
+    c.transport_actions = []
+    async def isolated_transport(action, reply):
+        c.transport_actions.append(dict(action))
+        return reply
+    monkeypatch.setattr(receiver, 'advance_transport', isolated_transport)
     monkeypatch.setenv('WHATSAPP_COMMAND_OWNER', '966507665873')
     monkeypatch.setenv('WHATSAPP_COMMAND_ACCOUNT_ID', 'business')
     monkeypatch.setenv('ZERNIO_WEBHOOK_SECRET', 'test-secret')
@@ -162,6 +167,7 @@ def test_shipper_reply_from_admin_or_customer_is_linked_once(db, outbound, sende
     assert receive(p)['duplicate']
     events = db.execute('SELECT * FROM shipment_events').fetchall()
     assert len(events) == 1 and events[0]['shipment_id'] == sid
+    assert len(db.transport_actions) == 1 and db.transport_actions[0]['shipment_id'] == sid
     assert events[0]['summary'] == text
     assert len(outbound) == 1 and 'NQ-21' in outbound[0]['message']
     assert 'أوامر الإدارة' not in outbound[0]['message']
@@ -183,8 +189,10 @@ def test_multiple_shipments_require_reference_without_guessing(db, outbound):
     receive(payload('نعم متاحة'))
     assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
     assert 'NQ-21' in outbound[-1]['message'] and 'NQ-22' in outbound[-1]['message']
+    assert not db.transport_actions
     receive(payload('NQ-22: نعم متاحة', event='evt-2'))
     assert db.execute('SELECT shipment_id FROM shipment_events').fetchone()['shipment_id'] == second
+    assert db.transport_actions[0]['shipment_id'] == second
 
 
 @pytest.mark.parametrize('text', ['NQ-99 نعم متاحة', 'NQ-21 و NQ-99 متاحة'])
@@ -219,7 +227,8 @@ def test_transport_employee_or_owner_creates_operational_job(db, outbound, sende
     assert json.loads(job['notes'])['submitter_phone'] == '+' + sender
     assert job['status'] == 'contact_ready'
     assert db.execute('SELECT COUNT(*) n FROM shipments').fetchone()['n'] == 1
-    assert len(outbound) == 1  # acknowledgement only; no owner contact or driver offer
+    assert len(outbound) == 1  # transport provider is isolated in these routing tests
+    assert len(db.transport_actions) == 1 and db.transport_actions[0]['kind'] == 'contact_owner'
 
 
 def test_transport_partial_then_second_independent_job(db, outbound):

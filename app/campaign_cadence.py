@@ -1,9 +1,11 @@
-"""Brochure campaign cadence: one introduction, one follow-up no sooner than 7 days later, then stop.
+"""Brochure campaign cadence: one introduction, one follow-up no sooner than 7 days later, then stop,
+with daily per-channel caps (WhatsApp 200, email 50 by default).
 
 Installed at startup by app.prospects_app; replaces customer_marketing.prepare so the daily
 schedule no longer re-sends the same brochure to the same address every day.
 """
 import json
+import os
 import secrets
 from datetime import datetime, timedelta
 
@@ -22,6 +24,19 @@ def prepare(user_id, day=None):
     cutoff = datetime.combine(day, datetime.min.time(), cm.RIYADH) - timedelta(days=7)
     listing = [x for x in listing if not (h := history.get((x['channel'], x['recipient']))) or
                (h['n'] < 2 and h['last'] is not None and h['last'] <= cutoff)]
+    # Daily caps keep WhatsApp inside Meta's messaging tier (250 new conversations / 24h at start)
+    # and protect sender reputation. Follow-ups (oldest first) go before first introductions;
+    # whoever does not fit today is picked up automatically on the next daily run.
+    caps = {'whatsapp': int(os.getenv('CAMPAIGN_WHATSAPP_DAILY_CAP', '200')), 'email': int(os.getenv('CAMPAIGN_EMAIL_DAILY_CAP', '50'))}
+    epoch = datetime(1970, 1, 1, tzinfo=cm.RIYADH)
+    listing.sort(key=lambda x: (0 if history.get((x['channel'], x['recipient'])) else 1,
+                                (history.get((x['channel'], x['recipient'])) or {}).get('last') or epoch))
+    used, capped = {}, []
+    for item in listing:
+        if used.get(item['channel'], 0) < caps.get(item['channel'], 0):
+            used[item['channel']] = used.get(item['channel'], 0) + 1
+            capped.append(item)
+    listing = capped
     url, base = cm.origin() + cm.PDF_PATH, cm.origin() + '/marketing/unsubscribe/'
     with db() as c:
         c.execute('SELECT pg_advisory_xact_lock(73002030)')

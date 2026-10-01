@@ -1,0 +1,253 @@
+"""Command assistant: understand any management message, not only fixed phrases.
+
+Two entry points, both keeping every existing safety rule:
+* WhatsApp owner commands (whatsapp_admin.run_command): the verified owner writes freely,
+  e.g. "ضيف لي سواق اسمه سعد جواله 0551234567 عنده تريلا". Claude maps the message to one
+  of the platform's real actions; the action then runs through the existing handler, and
+  the reply starts with what was understood. Messages no longer need to start with "آفاق".
+* The /commands page (command_assistant.parse_command): when the fixed patterns do not
+  match, Claude maps the text to the same action types the page already executes, so
+  customer messages, calls and driver broadcasts still go through their review screens.
+
+Claude only chooses an action and its fields; it never runs SQL or sends anything itself.
+Without ANTHROPIC_API_KEY everything behaves exactly as before.
+"""
+import json
+import os
+import re
+from datetime import datetime, timedelta, timezone
+
+import httpx
+
+from app import command_assistant as page
+from app import whatsapp_admin as wa
+
+MODEL = os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5')
+
+WA_ACTIONS = """Allowed actions (WhatsApp, Afaq Tuwaiq logistics platform):
+- list_drivers {}
+- add_driver {"name": str, "phone": str, "vehicle": str|null}
+- list_shipments {}
+- add_shipment {"reference": str, "origin": str, "destination": str}
+- shipment_status {"reference": str}
+- list_customers {}
+- search {"query": str}                      # find a customer, driver or shipment by name, phone or reference
+- report {"period": "today"|"week"}           # activity summary: campaign sends/replies, new conversations, loads, shipments, drivers
+- tariff {"ar": [str], "en": [str]}          # customs code (HS/بند) and duty: up to 3 search phrasings each, in customs tariff wording
+- help {}
+- question {"text": str}                     # a question about customs procedures, requirements, documents or official links
+- unsupported {"reason": str}                 # anything that would send messages to customers, delete, pay, publish, or is not listed"""
+
+PAGE_ACTIONS = """Allowed action_type values (web command page):
+- add_driver {"target": driver name, "phone": str, "vehicle_type": str}
+- driver_broadcast {"content": message text for all drivers}
+- call {"target": person or company, "content": purpose}
+- whatsapp {"target": person or company, "content": message}
+- email {"target": person or company, "content": message}
+- auto_contact {"target": customer or company, "content": topic}
+- run_discovery {}
+- navigate {"url": one of /dashboard /accounts /drivers /opportunities /approvals /shipments /shipping-agents /saber /content-center /discovery /sales-copilot /pipeline /activity /customer-campaigns /naqliat /freight-workflow /commands}
+- unknown {}"""
+
+SYSTEM = """You convert a manager's Arabic or English instruction for the Afaq Tuwaiq logistics platform
+into exactly one action. Saudi and Gulf dialects are common (e.g. سواق = سائق، ضيف = أضف، وريني = اعرض).
+Return ONLY a JSON object: {"action": "<name>", ...fields}. Never invent data that is not in the message.
+Keep phone numbers exactly as written. If the message needs something not in the list, use the
+fallback action ("unsupported" or "unknown") and explain briefly in Arabic in "reason" when allowed."""
+
+
+def ask_claude(actions, text):
+    key = os.getenv('ANTHROPIC_API_KEY', '')
+    if not key:
+        return None
+    body = {'model': MODEL, 'max_tokens': 600, 'thinking': {'type': 'disabled'}, 'system': SYSTEM + '\n\n' + actions,
+            'messages': [{'role': 'user', 'content': text[:1500]}]}
+    try:
+        with httpx.Client(timeout=25) as client:
+            response = client.post('https://api.anthropic.com/v1/messages', json=body,
+                                   headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
+            response.raise_for_status()
+        out = ''.join(p.get('text', '') for p in response.json().get('content', []) if p.get('type') == 'text')
+        match = re.search(r'\{.*\}', out, re.S)
+        return json.loads(match.group(0)) if match else None
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
+
+
+def _clean(value, limit=100):
+    return re.sub(r'\s+', ' ', str(value or '')).strip()[:limit]
+
+
+# ------------------------------------------------------------------ WhatsApp owner commands
+
+def _search(c, query):
+    q = _clean(query, 80)
+    if len(q) < 2:
+        return 'اكتب اسمًا أو رقمًا أو مرجعًا للبحث.'
+    like = '%' + q + '%'
+    digits = re.sub(r'\D', '', q)
+    lines = []
+    for r in c.execute('''SELECT id,name,phone,status FROM accounts WHERE name ILIKE %s
+            OR (%s<>'' AND regexp_replace(coalesce(phone,''),'[^0-9]','','g') LIKE %s) ORDER BY id DESC LIMIT 5''',
+                       (like, digits, '%' + (digits[-9:] if digits else '#') + '%')).fetchall():
+        lines.append(f"عميل {r['id']} · {r['name']} · {r['phone'] or '-'} · {r['status']}")
+    for r in c.execute('''SELECT id,driver_name,whatsapp_phone,availability FROM drivers WHERE driver_name ILIKE %s
+            OR (%s<>'' AND regexp_replace(coalesce(whatsapp_phone,''),'[^0-9]','','g') LIKE %s) ORDER BY id DESC LIMIT 5''',
+                       (like, digits, '%' + (digits[-9:] if digits else '#') + '%')).fetchall():
+        lines.append(f"سائق {r['id']} · {r['driver_name']} · {r['whatsapp_phone']} · {r['availability']}")
+    for r in c.execute('''SELECT reference,origin,destination,status FROM shipments WHERE reference ILIKE %s
+            OR origin ILIKE %s OR destination ILIKE %s ORDER BY id DESC LIMIT 5''', (like, like, like)).fetchall():
+        lines.append(f"شحنة {r['reference']} · {r['origin']} ← {r['destination']} · {r['status']}")
+    return (f'نتائج «{q}»:\n' + '\n'.join(lines)) if lines else f'لم أجد نتائج لـ «{q}».'
+
+
+def _count(c, sql, args=()):
+    try:
+        c.execute('SAVEPOINT cmd_report')
+        value = c.execute(sql, args).fetchone()
+        c.execute('RELEASE SAVEPOINT cmd_report')
+        return int(list(value.values())[0] or 0) if value else 0
+    except Exception:
+        c.execute('ROLLBACK TO SAVEPOINT cmd_report')
+        return None
+
+
+def _report(c, period):
+    days = 7 if period == 'week' else 1
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    label = 'آخر 7 أيام' if days == 7 else 'آخر 24 ساعة'
+    items = [
+        ('رسائل البروشور المرسلة (واتساب)', "SELECT COUNT(*) FROM customer_campaign_recipients WHERE channel='whatsapp' AND status='sent' AND sent_at>=%s"),
+        ('رسائل البروشور المرسلة (بريد)', "SELECT COUNT(*) FROM customer_campaign_recipients WHERE channel='email' AND status='sent' AND sent_at>=%s"),
+        ('محادثات عملاء جديدة', 'SELECT COUNT(*) FROM zernio_requests WHERE created_at>=%s'),
+        ('طلبات عملاء مكتملة البيانات', "SELECT COUNT(*) FROM zernio_requests WHERE updated_at>=%s AND status<>'collecting'"),
+        ('حمولات نقليات مسجلة', 'SELECT COUNT(*) FROM naqliat_loads WHERE created_at>=%s'),
+        ('شحنات جديدة', 'SELECT COUNT(*) FROM shipments WHERE created_at>=%s'),
+        ('سائقون جدد', 'SELECT COUNT(*) FROM drivers WHERE created_at>=%s'),
+        ('عملاء جدد في القائمة', 'SELECT COUNT(*) FROM accounts WHERE created_at>=%s'),
+    ]
+    lines = []
+    for name, sql in items:
+        value = _count(c, sql, (since,))
+        if value is not None:
+            lines.append(f'{name}: {value}')
+    return f'تقرير {label}:\n' + '\n'.join(lines)
+
+
+def answer_question(question):
+    """Management question answered from the customs knowledge base (same facts customers get)."""
+    from app.customs_knowledge import KNOWLEDGE
+    key = os.getenv('ANTHROPIC_API_KEY', '')
+    if not key:
+        return None
+    system = ('You answer questions from the management of Afaq Tuwaiq, a Saudi customs clearance and logistics company, '
+              'in clear Arabic, using ONLY the knowledge below. Send official links exactly as written, one per line. '
+              'If the knowledge does not cover it, say so briefly. Never invent facts, rates or links.\n\n' + KNOWLEDGE)
+    body = {'model': MODEL, 'max_tokens': 1200, 'thinking': {'type': 'disabled'}, 'system': system,
+            'messages': [{'role': 'user', 'content': str(question)[:2000]}]}
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.post('https://api.anthropic.com/v1/messages', json=body,
+                                   headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
+            response.raise_for_status()
+        text = ''.join(p.get('text', '') for p in response.json().get('content', []) if p.get('type') == 'text').strip()
+        return text[:3500] or None
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
+
+
+def run_ai_command(c, raw):
+    parsed = ask_claude(WA_ACTIONS, raw)
+    if not parsed:
+        return None
+    action = parsed.get('action')
+    if action == 'list_drivers':
+        canonical = 'اعرض السائقين'
+    elif action == 'add_driver' and parsed.get('name') and parsed.get('phone'):
+        number = re.sub(r'[^\d+]', '', str(parsed['phone']))
+        canonical = f"اضف السائق {_clean(parsed['name'])} ورقمه {number}"
+        if _clean(parsed.get('vehicle')):
+            canonical += f" ومركبته {_clean(parsed['vehicle'])}"
+    elif action == 'list_shipments':
+        canonical = 'اعرض الشحنات'
+    elif action == 'add_shipment' and parsed.get('reference') and parsed.get('origin') and parsed.get('destination'):
+        reference = re.sub(r'[^A-Za-z0-9_-]', '', str(parsed['reference']))[:60]
+        canonical = f"اضف شحنة مرجع {reference} من {_clean(parsed['origin'])} الى {_clean(parsed['destination'])}"
+    elif action == 'shipment_status' and parsed.get('reference'):
+        canonical = 'حالة الشحنة ' + re.sub(r'[^A-Za-z0-9_-]', '', str(parsed['reference']))[:60]
+    elif action == 'list_customers':
+        canonical = 'اعرض العملاء'
+    elif action == 'search':
+        return '🔎 ' + _search(c, parsed.get('query'))
+    elif action == 'report':
+        return '📊 ' + _report(c, parsed.get('period'))
+    elif action == 'tariff':
+        from app import tariff_lookup
+        return '📘 ' + tariff_lookup.as_text(tariff_lookup.search_many(parsed.get('ar'), parsed.get('en')))
+    elif action == 'question':
+        return answer_question(parsed.get('text') or raw) or 'تعذر الرد على السؤال الآن؛ أعد المحاولة بعد قليل.'
+    elif action == 'help':
+        return wa.HELP
+    else:
+        reason = _clean(parsed.get('reason'), 300)
+        return ('هذا الطلب لا يُنفذ من واتساب' + (f': {reason}' if reason else '.') +
+                '\nالإرسال للعملاء والنشر والحذف والصرف تتم من شاشة الاعتماد في البرنامج.')
+    return f'فهمت: {canonical}\n\n' + wa.afaaq_command(c, wa.normalize(canonical))
+
+
+_original_run_command = wa.run_command
+_original_afaaq_command = wa.afaaq_command
+
+
+def run_command(c, raw, event_id):
+    text = wa.normalize(raw)
+    if re.match(r'^شواهد(?: الهدف)?\b', text):
+        return _original_run_command(c, raw, event_id)
+    if len(text) > 2000 or text.casefold() in ('الاوامر', 'اوامر', 'مساعدة', 'help', 'menu') or text in ('افاق', 'افاق طويق'):
+        return _original_run_command(c, raw, event_id)
+    command = re.sub(r'^افاق(?: طويق)?\s*[:،-]?\s*', '', text).strip()
+    reply = _original_afaaq_command(c, command)
+    if not reply.startswith('لم أنفذ الأمر'):
+        return reply
+    understood = run_ai_command(c, command)
+    if understood:
+        return understood
+    if not os.getenv('ANTHROPIC_API_KEY'):
+        return 'لم أفهم الأمر بصيغته الحالية، وفهم الرسائل الحرة يحتاج تفعيل مفتاح Claude على الخادم.\n\n' + wa.HELP
+    return reply
+
+
+wa.run_command = run_command
+
+
+# ------------------------------------------------------------------ /commands web page
+
+_original_parse = page.parse_command
+NAV = {'/dashboard', '/accounts', '/drivers', '/opportunities', '/approvals', '/shipments', '/shipping-agents',
+       '/saber', '/content-center', '/discovery', '/sales-copilot', '/pipeline', '/activity',
+       '/customer-campaigns', '/naqliat', '/freight-workflow', '/commands'}
+
+
+def parse_command(raw):
+    parsed = _original_parse(raw)
+    if parsed.get('action_type') != 'unknown':
+        return parsed
+    ai = ask_claude(PAGE_ACTIONS, raw)
+    if not ai:
+        return parsed
+    kind = ai.get('action_type') or ai.get('action')
+    if kind == 'navigate' and ai.get('url') in NAV:
+        return {'action_type': 'navigate', 'target': ai['url'], 'url': ai['url'], 'content': ''}
+    if kind == 'run_discovery':
+        return {'action_type': 'run_discovery', 'target': 'محرك اكتشاف الفرص', 'content': ''}
+    if kind == 'add_driver' and ai.get('target') and ai.get('phone'):
+        return {'action_type': 'add_driver', 'target': _clean(ai['target']), 'phone': str(ai['phone']),
+                'vehicle_type': _clean(ai.get('vehicle_type')) or 'غير محدد', 'content': ''}
+    if kind == 'driver_broadcast' and ai.get('content'):
+        return {'action_type': 'driver_broadcast', 'target': 'جميع السائقين', 'content': _clean(ai['content'], 1000)}
+    if kind in ('call', 'whatsapp', 'email', 'auto_contact') and ai.get('target'):
+        return {'action_type': kind, 'target': _clean(ai['target']), 'content': _clean(ai.get('content'), 1000)}
+    return parsed
+
+
+page.parse_command = parse_command

@@ -4,62 +4,19 @@ import math
 import os
 import re
 import urllib.parse
-from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.storage import db, get_session
+from app.storage import db, execute, get_session, log, one, rows, utcnow
 from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
-from app.logistics_parsing import phone as normalize_phone, accepts_offer
+from app.logistics_parsing import phone as normalize_phone, accepts_offer, digits
 
 
 router = APIRouter()
-
-
-def utcnow():
-    """UTC timestamp without depending on storage helpers in isolated WhatsApp tests."""
-    return datetime.now(timezone.utc)
-
-
-def execute(query, params=()):
-    """Execute through db() so isolated WhatsApp tests need only the storage db stub."""
-    with db() as connection:
-        cursor = connection.execute(query, params)
-        if getattr(cursor, "description", None):
-            row = cursor.fetchone()
-            if row:
-                try:
-                    return row[0]
-                except (KeyError, TypeError):
-                    return next(iter(row.values())) if hasattr(row, "values") else row
-        return getattr(cursor, "lastrowid", None)
-
-
-def one(query, params=()):
-    """Fetch one row through db() for compatibility with isolated WhatsApp tests."""
-    with db() as connection:
-        return connection.execute(query, params).fetchone()
-
-
-def rows(query, params=()):
-    """Fetch rows through db() for compatibility with isolated WhatsApp tests."""
-    with db() as connection:
-        return connection.execute(query, params).fetchall()
-
-
-def log(user_id, action, entity_type, entity_id=None, details=""):
-    """Audit helper that remains compatible with isolated WhatsApp storage stubs."""
-    try:
-        with db() as connection:
-            connection.execute("""INSERT INTO activity_log(user_id,action,entity_type,entity_id,details,created_at)
-                VALUES(%s,%s,%s,%s,%s,NOW())""", (user_id, action, entity_type, entity_id, str(details or "")[:4000]))
-    except Exception:
-        # Audit storage must not block the transport workflow in isolated tests.
-        return None
 
 
 def _init_storage():
@@ -183,6 +140,14 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
                 ("رقم صاحب الشحنة غير متوفر", utcnow(), shipment_id))
         return
     missing = _shipment_requirements(item)
+    # Never cross the WhatsApp sending boundary with an unknown route. The approved
+    # owner template requires real origin/destination values; ask the operator to
+    # repair extraction on the same shipment instead of producing a non-matching
+    # free-form message that will be blocked by Meta.
+    if not _usable_text(item.get('origin')) or not _usable_text(item.get('destination')):
+        execute("UPDATE freight_negotiations SET status='needs_manual_data',last_error=?,updated_at=? WHERE shipment_id=?",
+                ("المسار غير مكتمل؛ صحح مدينة التحميل والتنزيل من النص المحفوظ ثم أعد التواصل. لم تُرسل رسالة", utcnow(), shipment_id))
+        return
     if not approved:
         status = 'needs_contact_approval' if missing else 'contact_ready'
         execute("UPDATE freight_negotiations SET status=?,last_error=?,updated_at=? WHERE shipment_id=?",
@@ -411,75 +376,112 @@ async def start_driver_broadcast(broadcast_id, user_id=None):
 
 
 def _number_after(pattern, text):
-    match = re.search(pattern + r"[^0-9٠-٩]{0,20}([0-9٠-٩][0-9٠-٩,.]*)", str(text or ""), re.I)
-    if not match:
+    # Only a directly labelled, unambiguous number is a financial term. Never
+    # scan across a line into a shipment reference, phone number or weight.
+    text = digits(text).replace("٬", ",").replace("٫", ".")
+    matches = list(re.finditer(r"(?<!\w)" + pattern + r"[ \t]*[:：=]?[ \t]*(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d,.])", text, re.I))
+    if any(re.match(r"[ \t]*(?:[-–/]|(?:إلى|الى|أو|او)\b)", text[match.end():]) for match in matches):
         return None
-    value = match.group(1).translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")).replace(",", "")
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    values = {float(match.group(1).replace(",", "")) for match in matches}
+    return next(iter(values)) if len(values) == 1 and all(math.isfinite(x) for x in values) else None
 
 
-async def advance_owner_whatsapp_reply(owner_phone, text):
-    """Turn a real owner's WhatsApp reply into an agreement and driver broadcast when complete."""
+def _text_after(pattern, text):
+    match = re.search(r"(?<!\w)" + pattern + r"[ \t]*[:：-]?[ \t]*([^\n،;.]{2,200})", text)
+    return match.group(1).strip() if match else ""
+
+
+async def advance_owner_whatsapp_reply(owner_phone, text, shipment_id=None):
+    """Advance only the identified owner's unambiguous pending shipment.
+
+    The receiver passes its verified selection. Recheck identity and state under
+    a row lock so two webhook requests cannot overwrite the agreed terms.
+    """
     owner_phone = _valid_phone(owner_phone)
+    text = str(text or "")
     if not owner_phone:
         return None
-    item = one("""SELECT s.*,n.shipment_id,n.status negotiation_status,n.weight_tons,n.payment_method,n.unloading_location
-        FROM freight_negotiations n JOIN shipments s ON s.id=n.shipment_id
-        WHERE n.owner_phone=? AND n.contact_channel='whatsapp' AND n.status='awaiting_owner'
-        ORDER BY n.id DESC LIMIT 1""", (owner_phone,))
-    if not item:
-        return None
-    price = (_number_after(r"(?:السعر(?: النهائي)?|اجرة|أجرة|قيمة النقل|النقل)", text)
-             or _number_after(r"(?:مطلوب|المطلوب)", text))
-    weight = _number_after(r"(?:الوزن|وزن)", text)
-    payment = ""
-    pay = re.search(r"(?:الدفع|طريقة الدفع)\s*[:：-]?\s*([^\n،.]{2,120})", str(text or ""), re.I)
-    if pay:
-        payment = pay.group(1).strip()
-    unloading = ""
-    unload = re.search(r"(?:التنزيل|مكان التنزيل|موقع التنزيل)\s*[:：-]?\s*([^\n،.]{2,200})", str(text or ""), re.I)
-    if unload:
-        unloading = unload.group(1).strip()
-    execute("""UPDATE freight_negotiations SET weight_tons=COALESCE(?,weight_tons),
-        payment_method=COALESCE(NULLIF(?,''),payment_method),
-        unloading_location=COALESCE(NULLIF(?,''),unloading_location),notes=?,updated_at=?
-        WHERE shipment_id=?""", (weight, payment, unloading, str(text or "")[:3000], utcnow(), item["shipment_id"]))
-    refreshed = one("""SELECT s.*,n.weight_tons,n.payment_method,n.unloading_location FROM shipments s
-        JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (item["shipment_id"],))
-    if not price or price <= 150:
-        return {"shipment_id": item["shipment_id"], "broadcast_id": None, "missing": ["السعر النهائي"]}
-    missing = _shipment_requirements(refreshed, agreement=True)
-    if missing:
-        return {"shipment_id": item["shipment_id"], "broadcast_id": None, "missing": missing}
-    now = utcnow()
-    driver_price = round(price - 150, 2)
-    execute("""UPDATE freight_negotiations SET status='owner_agreed',asking_price=COALESCE(asking_price,?),
-        agreed_owner_price=?,driver_offer_price=?,agreed_at=?,updated_at=?,last_error=NULL WHERE shipment_id=?""",
-        (price, price, driver_price, now, now, item["shipment_id"]))
-    execute("UPDATE shipments SET revenue=?,cost=?,updated_at=? WHERE id=?",
-            (price, driver_price, now, item["shipment_id"]))
-    bid = prepare_driver_offer(item["shipment_id"], None)
+    references = set(re.findall(r"(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)", text.upper()))
+    with db() as c:
+        pending = c.execute("""SELECT s.*,n.shipment_id,n.owner_phone,n.record_kind,n.asking_price,
+            n.weight_tons,n.payment_method,n.unloading_location FROM freight_negotiations n
+            JOIN shipments s ON s.id=n.shipment_id
+            WHERE n.owner_phone=%s AND n.contact_channel='whatsapp' AND n.status='awaiting_owner'
+              AND n.record_kind='shipment_request' ORDER BY s.id FOR UPDATE OF s,n""", (owner_phone,)).fetchall()
+        selected = [x for x in pending if x['reference'].upper() in references] if references else pending
+        if len(references) > 1 or len(selected) != 1:
+            return None
+        item = selected[0]
+        if shipment_id is not None and item['shipment_id'] != shipment_id:
+            return None
+        sid = item['shipment_id']
+        # Questions, rejections and cancellations must not become an agreement.
+        if re.search(r"[؟?]|غير\s+(?:متاح[ةه]?|موافق)|(?:لا|لم)\s+(?:أوافق|اوافق|نوافق)|ملغ[ىي]|ملغا[ةه]|تم\s+(?:النقل|التحميل|الحجز)", text):
+            return {"shipment_id": sid, "broadcast_id": None, "missing": [], "needs_review": True}
+        price_labels = r"(?:السعر(?: النهائي| المعروض)?|اجرة|أجرة|قيمة النقل|سعر النقل)"
+        price = _number_after(price_labels, text)
+        if re.search(price_labels, text) and (price is None or price <= 150):
+            return {"shipment_id": sid, "broadcast_id": None, "missing": ["سعر نهائي واضح أكبر من 150 ريال"]}
+        price = price if price is not None else item.get('asking_price')
+        weight = _number_after(r"(?:الوزن|وزن(?: الحمولة| البضاعة)?)", text)
+        if re.search(r'(?<!\w)(?:الوزن|وزن)', text) and (weight is None or not 0 < weight <= 1000 or re.search(r'(?:الوزن|وزن)[^\n،]*?(?:كجم|كيلو|kg)', text, re.I)):
+            weight = 0  # Invalid or unsupported units must request clarification.
+        payment = _text_after(r"(?:طريقة الدفع|الدفع)", text)
+        unloading = _text_after(r"(?:مكان التنزيل|موقع التنزيل|التنزيل)", text)
+        item.update(weight_tons=weight if weight is not None else item['weight_tons'],
+                    payment_method=payment or item['payment_method'],
+                    unloading_location=unloading or item['unloading_location'])
+        c.execute("""UPDATE freight_negotiations SET asking_price=%s,weight_tons=%s,
+            payment_method=%s,unloading_location=%s,notes=%s,updated_at=%s WHERE shipment_id=%s""",
+            (price, item['weight_tons'], item['payment_method'], item['unloading_location'], text[:3000], utcnow(), sid))
+        missing = _shipment_requirements(item, agreement=True)
+        if not price or not math.isfinite(float(price)) or price <= 150:
+            missing.insert(0, "السعر النهائي")
+        if missing:
+            return {"shipment_id": sid, "broadcast_id": None, "missing": missing}
+        now = utcnow()
+        driver_price = round(price - 150, 2)
+        c.execute("""UPDATE freight_negotiations SET status='owner_agreed',agreed_owner_price=%s,
+            driver_offer_price=%s,agreed_at=%s,updated_at=%s,last_error=NULL WHERE shipment_id=%s""",
+            (price, driver_price, now, now, sid))
+        c.execute("UPDATE shipments SET revenue=%s,cost=%s,updated_at=%s WHERE id=%s", (price, driver_price, now, sid))
+    try:
+        bid = prepare_driver_offer(sid, None)
+    except HTTPException as exc:
+        execute("UPDATE freight_negotiations SET last_error=?,updated_at=? WHERE shipment_id=?",
+                (str(exc.detail)[:500], utcnow(), sid))
+        return {"shipment_id": sid, "broadcast_id": None, "broadcast_sent": False, "missing": [], "blocked": str(exc.detail)}
     await start_driver_broadcast(bid, None)
-    return {"shipment_id": item["shipment_id"], "broadcast_id": bid, "missing": []}
+    broadcast = one("SELECT status,sent_count,failed_count,recipient_count FROM driver_broadcasts WHERE id=?", (bid,))
+    return {"shipment_id": sid, "broadcast_id": bid, "missing": [],
+            "broadcast_sent": bool(broadcast and broadcast['sent_count']), "broadcast": broadcast,
+            "blocked": ("الإرسال الخارجي غير مفعّل؛ بقي العرض مسودة." if broadcast and broadcast['status'] == 'draft'
+                        else "لم يرجع مزود واتساب تأكيد قبول الإرسال؛ يلزم مراجعة حالة المستلمين.") if not broadcast or not broadcast['sent_count'] else ""}
 
 
 def accept_driver_reply(phone, text, connection=None):
     normalized = _valid_phone(phone)
-    match = re.search(r"(?:NQ-\d+|WA-[A-F0-9]{12})", (text or "").upper())
-    if not normalized or not match or not accepts_offer(text):
+    references = set(re.findall(r"(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)", (text or "").upper()))
+    if not normalized or len(references) != 1 or not accepts_offer(text):
         return False
-    reference = match.group(0)
+    reference = next(iter(references))
     with (nullcontext(connection) if connection is not None else db()) as c:
-        row = c.execute("""SELECT r.id recipient_id,r.driver_id,b.id broadcast_id,b.shipment_id,b.accepted_driver_id
-            FROM driver_broadcast_recipients r JOIN driver_broadcasts b ON b.id=r.broadcast_id
-            JOIN shipments s ON s.id=b.shipment_id
-            WHERE r.phone=%s AND s.reference=%s AND r.status='sent' AND COALESCE(r.provider_message_id,'')<>'' AND b.status IN ('sending','completed','completed_with_errors','awaiting_driver')
-            ORDER BY b.id DESC LIMIT 1 FOR UPDATE""", (normalized, reference)).fetchone()
-        if not row or row["accepted_driver_id"]:
+        # All contenders lock the shared broadcast before their own recipient.
+        # Locking different recipient rows first can deadlock when the winner
+        # closes the other recipients in the same transaction.
+        campaign = c.execute("""SELECT b.id broadcast_id,b.shipment_id,b.accepted_driver_id
+            FROM driver_broadcasts b JOIN shipments s ON s.id=b.shipment_id
+            WHERE s.reference=%s AND b.status IN ('sending','completed','completed_with_errors','awaiting_driver')
+            ORDER BY b.id DESC LIMIT 1 FOR UPDATE OF b""", (reference,)).fetchone()
+        if not campaign or campaign['accepted_driver_id']:
             return False
+        recipient = c.execute("""SELECT id recipient_id,driver_id FROM driver_broadcast_recipients
+            WHERE broadcast_id=%s AND phone=%s AND status='sent'
+              AND COALESCE(provider_message_id,'')<>'' FOR UPDATE""",
+            (campaign['broadcast_id'], normalized)).fetchone()
+        if not recipient:
+            return False
+        row = {**campaign, **recipient}
         now = utcnow()
         c.execute("UPDATE driver_broadcasts SET status='driver_accepted',accepted_driver_id=%s,accepted_at=%s,updated_at=%s WHERE id=%s AND accepted_driver_id IS NULL",
                   (row["driver_id"], now, now, row["broadcast_id"]))
@@ -513,7 +515,7 @@ def workflow_detail(shipment_id: int, request: Request):
     current = session(request)
     item = one("""SELECT s.*,n.record_kind,n.id negotiation_id,n.owner_phone,n.status negotiation_status,n.asking_price,
         n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.unloading_location,n.payment_method,n.notes,n.last_error,
-        n.provider_message_id,n.provider_call_id,n.naqliat_load_id
+        n.provider_message_id,n.provider_call_id,n.contact_channel,n.naqliat_load_id
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=?""", (shipment_id,))
     if not item: raise HTTPException(404)
     classification = f"""<h2>تصنيف السجل</h2>
@@ -549,6 +551,12 @@ def workflow_detail(shipment_id: int, request: Request):
                    owner_states.get(item['negotiation_status'], 'لا يوجد معرّف إرسال موثق في هذا السجل'))
     driver_state = (f"عرض موجود — {broadcast['status']}؛ راجع سجل المستلمين" if broadcast else
                     'لم يُجهز عرض للسائقين بعد؛ يلزم استكمال بيانات الشحنة وتوثيق السعر وطريقة الدفع')
+    diagnostics = f"""<section class=card id=contact-diagnostics><h2>تشخيص التواصل</h2>
+    <p><b>status:</b> {esc(item.get('negotiation_status'))}</p>
+    <p><b>contact_channel:</b> {esc(item.get('contact_channel') or 'غير مسجل')}</p>
+    <p><b>provider_message_id:</b> {esc(item.get('provider_message_id') or 'لا يوجد')}</p>
+    <p><b>provider_call_id:</b> {esc(item.get('provider_call_id') or 'لا يوجد')}</p>
+    <p><b>last_error:</b> {esc(item.get('last_error') or 'لا يوجد')}</p></section>"""
     progress = f"""<section class=card id=shipment-progress><h2>ماذا تم في هذه الشحنة؟</h2>
     <p>الاستلام: محفوظة بالمرجع {esc(item['reference'])}.</p>
     <p>صاحب الشحنة: {esc(owner_state)}.</p><p>السائقون: {esc(driver_state)}.</p></section>"""
@@ -580,7 +588,15 @@ def workflow_detail(shipment_id: int, request: Request):
     replies = rows("SELECT summary,happened_at FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply' ORDER BY id DESC LIMIT 10", (shipment_id,))
     reply_html = "<h2>ردود صاحب الحمولة عبر واتساب</h2>" + ("".join("<p>" + esc(x['happened_at']) + "</p><p style='white-space:pre-wrap'>" + esc(x['summary']) + "</p>" for x in replies) or "<p>لم يصل رد مرتبط بهذه الشحنة بعد.</p>")
     classification += "<p><a href='/settings/whatsapp/channel'>حالة قناة واتساب وقوالب Meta</a></p>" + reply_html
-    controls = progress + source_html + classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
+    diagnostics = f"""<section class=card id=freight-diagnostics><h2>تشخيص مسار النقل</h2>
+    <table>
+    <tr><th>status</th><td>{esc(item.get('negotiation_status'))}</td></tr>
+    <tr><th>contact_channel</th><td>{esc(item.get('contact_channel') or '—')}</td></tr>
+    <tr><th>provider_message_id</th><td dir=ltr>{esc(item.get('provider_message_id') or '—')}</td></tr>
+    <tr><th>provider_call_id</th><td dir=ltr>{esc(item.get('provider_call_id') or '—')}</td></tr>
+    <tr><th>last_error</th><td>{esc(item.get('last_error') or '—')}</td></tr>
+    </table></section>"""
+    controls = diagnostics + progress + source_html + classification + f"""<h2>الاستخراج والتصحيح اليدوي</h2>
     <p>راجع نتيجة الاستخراج. عند نقص المسار يمكنك تجهيز طلب استكمال لصاحب الشحنة إذا كان رقمه صحيحًا.</p>
     <form method=post action='/freight-workflow/{shipment_id}/manual-data'><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid>
     <input name=origin required placeholder='مدينة أو موقع التحميل' value='{esc(item.get('origin'))}'>

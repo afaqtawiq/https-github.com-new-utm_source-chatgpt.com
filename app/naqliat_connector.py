@@ -231,7 +231,7 @@ def ingest_naqliat_load(payload: NaqliatLoad, request: Request, background_tasks
     saved = _save(payload)
     if saved:
         from app.freight_workflow import contact_owner
-        background_tasks.add_task(contact_owner, saved[2])
+        background_tasks.add_task(contact_owner, saved[2], approved=True)
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None}
 
@@ -253,7 +253,7 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: 
     saved = _save(item)
     if saved:
         from app.freight_workflow import contact_owner
-        background_tasks.add_task(contact_owner, saved[2])
+        background_tasks.add_task(contact_owner, saved[2], approved=True)
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None,
             "origin": item.origin, "destination": item.destination, "owner_phone": _clean_phone(item.owner_phone),
