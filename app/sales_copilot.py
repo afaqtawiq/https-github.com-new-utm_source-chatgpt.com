@@ -26,7 +26,7 @@ def playbook(op,z):
 def home(request:Request):
     auth(request);data=rows('''SELECT o.*,i.priority,i.intent,i.services,i.follow_up_status FROM opportunities o LEFT JOIN opportunity_intelligence i ON i.opportunity_id=o.id ORDER BY CASE WHEN i.priority='P1' THEN 1 WHEN i.priority='P2' THEN 2 ELSE 3 END,o.score DESC,o.id DESC''');trs=''
     for x in data: trs+='<tr><td>'+esc(x.get('priority') or '—')+'</td><td>'+esc(x['company_name'])+'</td><td>'+esc(x['score'])+'</td><td>'+esc(x.get('intent') or '—')+'</td><td>'+esc(x.get('services') or '—')+'</td><td><form method="post" action="/sales-copilot/'+str(x['id'])+'/prepare"><button class="btn">إعداد ملف البيع</button></form> <a class="btn" href="/sales-copilot/'+str(x['id'])+'">فتح</a></td></tr>'
-    return HTMLResponse(shell('Sales Copilot',nav()+'<h1>Sales Copilot — آفاق طويق</h1><div class="card"><b>من فرصة إلى عرض ورسالة قابلة للموافقة والإرسال.</b><div class="muted">لا يمكن الإرسال قبل موافقة بشرية صريحة.</div></div><div class="card scroll"><table><tr><th>الأولوية</th><th>الجهة</th><th>Score</th><th>نية الشراء</th><th>الخدمات</th><th>الإجراء</th></tr>'+trs+'</table></div>'))
+    return HTMLResponse(shell('Sales Copilot',nav()+'<h1>سارة | مسؤولة المبيعات والتسويق — آفاق طويق</h1><div class="card"><b>سارة مسؤولة عن تحويل الفرص المؤهلة إلى عملاء: التأهيل، تحديد الخدمة، تجهيز العرض، والمتابعة حتى إغلاق الصفقة.</b><div class="muted">تستخدم بيانات الأعمال العامة الموثقة وأسعار آفاق طويق المعتمدة فقط؛ ولا تخمّن بيانات أو أسعارًا.</div></div><div class="card scroll"><table><tr><th>الأولوية</th><th>الجهة</th><th>Score</th><th>نية الشراء</th><th>الخدمات</th><th>الإجراء</th></tr>'+trs+'</table></div>'))
 
 @router.post('/sales-copilot/{oid}/prepare')
 def prepare(oid:int,request:Request):
