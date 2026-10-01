@@ -40,7 +40,7 @@ def test_broadcast_context(campaign, *, approved=False):
             or not message.endswith('للرغبة اكتب: موافق ' + reference + '\nشكرًا لتعاونك.')
             or message.count(DISCLAIMER) != 2):
         raise HTTPException(409, 'إفصاح الاختبار إلزامي في العرض وتعليمات الرد؛ لم تُرسل الرسالة')
-    recipients = rows('SELECT driver_id,phone FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id', (campaign['id'],))
+    recipients = rows("SELECT driver_id,phone FROM driver_broadcast_recipients WHERE broadcast_id=? AND status<>'excluded' ORDER BY id", (campaign['id'],))
     digest = preview_digest(message, recipients)
     if approved and (not campaign.get('test_approved_at') or not campaign.get('test_approved_by')
                      or campaign.get('test_preview_digest') != digest):

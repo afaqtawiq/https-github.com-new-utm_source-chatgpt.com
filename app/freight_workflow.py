@@ -15,6 +15,7 @@ from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
 from app.logistics_parsing import phone as normalize_phone, accepts_offer, digits
 from app.transport_owner import inquiry, select_pending, loading_port_status
+from app.driver_offer import driver_phone, offer_message
 from app.transport_test import DISCLAIMER, display_reference, accepts_test_offer, owner_inquiry, owner_inquiry_digest
 
 
@@ -302,7 +303,7 @@ def prepare_driver_offer(shipment_id, user_id):
     # Lock the shipment so simultaneous agreement submissions share one draft.
     with db() as c:
         item = c.execute("""SELECT s.*,n.record_kind,n.owner_phone,n.agreed_owner_price,n.driver_offer_price,n.weight_tons,n.payment_method,
-            n.unloading_location FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
+            n.unloading_location,n.loading_port_status FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
             WHERE s.id=%s FOR UPDATE OF s,n""", (shipment_id,)).fetchone()
         if not item or item.get("agreed_owner_price") is None:
             raise HTTPException(409, "يجب تسجيل اتفاق صاحب الشحنة أولًا")
@@ -317,22 +318,13 @@ def prepare_driver_offer(shipment_id, user_id):
             WHERE whatsapp_phone IS NOT NULL ORDER BY id""").fetchall()
         valid, seen = [], set()
         for driver in drivers:
-            phone = _valid_phone(driver.get("whatsapp_phone"))
+            phone = driver_phone(driver.get("whatsapp_phone"))
             if phone and phone not in seen:
                 seen.add(phone); valid.append((driver, phone))
         if not valid:
             raise HTTPException(409, "تم حفظ الاتفاق، ولا يوجد سائقون مسجلون بأرقام صالحة")
         price = round(agreed - 150, 2)
-        reference = display_reference(item['reference'], item.get('is_test'))
-        message = (
-            f"عرض حمولة من آفاق طويق — {reference}\n"
-            f"المسار: {item['origin']} → {item['destination']}\n"
-            f"الوزن: {item['weight_tons']} طن\n"
-            f"سعر السائق: {price:,.2f} ريال\n"
-            f"التنزيل: {item.get('unloading_location') or item['destination']}\n"
-            f"الدفع: {item['payment_method']}\n"
-            "للرغبة اكتب: موافق " + reference + "\nشكرًا لتعاونك."
-        )
+        message = offer_message(item)
         now = utcnow()
         bid = c.execute("""INSERT INTO driver_broadcasts(raw_command,message,status,recipient_count,created_by,created_at,updated_at,shipment_id,is_test)
             VALUES(%s,%s,'draft',%s,%s,%s,%s,%s,%s) RETURNING id""",
@@ -490,7 +482,7 @@ def accept_driver_reply(phone, text, connection=None):
                 accepted_at=%s,updated_at=%s WHERE id=%s AND accepted_driver_id IS NULL""",
                 (row['driver_id'], now, now, row['broadcast_id']))
             c.execute("""UPDATE driver_broadcast_recipients SET status=CASE WHEN id=%s THEN 'test_accepted' ELSE 'closed' END,
-                replied_at=CASE WHEN id=%s THEN %s ELSE replied_at END WHERE broadcast_id=%s""",
+                replied_at=CASE WHEN id=%s THEN %s ELSE replied_at END WHERE broadcast_id=%s AND status<>'excluded'""",
                 (row['recipient_id'], row['recipient_id'], now, row['broadcast_id']))
             c.execute("UPDATE freight_negotiations SET status='test_completed',updated_at=%s WHERE shipment_id=%s", (now,row['shipment_id']))
             c.execute("UPDATE shipments SET status='test_completed',revenue=0,cost=0,updated_at=%s WHERE id=%s", (now,row['shipment_id']))
@@ -498,7 +490,7 @@ def accept_driver_reply(phone, text, connection=None):
             return True
         c.execute("UPDATE driver_broadcasts SET status='driver_accepted',accepted_driver_id=%s,accepted_at=%s,updated_at=%s WHERE id=%s AND accepted_driver_id IS NULL",
                   (row["driver_id"], now, now, row["broadcast_id"]))
-        c.execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN id=%s THEN 'accepted' ELSE 'closed' END,replied_at=CASE WHEN id=%s THEN %s ELSE replied_at END WHERE broadcast_id=%s",
+        c.execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN id=%s THEN 'accepted' ELSE 'closed' END,replied_at=CASE WHEN id=%s THEN %s ELSE replied_at END WHERE broadcast_id=%s AND status<>'excluded'",
                   (row["recipient_id"], row["recipient_id"], now, row["broadcast_id"]))
         c.execute("UPDATE freight_negotiations SET status='driver_accepted',updated_at=%s WHERE shipment_id=%s", (now, row["shipment_id"]))
         c.execute("UPDATE shipments SET status='driver_assigned',updated_at=%s WHERE id=%s", (now, row["shipment_id"]))

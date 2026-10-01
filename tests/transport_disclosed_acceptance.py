@@ -12,7 +12,7 @@ from fastapi import BackgroundTasks, HTTPException
 def run_disclosed(providers, inbound):
     from app import command_assistant as commands, freight_workflow as workflow
     from app.naqliat_connector import NaqliatLoad, _save
-    from app.storage import one, rows, execute
+    from app.storage import one, rows, execute, db
     from app.transport_test import DISCLAIMER, display_reference, test_broadcast_context, owner_inquiry_digest
     from app.zernio_whatsapp import required_templates, template_parameters
 
@@ -125,6 +125,55 @@ def run_disclosed(providers, inbound):
         else:
             raise AssertionError('Unapproved test broadcast was accepted')
 
+    # Correct a legacy wholly-unsent audience through the guarded UI. The
+    # original driver registry is immutable; invalid recipients stay as audit rows.
+    from app.driver_offer import preview_plan
+    driver_snapshot = rows('SELECT * FROM drivers ORDER BY id')
+    original_count = offer['recipient_count']
+    driver_id = one('SELECT driver_id FROM driver_broadcast_recipients WHERE broadcast_id=? LIMIT 1', (bid,))['driver_id']
+    for number in ('+966055504207', '+966050850729'):
+        execute("INSERT INTO driver_broadcast_recipients(broadcast_id,driver_id,driver_name,phone,status) VALUES(?,?,?,?,'pending')", (bid,driver_id,'CI malformed contact',number))
+    execute('UPDATE driver_broadcasts SET recipient_count=recipient_count+2 WHERE id=?', (bid,))
+    execute("UPDATE freight_negotiations SET loading_port_status='inside' WHERE shipment_id=?", (sid,))
+    legacy = one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
+    legacy_digest = test_broadcast_context(legacy)['digest']
+    with db() as c:
+        candidates = c.execute('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=%s ORDER BY id', (bid,)).fetchall()
+        plan = preview_plan(legacy, candidates, commands._preview_message(c, legacy))
+    assert len(plan['active']) == original_count and len(plan['excluded']) == 2
+    refresh_data = {'csrf':csrf,'refresh_confirmed':'yes','refresh_preview':plan['digest']}
+    web = TestClient(app, base_url='http://testserver', follow_redirects=False)
+    web.cookies.set('gla_session',session_id)
+    web.headers['origin'] = 'http://testserver'
+    refresh_path = f'/commands/broadcast/{bid}/refresh-preview'
+    assert web.post(refresh_path,data=refresh_data).status_code == 428
+    with patch('app.bootstrap.mfa_state', return_value={'mfa_enabled':1}), patch('app.bootstrap.recent_stepup', return_value=True):
+        assert web.post(refresh_path,data={**refresh_data,'csrf':'wrong'}).status_code == 403
+        assert web.post(refresh_path,data={**refresh_data,'refresh_confirmed':''}).status_code == 400
+        assert web.post(refresh_path,data={**refresh_data,'refresh_preview':'stale'}).status_code == 409
+        barrier = Barrier(2)
+        def refresh_or_send(which):
+            barrier.wait()
+            if which == 'refresh':
+                return web.post(refresh_path,data=refresh_data).status_code
+            return web.post(f'/commands/broadcast/{bid}/send',data={'csrf':csrf,'confirmed':'yes',
+                'test_confirmed':'yes','test_preview':legacy_digest}).status_code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(refresh_or_send, ('refresh','send')))
+        assert results[0] == 303 and results[1] in (400,409), results
+    web.close()
+    offer = one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
+    assert offer['status'] == 'draft' and offer['recipient_count'] == original_count
+    assert offer['sent_count'] == offer['failed_count'] == 0 and not offer['test_preview_digest']
+    assert 'جدة (التحميل داخل الميناء)' in offer['message']
+    assert template_parameters(template, offer['message'])[1] == 'جدة (التحميل داخل الميناء)'
+    exclusions = rows("SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? AND status='excluded' ORDER BY id", (bid,))
+    assert len(exclusions) == 2 and all(r['last_error'].startswith('invalid_saudi_trunk_prefix:') for r in exclusions)
+    assert rows('SELECT * FROM drivers ORDER BY id') == driver_snapshot
+    assert not providers.sent_to_drivers(ref)
+    assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='driver_preview_refreshed'", (sid,))['n'] == 1
+    print('PASS: guarded unsent preview refresh, Saudi contact exclusions, faithful port template, stale approval and send/refresh race.')
+
     with patch.object(commands, 'session', return_value=admin):
         preview = commands.broadcast_review(bid, SimpleNamespace()).body.decode()
     assert DISCLAIMER in preview and 'name=test_confirmed' in preview and 'name=test_preview' in preview
@@ -163,7 +212,7 @@ def run_disclosed(providers, inbound):
         asyncio.run(commands.deliver_driver_broadcast(bid))
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(deliver_once, range(2)))
-    recipients = rows('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id', (bid,))
+    recipients = rows("SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? AND status<>'excluded' ORDER BY id", (bid,))
     assert len(providers.sent_to_drivers(ref)) == len(recipients)
     assert all(x['status'] == 'sent' and x['provider_message_id'] for x in recipients)
     assert all(DISCLAIMER in x[1] for x in providers.sent_to_drivers(ref))
@@ -182,6 +231,7 @@ def run_disclosed(providers, inbound):
         'status': 'test_completed', 'revenue': 0, 'cost': 0}
     operation = one('SELECT stage,driver_name,driver_phone FROM shipment_operations WHERE shipment_id=?', (sid,))
     assert operation == {'stage': 'test_completed', 'driver_name': None, 'driver_phone': None}
+    assert rows("SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? AND status='excluded' ORDER BY id", (bid,)) == exclusions
     # Missing provider receipts never count as sent and cannot authorize acceptance.
     other = _save(NaqliatLoad(**{**payload, 'description': 'CI disclosed missing receipt'}, capture_method='manual_test'))
     other_item = one('SELECT * FROM shipments WHERE id=?', (other[2],))

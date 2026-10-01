@@ -508,3 +508,111 @@ def test_workflow_rechecks_quote_under_lock(owner_loop):
     assert not calls and database.one('SELECT asking_price FROM freight_negotiations')['asking_price'] is None
     assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', terms,
         shipment_id=1, quoted_message_id='current-receipt'))['broadcast_sent']
+
+
+def legacy_driver_draft(modules, monkeypatch):
+    commands, freight, database = modules
+    for name in ('db','one','rows','execute'):
+        monkeypatch.setattr(sys.modules['app.storage'], name, getattr(database, name))
+    database.execute("UPDATE shipments SET is_test=1,status='test_pending'")
+    bid = freight.prepare_driver_offer(1, 1)
+    # Simulate the legacy UNSENT audience, not a new or changed driver record.
+    for index, number in enumerate(('+966055504207','+966050850729'), 100):
+        database.execute("INSERT INTO driver_broadcast_recipients(broadcast_id,driver_id,driver_name,phone,status) VALUES(?,?,?,?,'pending')", (bid,index,'Legacy invalid',number))
+    database.execute('UPDATE driver_broadcasts SET recipient_count=5 WHERE id=?', (bid,))
+    database.execute("UPDATE freight_negotiations SET loading_port_status='inside'")
+    current = {'user_id':1,'role':'admin','csrf':'safe-csrf'}
+    monkeypatch.setattr(commands, 'session', lambda _: current)
+    return commands, freight, database, bid, current
+
+
+def refresh_request(data):
+    async def body(): return urllib.parse.urlencode(data).encode()
+    return types.SimpleNamespace(body=body)
+
+
+def refresh_plan(commands, database, bid):
+    from app.driver_offer import preview_plan
+    campaign = database.one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
+    recipients = database.rows('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id', (bid,))
+    with database.db() as c:
+        return preview_plan(campaign, recipients, commands._preview_message(c, campaign))
+
+
+def test_refresh_draft_excludes_invalid_audits_and_clears_approval_without_send(modules, monkeypatch):
+    commands, freight, database, bid, current = legacy_driver_draft(modules, monkeypatch)
+    before_drivers = database.rows('SELECT * FROM drivers')
+    before_financials = database.one('SELECT revenue,cost,origin FROM shipments')
+    from app.transport_test import test_broadcast_context
+    old_campaign = database.one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
+    old_digest = test_broadcast_context(old_campaign)['digest']
+    database.execute("UPDATE driver_broadcasts SET test_approved_by=1,test_approved_at='prior',test_preview_digest=? WHERE id=?", (old_digest,bid))
+    plan = refresh_plan(commands, database, bid)
+    assert len(plan['active']) == 3 and len(plan['excluded']) == 2
+    preview = commands.broadcast_review(bid, types.SimpleNamespace()).body.decode()
+    assert 'refresh-preview' in preview and 'داخل الميناء' in preview
+    assert f'action=/commands/broadcast/{bid}/send' not in preview
+    response = asyncio.run(commands.refresh_broadcast_preview(bid, refresh_request({'csrf':'safe-csrf','refresh_confirmed':'yes','refresh_preview':plan['digest']})))
+    assert response.status_code == 303
+    campaign = database.one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
+    assert campaign['recipient_count'] == 3 and campaign['status'] == 'draft'
+    assert campaign['test_approved_by'] is None and campaign['test_preview_digest'] is None
+    assert campaign['sent_count'] == campaign['failed_count'] == 0
+    excluded = database.rows("SELECT * FROM driver_broadcast_recipients WHERE status='excluded'")
+    assert len(excluded) == 2 and all(r['last_error'].startswith('invalid_saudi_trunk_prefix:') for r in excluded)
+    assert all(r['provider_message_id'] is None and r['sent_at'] is None for r in excluded)
+    assert database.rows('SELECT * FROM drivers') == before_drivers
+    assert database.one('SELECT revenue,cost,origin FROM shipments') == before_financials
+    assert database.one("SELECT COUNT(*) n FROM shipment_events WHERE event_type='driver_preview_refreshed'")['n'] == 1
+    assert test_broadcast_context(campaign)['digest'] != old_digest
+    from fastapi import BackgroundTasks
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','1')
+    with pytest.raises(HTTPException):
+        asyncio.run(commands.send_broadcast(bid,refresh_request({'csrf':'safe-csrf','confirmed':'yes','test_confirmed':'yes','test_preview':old_digest}),BackgroundTasks()))
+    # A second application of the same reviewed plan is stale, not a resend.
+    with pytest.raises(HTTPException):
+        asyncio.run(commands.refresh_broadcast_preview(bid,refresh_request({'csrf':'safe-csrf','refresh_confirmed':'yes','refresh_preview':plan['digest']})))
+
+
+@pytest.mark.parametrize('change', ['sent','sending','uncertain','failed','provider','sent_at','replied_at','confirmed','completed','accepted'])
+def test_refresh_never_mutates_attempted_campaign(modules, monkeypatch, change):
+    commands, _, database, bid, _ = legacy_driver_draft(modules, monkeypatch)
+    plan = refresh_plan(commands,database,bid)
+    if change in ('sent','sending','uncertain','failed'):
+        database.execute('UPDATE driver_broadcast_recipients SET status=? WHERE id=1', (change,))
+    elif change in ('provider','sent_at','replied_at'):
+        column = {'provider':'provider_message_id','sent_at':'sent_at','replied_at':'replied_at'}[change]
+        database.execute('UPDATE driver_broadcast_recipients SET '+column+"='evidence' WHERE id=1")
+    else:
+        column = {'confirmed':'confirmed_at','completed':'completed_at','accepted':'accepted_at'}[change]
+        database.execute('UPDATE driver_broadcasts SET '+column+"='evidence' WHERE id=?", (bid,))
+    before = database.rows('SELECT * FROM driver_broadcast_recipients')
+    with pytest.raises(HTTPException):
+        asyncio.run(commands.refresh_broadcast_preview(bid,refresh_request({'csrf':'safe-csrf','refresh_confirmed':'yes','refresh_preview':plan['digest']})))
+    assert database.rows('SELECT * FROM driver_broadcast_recipients') == before
+
+
+def test_old_invalid_draft_cannot_send_or_bypass_through_worker(modules, monkeypatch):
+    commands, _, database, bid, _ = legacy_driver_draft(modules, monkeypatch)
+    from app.transport_test import test_broadcast_context
+    from fastapi import BackgroundTasks
+    campaign = database.one('SELECT * FROM driver_broadcasts WHERE id=?',(bid,))
+    digest = test_broadcast_context(campaign)['digest']
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','1')
+    with pytest.raises(HTTPException):
+        asyncio.run(commands.send_broadcast(bid,refresh_request({'csrf':'safe-csrf','confirmed':'yes','test_confirmed':'yes','test_preview':digest}),BackgroundTasks()))
+    database.execute("UPDATE driver_broadcasts SET status='sending',test_approved_by=1,test_approved_at='approved',test_preview_digest=? WHERE id=?",(digest,bid))
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert database.one('SELECT status FROM driver_broadcasts WHERE id=?',(bid,))['status'] == 'validation_blocked'
+    assert all(r['status']=='pending' for r in database.rows('SELECT status FROM driver_broadcast_recipients'))
+
+
+@pytest.mark.parametrize('role,csrf,confirmed,digest', [('transport','safe-csrf','yes','valid'),('admin','wrong','yes','valid'),('admin','safe-csrf','','valid'),('admin','safe-csrf','yes','stale')])
+def test_refresh_requires_role_csrf_explicit_and_current_preview(modules,monkeypatch,role,csrf,confirmed,digest):
+    commands, _, database, bid, current = legacy_driver_draft(modules,monkeypatch)
+    plan = refresh_plan(commands,database,bid)
+    current['role'] = role
+    before = database.rows('SELECT * FROM driver_broadcast_recipients')
+    with pytest.raises(HTTPException):
+        asyncio.run(commands.refresh_broadcast_preview(bid,refresh_request({'csrf':csrf,'refresh_confirmed':confirmed,'refresh_preview':plan['digest'] if digest=='valid' else digest})))
+    assert database.rows('SELECT * FROM driver_broadcast_recipients') == before

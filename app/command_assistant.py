@@ -13,6 +13,7 @@ from app.data_import import _phone
 from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from app.transport_test import test_broadcast_context
+from app.driver_offer import driver_phone, offer_message, preview_plan, require_valid_audience, require_unattempted
 
 router = APIRouter()
 
@@ -284,10 +285,8 @@ async def create_command(request: Request):
         valid = []
         seen = set()
         for driver in candidates:
-            phone = re.sub(r"[\s\-()]", "", str(driver.get("whatsapp_phone") or ""))
-            if phone.startswith("00"):
-                phone = "+" + phone[2:]
-            if re.fullmatch(r"\+[1-9]\d{7,14}", phone) and phone not in seen:
+            phone = driver_phone(driver.get('whatsapp_phone'))
+            if phone and phone not in seen:
                 seen.add(phone)
                 valid.append((driver, phone))
         if not valid:
@@ -343,6 +342,66 @@ def command_api(request: Request):
     return {"automatic_external_actions": False, "supported": ["add_driver", "call", "whatsapp", "auto_contact", "driver_broadcast", "email", "navigate", "run_discovery"], "items": rows("SELECT id,raw_command,action_type,target_name,recipient,status,created_at FROM command_actions ORDER BY id DESC LIMIT 100")}
 
 
+def _preview_message(connection, campaign):
+    if not campaign.get('shipment_id'):
+        return campaign['message']
+    item = connection.execute("""SELECT s.*,n.agreed_owner_price,n.weight_tons,n.payment_method,
+        n.unloading_location,n.loading_port_status FROM shipments s
+        JOIN freight_negotiations n ON n.shipment_id=s.id WHERE s.id=%s""", (campaign['shipment_id'],)).fetchone()
+    if not item or bool(item.get('is_test')) != bool(campaign.get('is_test')):
+        raise HTTPException(409, 'علامة الاختبار لا تطابق الشحنة')
+    if item.get('agreed_owner_price') is None or not item.get('weight_tons') or not item.get('payment_method'):
+        raise HTTPException(409, 'بيانات العرض غير مكتملة؛ لا يمكن تحديثه أو إرساله')
+    return offer_message(item)
+
+
+def _validate_before_send(connection, campaign):
+    recipients = connection.execute('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=%s ORDER BY id', (campaign['id'],)).fetchall()
+    if campaign['status'] == 'draft':
+        require_unattempted(campaign, recipients)
+    require_valid_audience(campaign, recipients)
+    if _preview_message(connection, campaign) != campaign['message']:
+        raise HTTPException(409, 'تغيرت تفاصيل التحميل؛ حدّث معاينة المسودة واعتمد النص الحالي قبل الإرسال')
+
+
+@router.post('/commands/broadcast/{broadcast_id}/refresh-preview')
+async def refresh_broadcast_preview(broadcast_id: int, request: Request):
+    current = session(request)
+    data = form(await request.body())
+    if current.get('role') != 'admin' or data.get('csrf') != current['csrf']:
+        raise HTTPException(403)
+    if data.get('refresh_confirmed') != 'yes':
+        raise HTTPException(400, 'راجع المعاينة والاستبعادات واعتمد تحديث المسودة دون إرسال')
+    with db() as c:
+        campaign = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s FOR UPDATE', (broadcast_id,)).fetchone()
+        if not campaign:
+            raise HTTPException(404)
+        recipients = c.execute('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=%s ORDER BY id FOR UPDATE', (broadcast_id,)).fetchall()
+        plan = preview_plan(campaign, recipients, _preview_message(c, campaign))
+        if data.get('refresh_preview') != plan['digest']:
+            raise HTTPException(409, 'تغيرت المعاينة؛ أعد مراجعة المسودة قبل تحديثها')
+        if plan['changed']:
+            for row in plan['excluded']:
+                if row['status'] == 'pending':
+                    c.execute("UPDATE driver_broadcast_recipients SET status='excluded',last_error=%s WHERE id=%s AND status='pending'", (row['reason'], row['id']))
+            now = utcnow()
+            c.execute("""UPDATE driver_broadcasts SET message=%s,recipient_count=%s,
+                test_approved_by=NULL,test_approved_at=NULL,test_preview_digest=NULL,
+                confirmed_by=NULL,confirmed_at=NULL,updated_at=%s WHERE id=%s""",
+                (plan['message'], len(plan['active']), now, broadcast_id))
+            if campaign.get('shipment_id'):
+                summary = json.dumps({'broadcast_id':broadcast_id, 'eligible_count':len(plan['active']),
+                    'excluded':[{'recipient_id':r['id'],'phone':r['phone'],'reason':r['reason']} for r in plan['excluded']],
+                    'message_changed':plan['message'] != campaign['message'], 'preview_digest':plan['digest']}, ensure_ascii=False)
+                c.execute("""INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at,created_by)
+                    VALUES(%s,'driver_preview_refreshed',%s,'driver_offer_pending_approval',%s,%s)""",
+                    (campaign['shipment_id'], summary, now, current['user_id']))
+    if plan['changed']:
+        log(current['user_id'], 'driver_preview_refreshed', 'driver_broadcast', broadcast_id,
+            f"{len(plan['active'])} eligible; {len(plan['excluded'])} excluded; approvals cleared; no send")
+    return RedirectResponse(f'/commands/broadcast/{broadcast_id}', 303)
+
+
 @router.get("/commands/broadcast/{broadcast_id}", response_class=HTMLResponse)
 def broadcast_review(broadcast_id: int, request: Request):
     current = session(request)
@@ -350,8 +409,27 @@ def broadcast_review(broadcast_id: int, request: Request):
     if not broadcast:
         raise HTTPException(404)
     test_context = test_broadcast_context(broadcast)
-    recipients = rows("SELECT driver_name,phone,status,last_error FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id", (broadcast_id,))
-    manual_link = (lambda x: 'يتطلب اعتماد الاختبار أدناه' if test_context else
+    recipients = rows("SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id", (broadcast_id,))
+    validation, needs_refresh = '', False
+    if broadcast['status'] == 'draft':
+        try:
+            with db() as c:
+                plan = preview_plan(broadcast, recipients, _preview_message(c, broadcast))
+            needs_refresh = plan['changed'] or not plan['active']
+            if not plan['active']:
+                validation = '<p>لا يوجد مستلمون صالحون للإرسال في هذه المسودة.</p>'
+            if plan['changed']:
+                reasons = ''.join('<li dir=ltr>' + e(r['phone']) + ' — ' + e(r['reason']) + '</li>' for r in plan['excluded'])
+                validation = f"""<h2>تحديث معاينة المسودة دون إرسال</h2><p>المستلمون الصالحون بعد التحقق: {len(plan['active'])} · المستبعدون: {len(plan['excluded'])}</p>
+                <div class=msg>{e(plan['message'])}</div><ul>{reasons}</ul>
+                <form method=post action=/commands/broadcast/{broadcast_id}/refresh-preview>
+                <input type=hidden name=csrf value='{e(current['csrf'])}'><input type=hidden name=refresh_preview value='{plan['digest']}'>
+                <label><input type=checkbox name=refresh_confirmed value=yes required> راجعت النص والاستبعادات وأعتمد تحديث هذه المسودة دون إرسال</label>
+                <button>تحديث المعاينة واستبعاد الأرقام غير الصالحة</button></form>"""
+        except HTTPException as exc:
+            needs_refresh = True
+            validation = '<p>' + e(exc.detail) + '</p>'
+    manual_link = (lambda x: 'مستبعد أو ينتظر تحديث المعاينة' if x['status'] == 'excluded' or needs_refresh else 'يتطلب اعتماد الاختبار أدناه' if test_context else
                    f"<a class=wa target=_blank rel=noopener href='https://wa.me/{e(str(x['phone']).lstrip('+'))}?text={urllib.parse.quote(broadcast['message'])}'>فتح واتساب</a>")
     table = "".join(
         f"<tr><td>{e(x['driver_name'])}</td><td dir=ltr>{e(x['phone'])}</td><td>{e(x['status'])}</td>"
@@ -362,9 +440,9 @@ def broadcast_review(broadcast_id: int, request: Request):
     test_fields = (f"<h2>{e(test_context['disclaimer'])}</h2><p>الأسعار والأوزان بيانات محاكاة، ولا يوجد التزام نقل أو دفع.</p>"
                    f"<input type=hidden name=test_preview value='{e(test_context['digest'])}'>"
                    "<label><input type=checkbox name=test_confirmed value=yes required> أعتمد إرسال الاختبار المعلن بهذا النص إلى المستلمين المعروضين فقط</label>" if test_context else '')
-    if broadcast["status"] == "draft":
+    if broadcast["status"] == "draft" and not needs_refresh:
         confirm = f"""<form method=post action=/commands/broadcast/{broadcast_id}/send><input type=hidden name=csrf value="{e(current['csrf'])}">{test_fields}<label><input type=checkbox name=confirmed value=yes required> راجعت نص الرسالة وعدد المستلمين وأؤكد الإرسال مرة واحدة للجميع</label><button>إرسال للجميع</button></form>"""
-    return HTMLResponse(f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>مراجعة حملة السائقين</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;padding:24px}}.card{{max-width:950px;margin:14px auto;background:#102536;padding:22px;border-radius:16px;overflow:auto}}button{{padding:12px 18px;background:#ef4444;color:white;border:0;border-radius:9px;font-weight:bold}}.wa{{display:inline-block;padding:7px 10px;border-radius:8px;background:#22c55e;color:#04130a;text-decoration:none;font-weight:bold;white-space:nowrap}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}input[type=checkbox]{{width:auto}}.msg{{white-space:pre-wrap;background:#081925;padding:14px;border-radius:10px}}</style><div class=card><h1>مراجعة حملة السائقين</h1><p><b>الحالة:</b> {e(broadcast['status'])} | <b>المستلمون:</b> {broadcast['recipient_count']} | <b>نجح:</b> {broadcast['sent_count']} | <b>فشل:</b> {broadcast['failed_count']}</p><div class=msg>{e(broadcast['message'])}</div><p>تشمل القائمة جميع السائقين المسجلين، مع استبعاد الأرقام غير الصالحة والمكررة.</p><p style="color:#fde68a">يمكنك استخدام «فتح واتساب» لكل سائق يدويًا حتى يكتمل ربط WhatsApp Business API. فتح الرابط لا يعني أن الرسالة أُرسلت.</p>{confirm}</div><div class=card><table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>إرسال يدوي</th><th>الخطأ</th></tr>{table}</table><p><a style="color:#86efac" href=/commands>العودة لمساعد الأوامر</a></p></div></html>""")
+    return HTMLResponse(f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>مراجعة حملة السائقين</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;padding:24px}}.card{{max-width:950px;margin:14px auto;background:#102536;padding:22px;border-radius:16px;overflow:auto}}button{{padding:12px 18px;background:#ef4444;color:white;border:0;border-radius:9px;font-weight:bold}}.wa{{display:inline-block;padding:7px 10px;border-radius:8px;background:#22c55e;color:#04130a;text-decoration:none;font-weight:bold;white-space:nowrap}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}input[type=checkbox]{{width:auto}}.msg{{white-space:pre-wrap;background:#081925;padding:14px;border-radius:10px}}</style><div class=card><h1>مراجعة حملة السائقين</h1><p><b>الحالة:</b> {e(broadcast['status'])} | <b>المستلمون:</b> {broadcast['recipient_count']} | <b>نجح:</b> {broadcast['sent_count']} | <b>فشل:</b> {broadcast['failed_count']}</p><div class=msg>{e(broadcast['message'])}</div><p>تشمل القائمة جميع السائقين المسجلين، مع استبعاد الأرقام غير الصالحة والمكررة.</p><p style="color:#fde68a">يمكنك استخدام «فتح واتساب» لكل سائق يدويًا حتى يكتمل ربط WhatsApp Business API. فتح الرابط لا يعني أن الرسالة أُرسلت.</p>{validation}{confirm}</div><div class=card><table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>إرسال يدوي</th><th>الخطأ</th></tr>{table}</table><p><a style="color:#86efac" href=/commands>العودة لمساعد الأوامر</a></p></div></html>""")
 
 
 async def deliver_driver_broadcast(broadcast_id):
@@ -377,11 +455,19 @@ async def deliver_driver_broadcast(broadcast_id):
     except HTTPException:
         execute("UPDATE driver_broadcasts SET status='test_blocked',updated_at=? WHERE id=? AND status='sending'", (utcnow(), broadcast_id))
         return
+    try:
+        with db() as c:
+            _validate_before_send(c, campaign)
+    except HTTPException:
+        execute("UPDATE driver_broadcasts SET status='validation_blocked',updated_at=? WHERE id=? AND status='sending'", (utcnow(), broadcast_id))
+        return
     recipients = rows("SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? AND status='pending' ORDER BY id", (broadcast_id,))
     for recipient in recipients:
         current_campaign = one("SELECT * FROM driver_broadcasts WHERE id=?", (broadcast_id,))
         try:
             test_broadcast_context(current_campaign, approved=True)
+            with db() as c:
+                _validate_before_send(c, current_campaign)
         except HTTPException:
             execute("UPDATE driver_broadcasts SET status='test_blocked',updated_at=? WHERE id=? AND status='sending'", (utcnow(), broadcast_id))
             return
@@ -432,6 +518,7 @@ async def send_broadcast(broadcast_id: int, request: Request, background_tasks: 
         campaign = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s FOR UPDATE', (broadcast_id,)).fetchone()
         if not campaign or campaign['status'] != 'draft':
             raise HTTPException(409, 'تم اعتماد هذا العرض مسبقًا')
+        _validate_before_send(c, campaign)
         test_context = test_broadcast_context(campaign)
         if test_context and (data.get('test_confirmed') != 'yes' or data.get('test_preview') != test_context['digest']):
             raise HTTPException(400, 'راجع معاينة الاختبار الحالية ثم اعتمد إرسال الاختبار صراحة')

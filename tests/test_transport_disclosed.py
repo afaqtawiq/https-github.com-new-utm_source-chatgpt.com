@@ -142,3 +142,26 @@ def test_hidden_reference_still_binds_owner_preview_approval():
     second = {**first,'reference':'NQ-2'}
     assert owner_inquiry(first) == owner_inquiry(second)
     assert owner_inquiry_digest(first) != owner_inquiry_digest(second)
+
+
+@pytest.mark.parametrize('number,reason', [
+    ('+966055504207','invalid_saudi_trunk_prefix'), ('+966050850729','invalid_saudi_trunk_prefix'),
+    ('+96655504207','invalid_saudi_nsn_length'), ('+9665555042070','invalid_saudi_nsn_length'),
+    ('+966555504207',''), ('+966115504207',''), ('+971501234567',''), ('+12025550123',''),
+    ('+00012345678','invalid_e164'), ('not-a-phone','invalid_e164')])
+def test_driver_contact_validation_never_repairs_bad_saudi_numbers(number, reason):
+    from app.driver_offer import phone_error, driver_phone
+    assert phone_error(number).split(':')[0] == reason
+    assert bool(driver_phone(number)) == (not reason)
+
+
+def test_port_qualifier_is_truthful_approved_template_parameter():
+    from app.driver_offer import offer_message
+    item = {'reference':'NQ-29','origin':'جدة','destination':'الشارقة','is_test':True,
+            'agreed_owner_price':8700,'weight_tons':25,'payment_method':'عند التنزيل','loading_port_status':'inside'}
+    message = offer_message(item)
+    params = template_parameters(TEMPLATE, message)
+    assert params == [display_reference('NQ-29', True),'جدة (التحميل داخل الميناء)','الشارقة','25','8,550.00','الشارقة','عند التنزيل']
+    assert item['origin'] == 'جدة' and message.count(DISCLAIMER) == 2
+    item['loading_port_status'] = None
+    assert '(التحميل' not in offer_message(item)
