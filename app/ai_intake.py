@@ -162,9 +162,26 @@ def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
             history = []
     token = HISTORY.set(history)
     try:
-        return _inner_intake(c, agent, conversation_id, event_id, text, selection, message)
+        result = _inner_intake(c, agent, conversation_id, event_id, text, selection, message)
     finally:
         HISTORY.reset(token)
+    return brand(result) if agent == 'afaaq' else result
+
+
+HEADER = os.getenv('AFAQ_MESSAGE_HEADER', '\U0001F310 *Afaq Tuwaiq | آفاق طويق*')
+
+
+def brand(result):
+    """Replace the leading request code with the Afaq header and move the code to a small last line."""
+    if not isinstance(result, dict) or not isinstance(result.get('message'), str):
+        return result
+    match = re.match(r'^(AF-[0-9]+)[ \t]*\n+', result['message'])
+    if not match:
+        return result
+    body = result['message'][match.end():].strip()
+    out = dict(result)
+    out['message'] = HEADER + '\n\n' + body + '\n\n_رقم الطلب / Ref: ' + match.group(1) + '_'
+    return out
 
 
 receiver.intake_reply = intake_reply
