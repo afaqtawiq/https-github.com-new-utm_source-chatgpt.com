@@ -140,26 +140,23 @@ async def receive(request: Request):
                         if accepts_test_offer(text):
                             return 'afaaq', {'message': DISCLAIMER + '؛ تم تسجيل نجاح رد الاختبار فقط، ولم يتم تعيينك لتنفيذ شحنة.'}
                         return 'afaaq', {'message': 'تم تسجيل موافقتك على عرض النقل وربطك بالشحنة. سنتابع معك تفاصيل التنفيذ.'}
-                pending = c.execute("""SELECT s.id,s.reference,s.is_test FROM shipments s
+                from app.transport_owner import select_pending, clarification, quoted_receipt
+                quote_id = quoted_receipt(p)
+                pending = c.execute("""SELECT s.id,s.reference,s.is_test,s.origin,s.destination,n.provider_message_id FROM shipments s
                     JOIN freight_negotiations n ON n.shipment_id=s.id
                     WHERE n.owner_phone=%s AND n.contact_channel='whatsapp'
                     AND n.status='awaiting_owner' AND n.record_kind='shipment_request'""", ('+' + contact,)).fetchall()
                 if pending:
-                    references = set(re.findall(r'(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)', text.upper()))
-                    matching = [x for x in pending if x['reference'].upper() in references]
-                    selected = (matching[0] if len(references) == 1 and len(matching) == 1
-                                else pending[0] if not references and len(pending) == 1 else None)
-                    if selected is not None and selected.get('is_test') and not references:
-                        selected = None
+                    selected = select_pending(pending, text, quote_id)
                     if selected is None:
-                        return 'afaaq', {'message': 'حدد مرجع طلب النقل المنتظر مع ردك: ' + '، '.join(x['reference'] for x in pending)}
+                        return 'afaaq', {'message': clarification(pending)}
                     c.execute('''INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
                         VALUES(%s,'owner_whatsapp_reply',%s,'awaiting_owner',NOW())''', (selected['id'], text[:4000]))
                     transport_action.update(kind='owner_reply', shipment_id=selected['id'],
-                                            reference=selected['reference'], phone='+' + contact, text=text)
+                                            reference=selected['reference'], phone='+' + contact, text=text, quoted_message_id=quote_id)
                     if selected.get('is_test'):
                         return 'afaaq', {'message': DISCLAIMER + '؛ حُفظ رد الاختبار للمراجعة دون التزام نقل أو إرسال للسائقين.'}
-                    return 'afaaq', {'message': 'وصل ردك بخصوص ' + selected['reference'] + ' وتم حفظه للمراجعة واستكمال الاتفاق على السعر وشروط النقل.'}
+                    return 'afaaq', {'message': 'وصل ردك وتم حفظه للمراجعة واستكمال الاتفاق على السعر وشروط النقل.'}
             transport_mode = is_transport_request(text)
             if sender and not transport_mode:
                 pending_transport = c.execute("SELECT fields FROM zernio_requests WHERE conversation_id=%s AND agent='afaaq'", (conversation_id,)).fetchone()
@@ -222,21 +219,21 @@ async def advance_transport(action, reply):
     try:
         from app.freight_workflow import contact_owner, advance_owner_whatsapp_reply
         if action['kind'] == 'owner_reply':
-            advanced = await advance_owner_whatsapp_reply(action['phone'], action['text'], shipment_id=sid)
+            advanced = await advance_owner_whatsapp_reply(action['phone'], action['text'], shipment_id=sid, quoted_message_id=action.get('quoted_message_id'))
             if not advanced:
                 return reply
             if advanced.get('is_test'):
-                return {'message': reference + ': ' + advanced['blocked']}
+                return {'message': advanced['blocked']}
             if advanced.get('missing'):
-                return {'message': reference + ': وصل ردك. لاستكمال عرض النقل للسائقين أرسل: ' + '، '.join(advanced['missing']) + '.'}
+                return {'message': 'وصل ردك. لاستكمال عرض النقل للسائقين أرسل: ' + '، '.join(advanced['missing']) + '.'}
             if advanced.get('needs_review'):
-                return {'message': reference + ': وصل ردك وحُفظ للمراجعة؛ لم نعتمد اتفاقًا أو نرسل عرضًا للسائقين.'}
+                return {'message': 'وصل ردك وحُفظ للمراجعة؛ لم نعتمد اتفاقًا أو نرسل عرضًا للسائقين.'}
             if advanced.get('broadcast_sent'):
                 broadcast = advanced['broadcast']
-                return {'message': reference + ': تم تسجيل الاتفاق وتجهيز عرض الحمولة. قبل مزود واتساب إرسال العرض إلى '
+                return {'message': 'تم تسجيل الاتفاق وتجهيز عرض الحمولة. قبل مزود واتساب إرسال العرض إلى '
                         + str(broadcast['sent_count']) + ' من ' + str(broadcast['recipient_count'])
                         + ' سائقين مسجلين. سنعتمد أول سائق يوافق على العرض.'}
-            return {'message': reference + ': تم حفظ الاتفاق، لكن لم يتأكد إرسال عرض للسائقين. '
+            return {'message': 'تم حفظ الاتفاق، لكن لم يتأكد إرسال عرض للسائقين. '
                     + advanced.get('blocked', 'بقي العرض للمراجعة التشغيلية.')}
         await contact_owner(sid, approved=True, user_id=None)
         with db() as c:

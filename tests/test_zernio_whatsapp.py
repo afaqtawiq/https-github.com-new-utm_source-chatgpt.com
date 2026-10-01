@@ -94,3 +94,30 @@ def test_missing_receipt_is_uncertain(provider):
     with pytest.raises(RuntimeError) as caught: asyncio.run(z.send('+966500000001', 'رسالة'))
     assert not isinstance(caught.value, z.WhatsAppBlocked)
     assert len(provider['posts']) == 1
+
+
+@pytest.mark.parametrize('test_mode', [False, True])
+def test_short_owner_inquiry_requires_matching_new_approved_template(provider, test_mode):
+    from app.transport_owner import inquiry
+    from app.transport_test import DISCLAIMER
+    name = 'afaaq_transport_test_owner_inquiry_v1_ar' if test_mode else 'afaaq_transport_owner_inquiry_v3_ar'
+    specs = z.required_templates()
+    template = next(t for t in specs if t['name'] == name)
+    message = (DISCLAIMER + '\n' if test_mode else '') + inquiry('جدة', 'الشارقة')
+    legacy = next(t for t in specs if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+    provider['templates'] = [{**legacy,'status':'APPROVED'}, {**template,'status':'PENDING'}]
+    with pytest.raises(z.WhatsAppBlocked): asyncio.run(z.send('+966500000001', message))
+    assert not provider['posts']
+    provider['templates'][1]['status'] = 'APPROVED'
+    asyncio.run(z.send('+966500000001', message))
+    assert provider['posts'][0]['templateName'] == name
+    assert provider['posts'][0]['templateParams'] == ['جدة','الشارقة']
+
+
+def test_legacy_owner_template_still_exact_matches(provider):
+    legacy = next(t for t in z.required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+    provider['templates'] = [{**legacy,'status':'APPROVED'}]
+    message = legacy['components'][0]['text'].replace('{{1}}','رابغ').replace('{{2}}','دبي')
+    asyncio.run(z.send('+966500000001', message))
+    assert provider['posts'][0]['templateName'] == legacy['name']
+    assert provider['posts'][0]['templateParams'] == ['رابغ','دبي']

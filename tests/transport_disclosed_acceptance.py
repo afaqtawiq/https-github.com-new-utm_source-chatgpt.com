@@ -18,7 +18,7 @@ def run_disclosed(providers, inbound):
 
     owner = '+966509999998'
     payload = dict(origin='جدة', destination='الشارقة', owner_phone=owner,
-                   weight_tons=20, description='CI isolated disclosed transport test')
+                   description='CI isolated disclosed transport test')
     real_id = _save(NaqliatLoad(**payload, capture_method='android_accessibility'))[2]
     before_real = rows('SELECT * FROM business_shipments ORDER BY id')
     before_owner_calls = len(providers.owner_calls)
@@ -65,7 +65,7 @@ def run_disclosed(providers, inbound):
             assert sorted(pool.map(inquiry_once, range(2))) == [303,409]
     assert len(providers.owner_calls) == before_owner_calls + 1
     assert providers.owner_calls[-1][0] == owner and providers.owner_calls[-1][1].startswith(DISCLAIMER)
-    assert ref in providers.owner_calls[-1][1] and 'جدة → الشارقة' in providers.owner_calls[-1][1]
+    assert ref not in providers.owner_calls[-1][1] and 'جدة إلى الشارقة' in providers.owner_calls[-1][1]
     contacted = one('SELECT test_owner_contact_status,provider_message_id,status FROM freight_negotiations WHERE shipment_id=?', (sid,))
     assert contacted['test_owner_contact_status'] == 'sent' and contacted['provider_message_id'].startswith('fake-owner-')
     assert contacted['status'] == 'awaiting_owner'
@@ -80,16 +80,18 @@ def run_disclosed(providers, inbound):
         return (reference + '\nالسعر النهائي: 2000 ريال\nالوزن: 20 طن'
                 '\nالتنزيل: مستودع تجريبي\nطريقة الدفع: محاكاة دون دفع')
 
-    # The verified administrator may also be the test owner. He must name the
-    # test reference; an unrelated manager command must still use admin routing.
+    # The verified administrator may also be the test owner. A unique pending
+    # inquiry accepts a reference-free reply; admin command routing is unchanged.
     with patch.dict('os.environ', {'WHATSAPP_COMMAND_OWNER': owner, 'AFAQ_TEAM': '[]'}):
-        inbound('test-owner-no-reference', owner, terms(''))
+        inbound('test-owner-no-reference', owner, 'السعر: 2000\nالدفع: محاكاة دون دفع\nالتحميل من خارج الميناء')
+        saved = one('SELECT asking_price,weight_tons,loading_port_status FROM freight_negotiations WHERE shipment_id=?', (sid,))
+        assert saved['asking_price'] == 2000 and saved['loading_port_status'] == 'outside'
         assert not rows('SELECT id FROM driver_broadcasts WHERE shipment_id=?', (sid,))
-        assert 'حدد مرجع' in providers.replies['test-owner-no-reference']['message']
+        assert 'الوزن' in providers.replies['test-owner-no-reference']['message']
         inbound('test-owner-wrong-number', '+966509999997', terms())
         assert not rows('SELECT id FROM driver_broadcasts WHERE shipment_id=?', (sid,))
-        inbound('test-owner-terms', owner, terms())
-        assert inbound('test-owner-terms', owner, terms())['duplicate']
+        inbound('test-owner-terms', owner, terms(''))
+        assert inbound('test-owner-terms', owner, terms(''))['duplicate']
     offer = one('SELECT * FROM driver_broadcasts WHERE shipment_id=?', (sid,))
     bid = offer['id']
     assert offer['is_test'] and offer['status'] == 'draft'

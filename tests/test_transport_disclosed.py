@@ -74,3 +74,71 @@ def test_digest_is_order_independent_but_not_audience_independent(campaign):
     recipients = state['recipients']
     assert preview_digest(item['message'], recipients) == preview_digest(item['message'], recipients[::-1])
     assert preview_digest(item['message'], recipients) != preview_digest(item['message'], recipients[:1])
+
+
+def test_short_owner_inquiry_has_only_approved_questions_and_no_reference():
+    from app.transport_owner import inquiry
+    from app.transport_test import owner_inquiry
+    body = 'السلام عليكم، معك آفاق طويق. بخصوص حمولة جدة إلى الشارقة: كم السعر؟ وما طريقة الدفع؟ والتحميل من داخل الميناء أم خارجه؟'
+    assert inquiry('جدة', 'الشارقة') == body
+    assert owner_inquiry({'is_test':True,'reference':'NQ-29','origin':'جدة','destination':'الشارقة'}) == DISCLAIMER + '\n' + body
+
+
+@pytest.fixture
+def pending_owners():
+    return [{'id':1,'reference':'NQ-1','provider_message_id':'wamid-old','origin':'جدة','destination':'الشارقة','is_test':True},
+            {'id':2,'reference':'NQ-2','provider_message_id':'wamid-new','origin':'الرياض','destination':'دبي','is_test':False}]
+
+
+def test_owner_correlation_unique_quote_and_route(pending_owners):
+    from app.transport_owner import select_pending, quoted_receipt, clarification
+    first, second = pending_owners
+    assert select_pending([first], 'السعر: 2000') == first
+    assert select_pending(pending_owners, 'السعر: 2000') is None
+    assert select_pending(pending_owners, 'جدة إلى الشارقة\nالسعر: 2000') == first
+    payload = {'id':'event','message':{'id':'inbound'},'metadata':{'quotedMessageId':'wamid-other-perspective',
+        'quotedMessage':{'messageId':'internal-id','platformMessageId':'wamid-old'}}}
+    assert quoted_receipt(payload) == 'wamid-old'
+    assert select_pending(pending_owners, 'السعر: 2000', quoted_receipt(payload)) == first
+    assert 'NQ-' not in clarification(pending_owners)
+    assert 'جدة إلى الشارقة' in clarification(pending_owners)
+    assert select_pending([first, {**second, 'origin':'جدة','destination':'الشارقة'}], 'جدة إلى الشارقة السعر: 2000') is None
+
+
+@pytest.mark.parametrize('quote,text', [('stale','السعر: 2000'), ('','السعر: 2000'), ('wamid-new','NQ-1 السعر: 2000')])
+def test_stale_malformed_or_conflicting_quote_never_falls_back(pending_owners, quote, text):
+    from app.transport_owner import select_pending
+    assert select_pending(pending_owners, text, quote) is None
+    assert select_pending(pending_owners[:1], text, quote) is None
+
+
+@pytest.mark.parametrize('metadata,expected', [({},None), ({'quotedMessageId':'raw'},'raw'),
+    ({'quotedMessage':{'messageId':'internal'}},''), ({'quotedMessageId':123},''),
+    ({'quotedMessage':{},'quotedMessageId':'raw'},'raw')])
+def test_quote_contract_uses_only_documented_platform_identifiers(metadata, expected):
+    from app.transport_owner import quoted_receipt
+    assert quoted_receipt({'metadata':metadata}) == expected
+
+
+@pytest.mark.parametrize('text,expected', [('من داخل الميناء','inside'),('التحميل خارج الميناء','outside'),
+    ('داخل الميناء أم خارج الميناء',None),('ليس داخل الميناء',None),('لا أعرف',None),('داخل الميناء؟',None),('التنزيل داخل الميناء',None),('داخل الميناء أو خارجه',None),('التحميل خارج الميناء\nالتحميل داخل الميناء',None)])
+def test_port_status_is_explicit_only(text, expected):
+    from app.transport_owner import loading_port_status
+    assert loading_port_status(text) == expected
+
+
+def test_explicit_wrong_route_and_empty_quote_do_not_match_unique_pending(pending_owners):
+    from app.transport_owner import select_pending
+    first, second = pending_owners
+    assert select_pending([second], 'جدة إلى الشارقة\nالسعر: 2000') is None
+    assert select_pending(pending_owners, 'جدة إلى الشارقة\nالسعر: 2000', 'wamid-new') is None
+    assert select_pending([{**first,'provider_message_id':''}], 'السعر: 2000', '') is None
+    assert select_pending([first], 'جدة إلى الشارقة أو الرياض إلى دبي السعر: 2000') is None
+
+
+def test_hidden_reference_still_binds_owner_preview_approval():
+    from app.transport_test import owner_inquiry, owner_inquiry_digest
+    first = {'is_test':True,'reference':'NQ-1','owner_phone':'+966500000001','origin':'جدة','destination':'الشارقة'}
+    second = {**first,'reference':'NQ-2'}
+    assert owner_inquiry(first) == owner_inquiry(second)
+    assert owner_inquiry_digest(first) != owner_inquiry_digest(second)

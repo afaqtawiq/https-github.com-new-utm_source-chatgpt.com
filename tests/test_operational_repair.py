@@ -41,7 +41,7 @@ class Database:
         CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER,naqliat_load_id INTEGER,
             record_kind TEXT NOT NULL DEFAULT 'shipment_request',owner_phone TEXT,status TEXT,contact_channel TEXT,provider_call_id TEXT,provider_message_id TEXT,
             asking_price REAL,agreed_owner_price REAL,driver_offer_price REAL,weight_tons REAL,
-            unloading_location TEXT,payment_method TEXT,notes TEXT,last_error TEXT,contacted_at TEXT,agreed_at TEXT,updated_at TEXT,test_owner_contact_status TEXT DEFAULT 'not_sent',test_owner_approved_by INTEGER,test_owner_preview_digest TEXT);
+            unloading_location TEXT,payment_method TEXT,loading_port_status TEXT,notes TEXT,last_error TEXT,contacted_at TEXT,agreed_at TEXT,updated_at TEXT,test_owner_contact_status TEXT DEFAULT 'not_sent',test_owner_approved_by INTEGER,test_owner_preview_digest TEXT);
         CREATE TABLE drivers(id INTEGER PRIMARY KEY,driver_name TEXT,whatsapp_phone TEXT,availability TEXT,offer_consent INTEGER);
         CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,raw_command TEXT,message TEXT,status TEXT,recipient_count INTEGER,
             sent_count INTEGER DEFAULT 0,failed_count INTEGER DEFAULT 0,created_by INTEGER,created_at TEXT,updated_at TEXT,
@@ -455,7 +455,7 @@ def test_disclosed_owner_inquiry_preserves_real_receipt_and_blocks_duplicate_sen
     result = database.one('SELECT test_owner_contact_status,provider_message_id,status FROM freight_negotiations')
     assert result == {'test_owner_contact_status':state,'provider_message_id':receipt,'status':'awaiting_owner'}
     assert len(calls) == 1 and calls[0][1].startswith(DISCLAIMER)
-    assert 'NQ-16' in calls[0][1] and 'الرياض → جدة' in calls[0][1]
+    assert 'NQ-16' not in calls[0][1] and 'الرياض إلى جدة' in calls[0][1]
     assert not database.rows('SELECT * FROM driver_broadcasts')
     if mode != 'blocked':
         with pytest.raises(HTTPException): asyncio.run(freight.send_test_owner_inquiry(1, 1, digest))
@@ -486,3 +486,25 @@ def test_disclosed_owner_inquiry_checks_role_csrf_preview_and_real_record(module
     with pytest.raises(HTTPException) as exc: asyncio.run(freight.send_test_owner_inquiry(1,1,digest))
     assert exc.value.status_code == 400
     assert database.one('SELECT test_owner_contact_status FROM freight_negotiations')['test_owner_contact_status'] == 'not_sent'
+
+
+def test_reference_free_test_owner_saves_initial_terms_without_inventing_weight(owner_loop):
+    freight, database, calls = owner_loop
+    database.execute("UPDATE shipments SET is_test=1,status='test_pending'")
+    result = asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001',
+        'السعر: 2000\nطريقة الدفع: محاكاة\nالتحميل من داخل الميناء', shipment_id=1))
+    assert 'الوزن' in result['missing'] and not calls
+    assert database.one('SELECT asking_price,weight_tons,loading_port_status,unloading_location FROM freight_negotiations') == {
+        'asking_price':2000,'weight_tons':None,'loading_port_status':'inside','unloading_location':None}
+    assert not database.rows('SELECT * FROM driver_broadcasts')
+
+
+def test_workflow_rechecks_quote_under_lock(owner_loop):
+    freight, database, calls = owner_loop
+    database.execute("UPDATE freight_negotiations SET provider_message_id='current-receipt'")
+    terms = 'السعر: 2000\nالوزن: 20\nالدفع: عند التسليم'
+    assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', terms,
+        shipment_id=1, quoted_message_id='stale-receipt')) is None
+    assert not calls and database.one('SELECT asking_price FROM freight_negotiations')['asking_price'] is None
+    assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', terms,
+        shipment_id=1, quoted_message_id='current-receipt'))['broadcast_sent']

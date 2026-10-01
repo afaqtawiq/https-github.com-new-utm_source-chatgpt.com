@@ -173,7 +173,7 @@ def test_shipper_reply_from_admin_or_customer_is_linked_once(db, outbound, sende
     assert len(events) == 1 and events[0]['shipment_id'] == sid
     assert len(db.transport_actions) == 1 and db.transport_actions[0]['shipment_id'] == sid
     assert events[0]['summary'] == text
-    assert len(outbound) == 1 and 'NQ-21' in outbound[0]['message']
+    assert len(outbound) == 1 and 'NQ-21' not in outbound[0]['message']
     assert 'أوامر الإدارة' not in outbound[0]['message']
     assert db.execute('SELECT status FROM freight_negotiations').fetchone()['status'] == 'awaiting_owner'
 
@@ -192,7 +192,8 @@ def test_multiple_shipments_require_reference_without_guessing(db, outbound):
     second = pending_owner_shipment(db, reference='NQ-22')
     receive(payload('نعم متاحة'))
     assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
-    assert 'NQ-21' in outbound[-1]['message'] and 'NQ-22' in outbound[-1]['message']
+    assert 'NQ-21' not in outbound[-1]['message'] and 'NQ-22' not in outbound[-1]['message']
+    assert 'رد مباشرة' in outbound[-1]['message']
     assert not db.transport_actions
     receive(payload('NQ-22: نعم متاحة', event='evt-2'))
     assert db.execute('SELECT shipment_id FROM shipment_events').fetchone()['shipment_id'] == second
@@ -605,3 +606,26 @@ def test_shared_router_returns_both_teams(text,previous):
     assert {b['payload'] for b in receiver.response_body(agent)['buttons']}=={'route_afaaq','route_shawahid'}
     assert receiver.choose_agent('',interactive='route_shawahid',previous=previous)=='shawahid'
     assert receiver.choose_agent('',interactive='route_afaaq',previous=previous)=='afaaq'
+
+
+def test_owner_quote_resolves_older_pending_and_forwards_receipt(db, outbound):
+    first = pending_owner_shipment(db)
+    pending_owner_shipment(db, reference='NQ-22')
+    db.execute("UPDATE freight_negotiations SET provider_message_id='wamid-old' WHERE shipment_id=%s", (first,))
+    p = payload('السعر: 2000')
+    p['metadata'] = {'quotedMessageId':'other-perspective','quotedMessage':{'messageId':'internal-id','platformMessageId':'wamid-old'}}
+    receive(p)
+    assert db.transport_actions[0]['shipment_id'] == first
+    assert db.transport_actions[0]['quoted_message_id'] == 'wamid-old'
+    assert 'NQ-' not in outbound[-1]['message']
+
+
+@pytest.mark.parametrize('metadata', [{'quotedMessageId':'stale'}, {'quotedMessage':{'messageId':'internal-only'}}])
+def test_unknown_quote_never_falls_back_to_unique_pending(db, outbound, metadata):
+    pending_owner_shipment(db)
+    p = payload('السعر: 2000')
+    p['metadata'] = metadata
+    receive(p)
+    assert not db.transport_actions
+    assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
+    assert 'NQ-' not in outbound[-1]['message']
