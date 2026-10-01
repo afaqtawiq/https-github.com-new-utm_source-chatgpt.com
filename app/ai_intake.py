@@ -9,6 +9,7 @@ Hard rules in the prompt: only the approved Afaq price list, no guaranteed dates
 no invented facts. The previous rule-based reply is kept as the fallback, so a Claude error
 never leaves a customer without an answer.
 """
+import contextvars
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import re
 import httpx
 
 from app import afaaq_customer_reply as base
+from app import zernio_receiver as receiver
 from app.customs_knowledge import KNOWLEDGE
 from app import tariff_lookup
 
@@ -63,6 +65,10 @@ Rules you must never break:
   FASAH authorization steps with Afaq's broker licence number 2513 (مؤسسة آفاق طويق للتخليص الجمركي) from the knowledge.
 - When the customer asks for links, or a link would help (FASAH, SABER, SFDA, ports, ZATCA...), send the official links
   from the knowledge exactly as written, one per line with its name. Never invent or shorten a link.
+- Reply ONLY to the customer's latest message. The recent conversation is given for context: do not repeat prices,
+  requirements or explanations you already gave unless the customer asks again. If the latest message is a new
+  question, answer just that question.
+- When you multiply a rate by a number of containers, give the total too (for example 6 x 200 = 1,200 ريال).
 - Do not assume facts about the goods (for example alcohol content, material or use). When a requirement depends on
   such a detail, state both cases briefly or ask about it.
 
@@ -81,7 +87,8 @@ def ask(fields, pending, text, candidates=None):
     if not key:
         return None
     saved = {k: fields.get(k) for k in KEYS + ('company',) if fields.get(k)}
-    payload = {'saved_request': saved, 'last_question_asked': pending, 'customer_message': text[:4000]}
+    payload = {'saved_request': saved, 'last_question_asked': pending,
+               'recent_conversation': HISTORY.get(), 'customer_message': text[:4000]}
     if candidates is not None:
         payload['tariff_candidates'] = candidates or 'no matching lines found'
     user = json.dumps(payload, ensure_ascii=False)
@@ -135,3 +142,29 @@ def reply(fields, pending, text, selection, updates, greeting):
 
 
 base.reply = reply
+
+HISTORY = contextvars.ContextVar('afaq_history', default=[])
+_inner_intake = receiver.intake_reply
+
+
+def intake_reply(c, agent, conversation_id, event_id, text, selection, message):
+    """Load the last exchanges of this conversation so Claude answers only the new message."""
+    history = []
+    if agent == 'afaaq':
+        try:
+            rows = c.execute('''SELECT m.body, m.reply FROM zernio_request_messages m
+                JOIN zernio_requests r ON r.id=m.request_id
+                WHERE r.conversation_id=%s AND r.agent=%s ORDER BY m.created_at DESC LIMIT 6''',
+                             (conversation_id, agent)).fetchall()
+            for row in reversed(rows):
+                history.append({'customer': str(row['body'])[:600], 'assistant': str(row['reply'])[:600]})
+        except Exception:
+            history = []
+    token = HISTORY.set(history)
+    try:
+        return _inner_intake(c, agent, conversation_id, event_id, text, selection, message)
+    finally:
+        HISTORY.reset(token)
+
+
+receiver.intake_reply = intake_reply
