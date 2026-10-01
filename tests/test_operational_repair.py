@@ -61,7 +61,7 @@ class Database:
         self.raw.commit()
 
     def query(self, sql, args=()):
-        sql = re.sub(r' FOR UPDATE(?: OF s,n)?', '', sql)
+        sql = re.sub(r' FOR UPDATE(?: OF s,n| OF b)?', '', sql)
         return Result(self.raw.execute(sql.replace('%s', '?'), args))
 
     @contextmanager
@@ -167,7 +167,7 @@ def test_incomplete_route_prepares_contact_without_sending(modules):
     database.execute("UPDATE shipments SET origin='',destination='غير محدد'")
     asyncio.run(freight.contact_owner(1))
     row = database.one('SELECT * FROM freight_negotiations')
-    assert row['status'] == 'needs_contact_approval'
+    assert row['status'] == 'needs_manual_data'
     assert row['provider_message_id'] is None
     assert 'مدينة التحميل' in freight._owner_message(database.one('SELECT * FROM shipments'))
 
@@ -287,3 +287,99 @@ def test_whatsapp_preflight_block_is_retryable_not_uncertain(modules, monkeypatc
     monkeypatch.setattr(freight, 'send_text_message', blocked)
     asyncio.run(freight.contact_owner(1, approved=True, user_id=1))
     assert database.one('SELECT status FROM freight_negotiations')['status'] == 'contact_blocked'
+
+
+@pytest.fixture
+def owner_loop(modules, monkeypatch):
+    commands, freight, database = modules
+    monkeypatch.setitem(sys.modules, 'app.command_assistant', commands)
+    database.execute("UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='whatsapp',asking_price=NULL,agreed_owner_price=NULL,driver_offer_price=NULL,payment_method=NULL,weight_tons=NULL")
+    calls = []
+    async def send(*args):
+        calls.append(args)
+        return {'messages': [{'id': 'simulated-' + str(len(calls))}]}
+    monkeypatch.setattr(commands, 'send_text_message', send)
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    return freight, database, calls
+
+
+def test_owner_whatsapp_complete_loop_receipts_margin_and_duplicates(owner_loop):
+    freight, database, calls = owner_loop
+    result = asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'NQ-16\nالسعر النهائي: ٢٬٥٠٠\nالوزن: ٢٠٫٥ طن\nالدفع: عند التسليم'))
+    assert result['broadcast_sent'] and result['broadcast']['sent_count'] == 3
+    assert len(calls) == 3 and '2,350.00' in calls[0][1]
+    assert database.one('SELECT revenue,cost FROM shipments') == {'revenue': 2500, 'cost': 2350}
+    assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'السعر: 3000\nالوزن: 30 طن\nالدفع: نقدا')) is None
+    assert len(calls) == 3
+    assert freight.accept_driver_reply('+966500000002', 'موافق NQ-16')
+    assert not freight.accept_driver_reply('+966500000003', 'موافق NQ-16')
+    assert database.one('SELECT status FROM shipments')['status'] == 'driver_assigned'
+
+
+def test_owner_whatsapp_partial_fields_preserve_price(owner_loop):
+    freight, database, calls = owner_loop
+    first = asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'السعر: 2000'))
+    assert set(first['missing']) == {'الوزن', 'طريقة الدفع'} and not calls
+    assert database.one('SELECT asking_price,agreed_owner_price FROM freight_negotiations') == {'asking_price': 2000, 'agreed_owner_price': None}
+    result = asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'الوزن: 20 طن\nالدفع: عند التسليم'))
+    assert result['broadcast_sent'] and len(calls) == 3
+
+
+@pytest.mark.parametrize('text', [
+    'السعر ليس 2000 ريال، لا أوافق', 'السعر؟ الوزن: 2000 كجم', 'مطلوب 400 كيلو',
+    'السعر: 2000 أو 3000\nالوزن: 20 طن\nالدفع: نقدا',
+    'السعر: 2000-3000\nالوزن: 20 طن\nالدفع: نقدا',
+    'السعر: -2000\nالوزن: 20 طن\nالدفع: نقدا',
+    'السعر: 2000\nالوزن: 2000 كجم\nالدفع: نقدا',
+    'غير متاحة\nالسعر: 2000\nالوزن: 20 طن\nالدفع: نقدا',
+    'السعر: 2000\nالسعر: 3000\nالوزن: 20 طن\nالدفع: نقدا',
+])
+def test_owner_whatsapp_ambiguous_terms_never_broadcast(owner_loop, text):
+    freight, database, calls = owner_loop
+    result = asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', text))
+    assert not result.get('broadcast_id') and not calls
+    assert database.one('SELECT status FROM freight_negotiations')['status'] == 'awaiting_owner'
+
+
+def test_owner_whatsapp_disabled_sends_truthful_draft(owner_loop, monkeypatch):
+    freight, database, calls = owner_loop
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '0')
+    result = asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'السعر: 2000\nالوزن: 20 طن\nالدفع: نقدا'))
+    assert result['broadcast_id'] and not result['broadcast_sent'] and result['blocked']
+    assert result['broadcast']['status'] == 'draft' and not calls
+
+
+def test_owner_whatsapp_ignores_other_shipments_and_carriers(owner_loop):
+    freight, database, calls = owner_loop
+    text = 'السعر: 2000\nالوزن: 20 طن\nالدفع: نقدا'
+    assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'NQ-99 ' + text)) is None
+    assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'NQ-16 NQ-99 ' + text)) is None
+    assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', text, shipment_id=99)) is None
+    database.execute("UPDATE freight_negotiations SET record_kind='carrier_offer'")
+    assert asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', text)) is None
+    assert not calls
+
+
+def test_incomplete_route_blocks_approved_provider_call(modules, monkeypatch):
+    _, freight, database = modules
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    database.execute("UPDATE shipments SET origin='غير محدد'")
+    asyncio.run(freight.contact_owner(1, approved=True))
+    assert database.one('SELECT status FROM freight_negotiations')['status'] == 'needs_manual_data'
+
+
+def test_driver_cannot_accept_two_references(owner_loop):
+    freight, database, calls = owner_loop
+    asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'السعر: 2000\nالوزن: 20 طن\nالدفع: نقدا'))
+    assert not freight.accept_driver_reply('+966500000002', 'موافق NQ-16 NQ-99')
+
+
+def test_workflow_api_reports_effective_contact_gate(modules, monkeypatch):
+    _, freight, database = modules
+    monkeypatch.setattr(freight, 'session', lambda request: {'user_id': 1})
+    monkeypatch.setenv('FREIGHT_AUTO_OWNER_CONTACT', '0')
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    assert freight.workflow_api(None)['owner_auto_contact_enabled'] is True
+    monkeypatch.setenv('FREIGHT_AUTO_OWNER_CONTACT', '1')
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '0')
+    assert freight.workflow_api(None)['owner_auto_contact_enabled'] is False

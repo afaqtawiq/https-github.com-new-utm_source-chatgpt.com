@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 from urllib.parse import quote
@@ -113,6 +114,7 @@ async def receive(request: Request):
     ensure_intake_tables()
     from app.whatsapp_admin import owner_sender, admin_reply, is_admin_command
     sender = owner_sender(p)
+    transport_action = {}
     def prepare_reply():
         with db() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
@@ -148,6 +150,8 @@ async def receive(request: Request):
                         return 'afaaq', {'message': 'حدد مرجع طلب النقل المنتظر مع ردك: ' + '، '.join(x['reference'] for x in pending)}
                     c.execute('''INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
                         VALUES(%s,'owner_whatsapp_reply',%s,'awaiting_owner',NOW())''', (selected['id'], text[:4000]))
+                    transport_action.update(kind='owner_reply', shipment_id=selected['id'],
+                                            reference=selected['reference'], phone='+' + contact, text=text)
                     return 'afaaq', {'message': 'وصل ردك بخصوص ' + selected['reference'] + ' وتم حفظه للمراجعة واستكمال الاتفاق على السعر وشروط النقل.'}
             transport_mode = is_transport_request(text)
             if sender and not transport_mode:
@@ -166,10 +170,17 @@ async def receive(request: Request):
                     c.execute("INSERT INTO zernio_conversation_agents(conversation_id,agent) VALUES(%s,%s) ON CONFLICT(conversation_id) DO UPDATE SET agent=EXCLUDED.agent,updated_at=NOW()", (conversation_id,agent))
                 else:
                     c.execute("DELETE FROM zernio_conversation_agents WHERE conversation_id=%s", (conversation_id,))
+                previous_transport = c.execute("SELECT fields FROM zernio_requests WHERE conversation_id=%s AND agent='afaaq'", (conversation_id,)).fetchone() if agent == 'afaaq' else None
+                previous_ref = ((previous_transport or {}).get('fields') or {}).get('_last_transport_reference')
                 reply = intake_reply(c, agent, conversation_id, event_id, text, selection, message)
                 if agent == 'afaaq':
                     saved = c.execute("SELECT fields FROM zernio_requests WHERE conversation_id=%s AND agent='afaaq'", (conversation_id,)).fetchone()
                     values = dict(saved['fields'] or {})
+                    new_ref = values.get('_last_transport_reference')
+                    if private_transport and new_ref and new_ref != previous_ref:
+                        shipment = c.execute("SELECT id FROM shipments WHERE reference=%s", (new_ref,)).fetchone()
+                        if shipment:
+                            transport_action.update(kind='contact_owner', shipment_id=shipment['id'], reference=new_ref)
                     values['_whatsapp_account_id'] = account_id
                     c.execute("""UPDATE zernio_requests SET fields=%s::jsonb
                         WHERE conversation_id=%s AND agent='afaaq'""",
@@ -179,6 +190,10 @@ async def receive(request: Request):
     if prepared is None:
         return {"ok":True,"duplicate":True}
     agent, reply = prepared
+    if transport_action:
+        # Only an action selected by the verified private intake transaction may
+        # cross into the transport workflow after commit.
+        reply = await advance_transport(transport_action, reply)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",
@@ -191,6 +206,47 @@ async def receive(request: Request):
         c.execute("UPDATE zernio_reply_events SET state=%s,updated_at=NOW() WHERE event_id=%s",(state,event_id))
     # An uncertain send is never retried automatically; reconcile with provider first.
     return {"ok":state=="sent","state":state,"agent":agent,"retry_automatically":False}
+
+
+async def advance_transport(action, reply):
+    """Run a committed, verified transport action and report only saved evidence."""
+    sid = action['shipment_id']
+    reference = action['reference']
+    try:
+        from app.freight_workflow import contact_owner, advance_owner_whatsapp_reply
+        if action['kind'] == 'owner_reply':
+            advanced = await advance_owner_whatsapp_reply(action['phone'], action['text'], shipment_id=sid)
+            if not advanced:
+                return reply
+            if advanced.get('missing'):
+                return {'message': reference + ': وصل ردك. لاستكمال عرض النقل للسائقين أرسل: ' + '، '.join(advanced['missing']) + '.'}
+            if advanced.get('needs_review'):
+                return {'message': reference + ': وصل ردك وحُفظ للمراجعة؛ لم نعتمد اتفاقًا أو نرسل عرضًا للسائقين.'}
+            if advanced.get('broadcast_sent'):
+                broadcast = advanced['broadcast']
+                return {'message': reference + ': تم تسجيل الاتفاق وتجهيز عرض الحمولة. قبل مزود واتساب إرسال العرض إلى '
+                        + str(broadcast['sent_count']) + ' من ' + str(broadcast['recipient_count'])
+                        + ' سائقين مسجلين. سنعتمد أول سائق يوافق على العرض.'}
+            return {'message': reference + ': تم حفظ الاتفاق، لكن لم يتأكد إرسال عرض للسائقين. '
+                    + advanced.get('blocked', 'بقي العرض للمراجعة التشغيلية.')}
+        await contact_owner(sid, approved=True, user_id=None)
+        with db() as c:
+            saved = c.execute("SELECT status,provider_message_id FROM freight_negotiations WHERE shipment_id=%s", (sid,)).fetchone()
+        if saved and saved['status'] == 'awaiting_owner' and saved['provider_message_id']:
+            return {'message': reply['message'].replace('لم يبدأ التواصل بعد.', 'قبل مزود واتساب رسالة التواصل، وننتظر رد صاحب الشحنة.')}
+        return reply
+    except Exception:
+        # Do not lose the intake acknowledgement or expose provider credentials in
+        # an error. Record the selected shipment, never the latest row by phone.
+        logging.getLogger(__name__).exception('Transport advance failed for shipment %s', sid)
+        try:
+            with db() as c:
+                c.execute("""INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
+                    VALUES(%s,'transport_auto_advance_failed',%s,'needs_review',NOW())""",
+                    (sid, 'تعذر استكمال مسار النقل تلقائيًا؛ يلزم التحقق من الحالة قبل إعادة الإرسال'))
+        except Exception:
+            logging.getLogger(__name__).exception('Unable to record transport failure for shipment %s', sid)
+        return {'message': reference + ': حُفظ ردك، وتعذر استكمال مسار النقل تلقائيًا. يلزم التحقق من حالة الإرسال قبل إعادة المحاولة.'}
 
 
 # Stateful intake: customer information is collected explicitly, never guessed.

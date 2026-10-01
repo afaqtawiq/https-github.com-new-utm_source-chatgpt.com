@@ -13,7 +13,7 @@ from app.storage import db, execute, get_session, log, one, rows, utcnow
 from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
 from contextlib import nullcontext
-from app.logistics_parsing import phone as normalize_phone, accepts_offer
+from app.logistics_parsing import phone as normalize_phone, accepts_offer, digits
 
 
 router = APIRouter()
@@ -144,7 +144,7 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
     # owner template requires real origin/destination values; ask the operator to
     # repair extraction on the same shipment instead of producing a non-matching
     # free-form message that will be blocked by Meta.
-    if any(name in missing for name in ('مدينة أو موقع التحميل', 'مدينة أو موقع التنزيل')):
+    if not _usable_text(item.get('origin')) or not _usable_text(item.get('destination')):
         execute("UPDATE freight_negotiations SET status='needs_manual_data',last_error=?,updated_at=? WHERE shipment_id=?",
                 ("المسار غير مكتمل؛ صحح مدينة التحميل والتنزيل من النص المحفوظ ثم أعد التواصل. لم تُرسل رسالة", utcnow(), shipment_id))
         return
@@ -153,9 +153,9 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
         execute("UPDATE freight_negotiations SET status=?,last_error=?,updated_at=? WHERE shipment_id=?",
                 (status, "رسالة استكمال البيانات جاهزة لاعتماد التواصل" if missing else "التواصل جاهز للاعتماد", utcnow(), shipment_id))
         return
-    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1" or os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") != "1":
+    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1":
         execute("UPDATE freight_negotiations SET status='contact_blocked',last_error=?,updated_at=? WHERE shipment_id=?",
-                ("قناة التواصل الخارجي غير مفعلة؛ المسودة محفوظة ولم تُرسل", utcnow(), shipment_id))
+                ("الإرسال الخارجي غير مفعّل على الخادم؛ لم تُرسل رسالة صاحب الشحنة", utcnow(), shipment_id))
         return
     # Claim before any network request. Concurrent invocations cannot send twice.
     with db() as c:
@@ -165,7 +165,7 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
             (utcnow(), shipment_id)).fetchone()
     if not claimed:
         return
-    channel = os.getenv("FREIGHT_OWNER_CONTACT_CHANNEL", "retell").lower()
+    channel = os.getenv("FREIGHT_OWNER_CONTACT_CHANNEL", "whatsapp").lower()
     attempted = False
     try:
         if channel == "retell":
@@ -354,20 +354,134 @@ def prepare_driver_offer(shipment_id, user_id):
     return bid
 
 
+async def start_driver_broadcast(broadcast_id, user_id=None):
+    """Start an already prepared freight offer without a second manual approval.
+
+    The owner agreement is the business trigger; ENABLE_EXTERNAL_ACTIONS remains the
+    global kill switch. Claims make this idempotent.
+    """
+    if os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") != "1":
+        return False
+    now = utcnow()
+    with db() as c:
+        claim = c.execute("""UPDATE driver_broadcasts SET status='sending',confirmed_by=COALESCE(confirmed_by,%s),
+            confirmed_at=COALESCE(confirmed_at,%s),updated_at=%s
+            WHERE id=%s AND status='draft' AND shipment_id IS NOT NULL RETURNING id""",
+            (user_id, now, now, broadcast_id)).fetchone()
+    if not claim:
+        return False
+    from app.command_assistant import deliver_driver_broadcast
+    await deliver_driver_broadcast(broadcast_id)
+    return True
+
+
+def _number_after(pattern, text):
+    # Only a directly labelled, unambiguous number is a financial term. Never
+    # scan across a line into a shipment reference, phone number or weight.
+    text = digits(text).replace("٬", ",").replace("٫", ".")
+    matches = list(re.finditer(r"(?<!\w)" + pattern + r"[ \t]*[:：=]?[ \t]*(\d+(?:,\d{3})*(?:\.\d+)?)(?![\d,.])", text, re.I))
+    if any(re.match(r"[ \t]*(?:[-–/]|(?:إلى|الى|أو|او)\b)", text[match.end():]) for match in matches):
+        return None
+    values = {float(match.group(1).replace(",", "")) for match in matches}
+    return next(iter(values)) if len(values) == 1 and all(math.isfinite(x) for x in values) else None
+
+
+def _text_after(pattern, text):
+    match = re.search(r"(?<!\w)" + pattern + r"[ \t]*[:：-]?[ \t]*([^\n،;.]{2,200})", text)
+    return match.group(1).strip() if match else ""
+
+
+async def advance_owner_whatsapp_reply(owner_phone, text, shipment_id=None):
+    """Advance only the identified owner's unambiguous pending shipment.
+
+    The receiver passes its verified selection. Recheck identity and state under
+    a row lock so two webhook requests cannot overwrite the agreed terms.
+    """
+    owner_phone = _valid_phone(owner_phone)
+    text = str(text or "")
+    if not owner_phone:
+        return None
+    references = set(re.findall(r"(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)", text.upper()))
+    with db() as c:
+        pending = c.execute("""SELECT s.*,n.shipment_id,n.owner_phone,n.record_kind,n.asking_price,
+            n.weight_tons,n.payment_method,n.unloading_location FROM freight_negotiations n
+            JOIN shipments s ON s.id=n.shipment_id
+            WHERE n.owner_phone=%s AND n.contact_channel='whatsapp' AND n.status='awaiting_owner'
+              AND n.record_kind='shipment_request' ORDER BY s.id FOR UPDATE OF s,n""", (owner_phone,)).fetchall()
+        selected = [x for x in pending if x['reference'].upper() in references] if references else pending
+        if len(references) > 1 or len(selected) != 1:
+            return None
+        item = selected[0]
+        if shipment_id is not None and item['shipment_id'] != shipment_id:
+            return None
+        sid = item['shipment_id']
+        # Questions, rejections and cancellations must not become an agreement.
+        if re.search(r"[؟?]|غير\s+(?:متاح[ةه]?|موافق)|(?:لا|لم)\s+(?:أوافق|اوافق|نوافق)|ملغ[ىي]|ملغا[ةه]|تم\s+(?:النقل|التحميل|الحجز)", text):
+            return {"shipment_id": sid, "broadcast_id": None, "missing": [], "needs_review": True}
+        price_labels = r"(?:السعر(?: النهائي| المعروض)?|اجرة|أجرة|قيمة النقل|سعر النقل)"
+        price = _number_after(price_labels, text)
+        if re.search(price_labels, text) and (price is None or price <= 150):
+            return {"shipment_id": sid, "broadcast_id": None, "missing": ["سعر نهائي واضح أكبر من 150 ريال"]}
+        price = price if price is not None else item.get('asking_price')
+        weight = _number_after(r"(?:الوزن|وزن(?: الحمولة| البضاعة)?)", text)
+        if re.search(r'(?<!\w)(?:الوزن|وزن)', text) and (weight is None or not 0 < weight <= 1000 or re.search(r'(?:الوزن|وزن)[^\n،]*?(?:كجم|كيلو|kg)', text, re.I)):
+            weight = 0  # Invalid or unsupported units must request clarification.
+        payment = _text_after(r"(?:طريقة الدفع|الدفع)", text)
+        unloading = _text_after(r"(?:مكان التنزيل|موقع التنزيل|التنزيل)", text)
+        item.update(weight_tons=weight if weight is not None else item['weight_tons'],
+                    payment_method=payment or item['payment_method'],
+                    unloading_location=unloading or item['unloading_location'])
+        c.execute("""UPDATE freight_negotiations SET asking_price=%s,weight_tons=%s,
+            payment_method=%s,unloading_location=%s,notes=%s,updated_at=%s WHERE shipment_id=%s""",
+            (price, item['weight_tons'], item['payment_method'], item['unloading_location'], text[:3000], utcnow(), sid))
+        missing = _shipment_requirements(item, agreement=True)
+        if not price or not math.isfinite(float(price)) or price <= 150:
+            missing.insert(0, "السعر النهائي")
+        if missing:
+            return {"shipment_id": sid, "broadcast_id": None, "missing": missing}
+        now = utcnow()
+        driver_price = round(price - 150, 2)
+        c.execute("""UPDATE freight_negotiations SET status='owner_agreed',agreed_owner_price=%s,
+            driver_offer_price=%s,agreed_at=%s,updated_at=%s,last_error=NULL WHERE shipment_id=%s""",
+            (price, driver_price, now, now, sid))
+        c.execute("UPDATE shipments SET revenue=%s,cost=%s,updated_at=%s WHERE id=%s", (price, driver_price, now, sid))
+    try:
+        bid = prepare_driver_offer(sid, None)
+    except HTTPException as exc:
+        execute("UPDATE freight_negotiations SET last_error=?,updated_at=? WHERE shipment_id=?",
+                (str(exc.detail)[:500], utcnow(), sid))
+        return {"shipment_id": sid, "broadcast_id": None, "broadcast_sent": False, "missing": [], "blocked": str(exc.detail)}
+    await start_driver_broadcast(bid, None)
+    broadcast = one("SELECT status,sent_count,failed_count,recipient_count FROM driver_broadcasts WHERE id=?", (bid,))
+    return {"shipment_id": sid, "broadcast_id": bid, "missing": [],
+            "broadcast_sent": bool(broadcast and broadcast['sent_count']), "broadcast": broadcast,
+            "blocked": ("الإرسال الخارجي غير مفعّل؛ بقي العرض مسودة." if broadcast and broadcast['status'] == 'draft'
+                        else "لم يرجع مزود واتساب تأكيد قبول الإرسال؛ يلزم مراجعة حالة المستلمين.") if not broadcast or not broadcast['sent_count'] else ""}
+
+
 def accept_driver_reply(phone, text, connection=None):
     normalized = _valid_phone(phone)
-    match = re.search(r"(?:NQ-\d+|WA-[A-F0-9]{12})", (text or "").upper())
-    if not normalized or not match or not accepts_offer(text):
+    references = set(re.findall(r"(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)", (text or "").upper()))
+    if not normalized or len(references) != 1 or not accepts_offer(text):
         return False
-    reference = match.group(0)
+    reference = next(iter(references))
     with (nullcontext(connection) if connection is not None else db()) as c:
-        row = c.execute("""SELECT r.id recipient_id,r.driver_id,b.id broadcast_id,b.shipment_id,b.accepted_driver_id
-            FROM driver_broadcast_recipients r JOIN driver_broadcasts b ON b.id=r.broadcast_id
-            JOIN shipments s ON s.id=b.shipment_id
-            WHERE r.phone=%s AND s.reference=%s AND r.status='sent' AND COALESCE(r.provider_message_id,'')<>'' AND b.status IN ('sending','completed','completed_with_errors','awaiting_driver')
-            ORDER BY b.id DESC LIMIT 1 FOR UPDATE""", (normalized, reference)).fetchone()
-        if not row or row["accepted_driver_id"]:
+        # All contenders lock the shared broadcast before their own recipient.
+        # Locking different recipient rows first can deadlock when the winner
+        # closes the other recipients in the same transaction.
+        campaign = c.execute("""SELECT b.id broadcast_id,b.shipment_id,b.accepted_driver_id
+            FROM driver_broadcasts b JOIN shipments s ON s.id=b.shipment_id
+            WHERE s.reference=%s AND b.status IN ('sending','completed','completed_with_errors','awaiting_driver')
+            ORDER BY b.id DESC LIMIT 1 FOR UPDATE OF b""", (reference,)).fetchone()
+        if not campaign or campaign['accepted_driver_id']:
             return False
+        recipient = c.execute("""SELECT id recipient_id,driver_id FROM driver_broadcast_recipients
+            WHERE broadcast_id=%s AND phone=%s AND status='sent'
+              AND COALESCE(provider_message_id,'')<>'' FOR UPDATE""",
+            (campaign['broadcast_id'], normalized)).fetchone()
+        if not recipient:
+            return False
+        row = {**campaign, **recipient}
         now = utcnow()
         c.execute("UPDATE driver_broadcasts SET status='driver_accepted',accepted_driver_id=%s,accepted_at=%s,updated_at=%s WHERE id=%s AND accepted_driver_id IS NULL",
                   (row["driver_id"], now, now, row["broadcast_id"]))
@@ -680,7 +794,7 @@ async def save_agreement(shipment_id: int, request: Request):
 @router.get("/api/v7/freight-workflow")
 def workflow_api(request: Request):
     session(request)
-    return {"owner_auto_contact_enabled": os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") == "1",
+    return {"owner_auto_contact_enabled": os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") == "1",
             "driver_margin_sar": 150,
             "items": rows("SELECT * FROM freight_negotiations ORDER BY id DESC LIMIT 200")}
 

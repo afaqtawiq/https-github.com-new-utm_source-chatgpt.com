@@ -20,10 +20,30 @@ def phone(value):
 
 def extract_phone(text):
     text = digits(text)
-    matches = re.findall(r"(?<!\d)(?:(?:\+|00)?966[\s-]*5|05)(?:[\s-]*\d){8}(?!\d)", text)
-    found = list(dict.fromkeys(phone(x) for x in matches if phone(x)))
+    # Read complete numeric runs, never a valid-looking suffix of a longer number.
+    # Keep runs on one line so a phone cannot absorb a weight on the next line.
+    candidates = re.finditer(
+        r"(?<![\w+])(?:\+[^\S\r\n]*)?\(?[0-9][0-9() \t\u00a0-]*", text)
+    found = set()
+    for match in candidates:
+        raw = match.group(0).rstrip(" \t\u00a0-")
+        before, after = text[:match.start()], text[match.start() + len(raw):]
+        if re.match(r"\w|[.,٫٬][0-9]", after) or re.search(r"[0-9][.,٫٬]$", before):
+            continue
+        compact = re.sub(r"[^0-9+]", "", raw)
+        # Other countries need an explicit international prefix; retain existing
+        # Saudi mobile forms without guessing a country for arbitrary numbers.
+        if not (compact.startswith(("+", "00")) or
+                re.fullmatch(r"(?:9665\d{8}|05\d{8})", compact)):
+            continue
+        if (re.search(r"(?:السعر(?: النهائي)?|سعر|الوزن|وزن(?: الحمولة| البضاعة)?|price|weight|cost)\s*[:：=]?\s*$", before, re.I)
+                or re.match(r"\s*(?:ريال|درهم|دولار|طن|كجم|كيلو(?:غرام|جرام)?|SAR|AED|USD|kg|tons?)(?!\w)", after, re.I)):
+            continue
+        normalized = phone(raw)
+        if normalized:
+            found.add(normalized)
     # Multiple contact numbers need review, not an arbitrary first selection.
-    return found[0] if len(found) == 1 else ""
+    return next(iter(found)) if len(found) == 1 else ""
 
 
 LOCATION_LABELS = r"(?:موقع|مدينة|مكان|نقطة)?\s*(?:التحميل|الاستلام|الانطلاق|التنزيل|التسليم|الوصول|الوجهة)"
