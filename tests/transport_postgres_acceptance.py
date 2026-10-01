@@ -164,6 +164,12 @@ def run(providers):
     def broadcasts(item):
         return rows('SELECT * FROM driver_broadcasts WHERE shipment_id=? ORDER BY id', (item['id'],))
 
+    def admin_status(item):
+        from app.whatsapp_admin import shipment_status
+        with db() as connection:
+            connection.execute('SET TRANSACTION READ ONLY')
+            return shipment_status(connection, item['reference'])
+
     def assert_unagreed(item):
         state = negotiation(item)
         assert state['status'] == 'awaiting_owner', state
@@ -228,6 +234,9 @@ def run(providers):
         item, replay = create_request('happy', owner, weight=None)
         state = assert_unagreed(item)
         assert state['contact_channel'] == 'whatsapp' and state['provider_message_id'].startswith('fake-owner-')
+        report = admin_status(item)
+        assert '(awaiting_owner)' in report and 'قبل مزود واتساب' in report, report
+        assert 'تسليم الرسالة وقراءتها غير مؤكدين' in report and 'الحالة: new' not in report, report
         assert len(providers.owner_calls) == 1 and providers.owner_calls[0][0] == owner
         event, sender, text, conversation = replay
         assert inbound(event, sender, text, conversation=conversation)['duplicate']
@@ -243,6 +252,7 @@ def run(providers):
         assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply'", (item['id'],))['n'] == 1
         inbound('happy-details', owner, 'الوزن: ٢٠ طن\nالتنزيل: مستودع جدة\nطريقة الدفع: عند التسليم')
         offer = assert_offer(item, 2000)
+        assert '(awaiting_driver)' in admin_status(item)
         assert inbound('happy-details', owner, 'الوزن: ٢٠ طن\nالتنزيل: مستودع جدة\nطريقة الدفع: عند التسليم')['duplicate']
         assert len(providers.sent_to_drivers(item['reference'])) == len(DRIVER_PHONES)
         assert not workflow.accept_driver_reply(DRIVER_PHONES[0], 'غير موافق ' + item['reference'])
@@ -252,6 +262,7 @@ def run(providers):
         assert assigned['status'] == 'driver_accepted' and assigned['accepted_driver_id'] == driver_ids[DRIVER_PHONES[0]]
         assert one('SELECT status FROM shipments WHERE id=?', (item['id'],))['status'] == 'driver_assigned'
         assert negotiation(item)['status'] == 'driver_accepted'
+        assert '(driver_assigned)' in admin_status(item)
         assert one('SELECT driver_phone,stage FROM shipment_operations WHERE shipment_id=?', (item['id'],)) == {
             'driver_phone': DRIVER_PHONES[0], 'stage': 'driver_assigned',
         }
@@ -486,6 +497,35 @@ def run(providers):
                     connection.execute('UPDATE drivers SET whatsapp_phone=%s WHERE id=%s', (phone, driver_id))
         assert not providers.unexpected, providers.unexpected
         print('PASS: owner contact failures remain unconfirmed, carrier offers are excluded, and no-driver agreements return a truthful blocker.')
+
+        # Exercise the same management wrappers used by the production entrypoint.
+        # The classifier is simulated; owner/driver sends must stay unchanged.
+        from app import load_vision, command_ai, team, manager_actions
+        manager_phone = '+966509999999'
+        calls_before = (len(providers.owner_calls), len(providers.driver_calls))
+        records_before = (one('SELECT COUNT(*) n FROM shipments')['n'], one('SELECT COUNT(*) n FROM drivers')['n'])
+        with patch.dict(os.environ, {'WHATSAPP_COMMAND_OWNER': manager_phone, 'AFAQ_TEAM': '[]'}):
+            with patch.object(manager_actions, '_original_ask', side_effect=AssertionError('Greeting invoked a paid model')):
+                result = inbound('manager-greeting', manager_phone, 'مرحبًا نيرمين')
+                assert result['agent'] == 'owner'
+                assert 'تقدر تتكلم معي بشكل عادي' in providers.replies['manager-greeting']['message']
+                assert inbound('manager-greeting', manager_phone, 'مرحبًا نيرمين')['duplicate']
+            with patch.object(manager_actions, '_original_ask', return_value={'action': 'shipment_status', 'reference': item['reference']}):
+                inbound('manager-status', manager_phone, 'ما حالة الشحنة ' + item['reference'] + '؟')
+                assert '(driver_assigned)' in providers.replies['manager-status']['message']
+            with patch.object(manager_actions, '_original_ask', return_value={'action': 'send_message', 'to': 'سارة', 'text': 'secret'}):
+                with patch.object(manager_actions, 'deliver', side_effect=AssertionError('Conversation sent an external message')):
+                    inbound('manager-question', manager_phone, 'هل يمكنك إرسال رسالة إلى سارة؟')
+                    assert 'هل تريد إرسال' in providers.replies['manager-question']['message']
+            with db() as connection:
+                legacy = connection.execute("""INSERT INTO shipments(reference,service_type,origin,destination,status,created_at,updated_at)
+                    VALUES('CI-LEGACY','نقل','الرياض','جدة','in_transit',NOW(),NOW()) RETURNING reference""").fetchone()
+            assert admin_status(legacy) == 'CI-LEGACY\nمن الرياض إلى جدة\nالحالة: in_transit'
+            assert admin_status({'reference': "' OR 1=1 --"}) == 'لم أجد هذه الشحنة.'
+        assert (len(providers.owner_calls), len(providers.driver_calls)) == calls_before
+        assert (one('SELECT COUNT(*) n FROM shipments')['n'], one('SELECT COUNT(*) n FROM drivers')['n']) == (records_before[0] + 1, records_before[1])
+        assert not providers.unexpected, providers.unexpected
+        print('PASS: read-only transport status, legacy fallback, signed natural greeting/query, duplicate idempotency and no chat-triggered sends.')
     client.close()
 
 

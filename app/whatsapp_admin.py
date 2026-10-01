@@ -142,12 +142,64 @@ def afaaq_command(c, command):
                 if row else f'الشحنة {reference} موجودة؛ لم أنشئ سجلًا مكررًا.')
     match = re.fullmatch(r'حالة (?:الشحنة|شحنة) ([A-Za-z0-9_-]{1,60})', command)
     if match:
-        row = c.execute('SELECT reference,origin,destination,status FROM shipments WHERE reference=%s', (match[1],)).fetchone()
-        return (f"{row['reference']}\nمن {row['origin']} إلى {row['destination']}\nالحالة: {row['status']}" if row else 'لم أجد هذه الشحنة.')
+        return shipment_status(c, match[1])
     if command in ('اعرض العملاء', 'العملاء'):
         items = c.execute('SELECT id,name,status FROM accounts ORDER BY id DESC LIMIT 10').fetchall()
         return 'آخر 10 عملاء:\n' + ('\n'.join(f"{x['id']} · {x['name']} · {x['status']}" for x in items) or 'لا يوجد عملاء في سجل الحسابات.')
     return 'لم أنفذ الأمر. استخدم إحدى الصيغ التالية:\n' + HELP
+
+
+def shipment_status(c, reference):
+    """Read only the requested shipment; provider acceptance is not delivery."""
+    row = c.execute('''SELECT s.reference,s.origin,s.destination,s.status,
+        n.status negotiation_status,n.contact_channel,n.provider_message_id,
+        n.provider_call_id,n.contacted_at,b.status broadcast_status
+        FROM shipments s LEFT JOIN freight_negotiations n ON n.shipment_id=s.id
+        LEFT JOIN driver_broadcasts b ON b.id=(SELECT MAX(x.id) FROM driver_broadcasts x WHERE x.shipment_id=s.id)
+        WHERE s.reference=%s''', (reference,)).fetchone()
+    if not row:
+        return 'لم أجد هذه الشحنة.'
+    heading = f"{row['reference']}\nمن {row['origin']} إلى {row['destination']}"
+    if not row['negotiation_status']:
+        return heading + f"\nالحالة: {row['status']}"
+    labels = {
+        'ready_to_contact': 'جاهزة للتواصل مع صاحب الشحنة',
+        'contact_ready': 'جاهزة للتواصل مع صاحب الشحنة',
+        'needs_contact_approval': 'بانتظار استكمال متطلبات التواصل',
+        'missing_owner_phone': 'رقم صاحب الشحنة غير مكتمل',
+        'needs_manual_data': 'بانتظار تصحيح بيانات الشحنة',
+        'contacting': 'جارٍ طلب التواصل مع صاحب الشحنة',
+        'contact_blocked': 'تعذر بدء التواصل مع صاحب الشحنة',
+        'contact_failed': 'فشل طلب التواصل مع صاحب الشحنة',
+        'contact_uncertain': 'نتيجة التواصل غير مؤكدة؛ تحتاج مراجعة',
+        'awaiting_owner': 'بانتظار رد أو استكمال تفاصيل صاحب الشحنة',
+        'owner_agreed': 'تم تسجيل اتفاق صاحب الشحنة',
+        'needs_review': 'بانتظار المراجعة',
+        'carrier_offer': 'عرض ناقل يبحث عن حمولة',
+        'driver_offer_pending_approval': 'عرض السائقين مسودة بانتظار الاعتماد',
+        'draft': 'عرض السائقين مسودة بانتظار الاعتماد',
+        'sending': 'جارٍ إرسال عرض السائقين',
+        'awaiting_driver': 'بانتظار قبول سائق',
+        'completed_with_errors': 'إرسال عرض السائقين انتهى بأخطاء؛ يحتاج مراجعة',
+        'driver_accepted': 'تم قبول سائق وربطه بالشحنة',
+        'driver_assigned': 'تم تعيين سائق',
+    }
+    # Dispatch progresses independently of negotiation. Later shipment stages
+    # (including delivered/closed) must not regress to the old negotiation stage.
+    stage = row['broadcast_status'] or row['negotiation_status']
+    if row['status'] and row['status'] not in {'new', 'carrier_offer'}:
+        stage = row['status']
+    lines = [heading, f"الحالة التشغيلية: {labels.get(stage, stage)} ({stage})"]
+    if row['provider_message_id']:
+        lines.append('تواصل صاحب الشحنة: قبل مزود واتساب طلب الإرسال وله معرف مسجل.')
+        lines.append('تسليم الرسالة وقراءتها غير مؤكدين في هذا السجل.')
+    elif row['provider_call_id']:
+        lines.append('تواصل صاحب الشحنة: قبل مزود الاتصال طلب المكالمة وله معرف مسجل؛ هذا لا يثبت الرد عليها.')
+    else:
+        lines.append('تواصل صاحب الشحنة: لا يوجد معرف قبول مسجل من المزود.')
+    if (row['provider_message_id'] or row['provider_call_id']) and row['contacted_at']:
+        lines.append('وقت قبول طلب التواصل: ' + str(row['contacted_at']))
+    return '\n'.join(lines)
 
 
 def shawahid_command(c, command, event_id, original=''):
