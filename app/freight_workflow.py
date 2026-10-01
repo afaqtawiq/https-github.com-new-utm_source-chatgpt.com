@@ -794,7 +794,7 @@ async def save_agreement(shipment_id: int, request: Request):
 @router.get("/api/v7/freight-workflow")
 def workflow_api(request: Request):
     session(request)
-    return {"owner_auto_contact_enabled": os.getenv("FREIGHT_AUTO_OWNER_CONTACT", "0") == "1",
+    return {"owner_auto_contact_enabled": os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") == "1",
             "driver_margin_sar": 150,
             "items": rows("SELECT * FROM freight_negotiations ORDER BY id DESC LIMIT 200")}
 

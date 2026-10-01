@@ -372,3 +372,14 @@ def test_driver_cannot_accept_two_references(owner_loop):
     freight, database, calls = owner_loop
     asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', 'السعر: 2000\nالوزن: 20 طن\nالدفع: نقدا'))
     assert not freight.accept_driver_reply('+966500000002', 'موافق NQ-16 NQ-99')
+
+
+def test_workflow_api_reports_effective_contact_gate(modules, monkeypatch):
+    _, freight, database = modules
+    monkeypatch.setattr(freight, 'session', lambda request: {'user_id': 1})
+    monkeypatch.setenv('FREIGHT_AUTO_OWNER_CONTACT', '0')
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    assert freight.workflow_api(None)['owner_auto_contact_enabled'] is True
+    monkeypatch.setenv('FREIGHT_AUTO_OWNER_CONTACT', '1')
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '0')
+    assert freight.workflow_api(None)['owner_auto_contact_enabled'] is False
