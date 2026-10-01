@@ -12,6 +12,7 @@ import re
 import sqlite3
 import sys
 import types
+import urllib.parse
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -36,7 +37,7 @@ class Database:
         self.raw = sqlite3.connect(':memory:', check_same_thread=False)
         self.raw.row_factory = sqlite3.Row
         self.raw.executescript('''
-        CREATE TABLE shipments(id INTEGER PRIMARY KEY,reference TEXT,origin TEXT,destination TEXT,status TEXT,revenue REAL,cost REAL,updated_at TEXT);
+        CREATE TABLE shipments(id INTEGER PRIMARY KEY,reference TEXT,origin TEXT,destination TEXT,status TEXT,revenue REAL,cost REAL,updated_at TEXT,is_test INTEGER DEFAULT 0);
         CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER,naqliat_load_id INTEGER,
             record_kind TEXT NOT NULL DEFAULT 'shipment_request',owner_phone TEXT,status TEXT,contact_channel TEXT,provider_call_id TEXT,provider_message_id TEXT,
             asking_price REAL,agreed_owner_price REAL,driver_offer_price REAL,weight_tons REAL,
@@ -44,12 +45,12 @@ class Database:
         CREATE TABLE drivers(id INTEGER PRIMARY KEY,driver_name TEXT,whatsapp_phone TEXT,availability TEXT,offer_consent INTEGER);
         CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,raw_command TEXT,message TEXT,status TEXT,recipient_count INTEGER,
             sent_count INTEGER DEFAULT 0,failed_count INTEGER DEFAULT 0,created_by INTEGER,created_at TEXT,updated_at TEXT,
-            shipment_id INTEGER,confirmed_by INTEGER,confirmed_at TEXT,completed_at TEXT,accepted_driver_id INTEGER,accepted_at TEXT);
+            shipment_id INTEGER,confirmed_by INTEGER,confirmed_at TEXT,completed_at TEXT,accepted_driver_id INTEGER,accepted_at TEXT,is_test INTEGER DEFAULT 0,test_approved_by INTEGER,test_approved_at TEXT,test_preview_digest TEXT);
         CREATE TABLE driver_broadcast_recipients(id INTEGER PRIMARY KEY,broadcast_id INTEGER,driver_id INTEGER,driver_name TEXT,phone TEXT,
             status TEXT,provider_message_id TEXT,sent_at TEXT,last_error TEXT,replied_at TEXT,UNIQUE(broadcast_id,phone));
         CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT,created_by INTEGER);
         CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,driver_name TEXT,driver_phone TEXT,updated_at TEXT);
-        INSERT INTO shipments VALUES(1,'NQ-16','الرياض','جدة','new',0,0,'');
+        INSERT INTO shipments VALUES(1,'NQ-16','الرياض','جدة','new',0,0,'',0);
         INSERT INTO freight_negotiations(id,shipment_id,owner_phone,status,agreed_owner_price,driver_offer_price,weight_tons,payment_method)
             VALUES(1,1,'+966500000001','ready_to_contact',2000,1850,20,'عند التسليم');
         INSERT INTO drivers VALUES(1,'Test Driver','+966500000002','متاح',1);
@@ -383,3 +384,51 @@ def test_workflow_api_reports_effective_contact_gate(modules, monkeypatch):
     monkeypatch.setenv('FREIGHT_AUTO_OWNER_CONTACT', '1')
     monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '0')
     assert freight.workflow_api(None)['owner_auto_contact_enabled'] is False
+
+
+def test_disclosed_workflow_requires_explicit_approval_and_never_assigns_real_driver(modules, monkeypatch):
+    commands, freight, database = modules
+    from app.transport_test import DISCLAIMER, display_reference, test_broadcast_context
+    storage = sys.modules['app.storage']
+    for name in ('db', 'one', 'rows', 'execute'):
+        monkeypatch.setattr(storage, name, getattr(database, name))
+    database.execute("UPDATE shipments SET is_test=1,status='test_pending'")
+    database.execute("UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='whatsapp',agreed_owner_price=NULL")
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    calls = []
+    async def send(*args):
+        calls.append(args)
+        return {'messages': [{'id': 'simulated-test-receipt'}]}
+    monkeypatch.setattr(commands, 'send_text_message', send)
+    terms = 'NQ-16\nالسعر النهائي: 2000\nالوزن: 20\nالتنزيل: الشارقة\nطريقة الدفع: محاكاة'
+    result = asyncio.run(freight.advance_owner_whatsapp_reply('+966500000001', terms, shipment_id=1))
+    assert result['is_test'] and result['broadcast_sent'] is False
+    bid = result['broadcast_id']
+    assert not calls and not asyncio.run(freight.start_driver_broadcast(bid))
+    campaign = database.one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
+    assert campaign['message'].count(DISCLAIMER) == 2
+    assert database.one('SELECT revenue,cost FROM shipments') == {'revenue': 0, 'cost': 0}
+    database.execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?", (bid,))
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert not calls
+    assert database.one('SELECT status FROM driver_broadcasts')['status'] == 'test_blocked'
+    database.execute("UPDATE driver_broadcasts SET status='draft' WHERE id=?", (bid,))
+    current = {'user_id': 1, 'role': 'admin', 'csrf': 'test-csrf'}
+    monkeypatch.setattr(commands, 'session', lambda _: current)
+    def request(data):
+        async def body(): return urllib.parse.urlencode(data).encode()
+        return types.SimpleNamespace(body=body)
+    from fastapi import BackgroundTasks
+    with pytest.raises(HTTPException):
+        asyncio.run(commands.send_broadcast(bid, request({'csrf':'test-csrf','confirmed':'yes'}), BackgroundTasks()))
+    digest = test_broadcast_context(campaign)['digest']
+    tasks = BackgroundTasks()
+    asyncio.run(commands.send_broadcast(bid, request({'csrf':'test-csrf','confirmed':'yes','test_confirmed':'yes','test_preview':digest}), tasks))
+    asyncio.run(tasks())
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert len(calls) == 3
+    assert not freight.accept_driver_reply('+966500000002', 'موافق NQ-16')
+    assert freight.accept_driver_reply('+966500000002', 'موافق ' + display_reference('NQ-16', True))
+    assert not freight.accept_driver_reply('+966500000003', 'موافق ' + display_reference('NQ-16', True))
+    assert database.one('SELECT status,revenue,cost FROM shipments') == {'status':'test_completed','revenue':0,'cost':0}
+    assert database.one('SELECT stage,driver_name,driver_phone FROM shipment_operations') == {'stage':'test_completed','driver_name':None,'driver_phone':None}

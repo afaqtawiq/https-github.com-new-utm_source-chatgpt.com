@@ -173,8 +173,8 @@ def _report(c, period):
         ('رسائل البروشور المرسلة (بريد)', "SELECT COUNT(*) FROM customer_campaign_recipients WHERE channel='email' AND status='sent' AND sent_at>=%s"),
         ('محادثات عملاء جديدة', 'SELECT COUNT(*) FROM zernio_requests WHERE created_at>=%s'),
         ('طلبات عملاء مكتملة البيانات', "SELECT COUNT(*) FROM zernio_requests WHERE updated_at>=%s AND status<>'collecting'"),
-        ('حمولات نقليات مسجلة', 'SELECT COUNT(*) FROM naqliat_loads WHERE created_at>=%s'),
-        ('شحنات جديدة', 'SELECT COUNT(*) FROM shipments WHERE created_at>=%s'),
+        ('حمولات نقليات مسجلة', "SELECT COUNT(*) FROM naqliat_loads WHERE capture_method<>'manual_test' AND created_at>=%s"),
+        ('شحنات جديدة', 'SELECT COUNT(*) FROM business_shipments WHERE created_at>=%s'),
         ('سائقون جدد', 'SELECT COUNT(*) FROM drivers WHERE created_at>=%s'),
         ('عملاء جدد في القائمة', 'SELECT COUNT(*) FROM accounts WHERE created_at>=%s'),
     ]

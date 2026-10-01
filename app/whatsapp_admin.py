@@ -151,7 +151,7 @@ def afaaq_command(c, command):
 
 def shipment_status(c, reference):
     """Read only the requested shipment; provider acceptance is not delivery."""
-    row = c.execute('''SELECT s.reference,s.origin,s.destination,s.status,
+    row = c.execute('''SELECT s.reference,s.origin,s.destination,s.status,s.is_test,
         n.status negotiation_status,n.contact_channel,n.provider_message_id,
         n.provider_call_id,n.contacted_at,b.status broadcast_status
         FROM shipments s LEFT JOIN freight_negotiations n ON n.shipment_id=s.id
@@ -160,6 +160,9 @@ def shipment_status(c, reference):
     if not row:
         return 'لم أجد هذه الشحنة.'
     heading = f"{row['reference']}\nمن {row['origin']} إلى {row['destination']}"
+    if row.get('is_test'):
+        from app.transport_test import DISCLAIMER
+        heading = DISCLAIMER + '\n' + heading
     if not row['negotiation_status']:
         return heading + f"\nالحالة: {row['status']}"
     labels = {
@@ -183,11 +186,13 @@ def shipment_status(c, reference):
         'completed_with_errors': 'إرسال عرض السائقين انتهى بأخطاء؛ يحتاج مراجعة',
         'driver_accepted': 'تم قبول سائق وربطه بالشحنة',
         'driver_assigned': 'تم تعيين سائق',
+        'test_pending': 'اختبار ينتظر الاستكمال، دون التزام نقل',
+        'test_completed': 'نجح رد الاختبار، دون تعيين سائق لشحنة فعلية',
     }
     # Dispatch progresses independently of negotiation. Later shipment stages
     # (including delivered/closed) must not regress to the old negotiation stage.
     stage = row['broadcast_status'] or row['negotiation_status']
-    if row['status'] and row['status'] not in {'new', 'carrier_offer'}:
+    if row['status'] and row['status'] not in {'new', 'carrier_offer', 'test_pending'}:
         stage = row['status']
     lines = [heading, f"الحالة التشغيلية: {labels.get(stage, stage)} ({stage})"]
     if row['provider_message_id']:

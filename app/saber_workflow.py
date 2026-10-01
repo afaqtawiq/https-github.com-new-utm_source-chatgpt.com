@@ -77,7 +77,7 @@ def saber_home(request: Request):
 
 @router.get("/saber/new", response_class=HTMLResponse)
 def new_case_page(request: Request):
-    current = auth(request); shipments = rows("SELECT id,reference,origin,destination FROM shipments ORDER BY id DESC LIMIT 300"); accounts = rows("SELECT id,name FROM accounts ORDER BY name")
+    current = auth(request); shipments = rows("SELECT id,reference,origin,destination FROM business_shipments ORDER BY id DESC LIMIT 300"); accounts = rows("SELECT id,name FROM accounts ORDER BY name")
     ship_opts = "<option value=''>بدون شحنة</option>" + "".join(f"<option value='{x['id']}'>{esc(x['reference'])} - {esc(x['origin'])} إلى {esc(x['destination'])}</option>" for x in shipments)
     account_opts = "<option value=''>بدون عميل</option>" + "".join(f"<option value='{x['id']}'>{esc(x['name'])}</option>" for x in accounts)
     form = f"""<div class=card><h1>إنشاء ملف سابر</h1><form method=post action=/saber><input type=hidden name=csrf value='{esc(current['csrf'])}'><div class=grid><select name=shipment_id>{ship_opts}</select><select name=account_id>{account_opts}</select><input name=case_reference required placeholder='مرجع داخلي مثل SAB-2026-001'><select name=submission_type><option value=shipment_certificate>شهادة إرسالية</option><option value=product_certificate>شهادة مطابقة منتج</option><option value=both>الاثنتان</option></select><input name=due_at type=date></div><textarea name=notes placeholder='ملاحظات أولية'></textarea><button>إنشاء ملف التجهيز</button></form></div>"""

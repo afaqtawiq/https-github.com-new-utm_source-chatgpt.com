@@ -127,7 +127,11 @@ def _save(payload: NaqliatLoad):
         destination = extracted_destination or destination
     origin = origin or "غير محدد"
     destination = destination or "غير محدد"
+    is_test = payload.capture_method == 'manual_test'
     fingerprint = _fingerprint(origin, destination, payload.weight_tons, payload.vehicle_type, payload.description, phone)
+    if is_test:
+        # Test captures must never deduplicate into an existing real shipment.
+        fingerprint = hashlib.sha256(('disclosed-test|' + fingerprint).encode()).hexdigest()
     now = utcnow()
     with db() as c:
         saved = c.execute(
@@ -158,9 +162,9 @@ def _save(payload: NaqliatLoad):
         shipment = c.execute("SELECT id FROM shipments WHERE reference=%s", (reference,)).fetchone()
         if not shipment:
             shipment = c.execute(
-                """INSERT INTO shipments(reference,service_type,origin,destination,status,revenue,cost,currency,created_at,updated_at)
-                   VALUES(%s,'Transport',%s,%s,'new',0,0,'SAR',%s,%s) RETURNING id""",
-                (reference, origin, destination, now, now),
+                """INSERT INTO shipments(reference,service_type,origin,destination,status,revenue,cost,currency,created_at,updated_at,is_test)
+                   VALUES(%s,'Transport',%s,%s,%s,0,0,'SAR',%s,%s,%s) RETURNING id""",
+                (reference, origin, destination, 'test_pending' if is_test else 'new', now, now, is_test),
             ).fetchone()
             c.execute(
                 """INSERT INTO shipment_operations(shipment_id,stage,notes,created_at,updated_at)
@@ -178,6 +182,12 @@ def _save(payload: NaqliatLoad):
                  updated_at=EXCLUDED.updated_at""",
             (shipment["id"], load_id, phone, payload.weight_tons, now, now),
         )
+        if is_test and created:
+            # A test starts by waiting for the verified owner's inbound terms.
+            # No template pretending there is a real load is sent to the owner.
+            c.execute("""UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='whatsapp'
+                WHERE shipment_id=%s""", (shipment['id'],))
+            c.execute("UPDATE shipment_operations SET stage='test_pending' WHERE shipment_id=%s", (shipment['id'],))
         return load_id, created, shipment["id"]
 
 
@@ -191,14 +201,15 @@ def naqliat_home(request: Request):
     data = rows("""SELECT n.*,s.id shipment_id,s.reference shipment_reference
         FROM naqliat_loads n LEFT JOIN shipments s ON s.reference=('NQ-' || n.id::text)
         ORDER BY n.captured_at DESC,n.id DESC LIMIT 300""")
-    total = len(data)
-    fresh = sum(1 for item in data if item["status"] == "new")
-    with_phone = sum(1 for item in data if item.get("owner_phone"))
+    real = [item for item in data if item['capture_method'] != 'manual_test']
+    total = len(real)
+    fresh = sum(1 for item in real if item["status"] == "new")
+    with_phone = sum(1 for item in real if item.get("owner_phone"))
     table = "".join(
         "<tr><td>"+_esc(x["captured_at"])+"</td><td>"+_esc(x["origin"])+"</td><td>"+_esc(x["destination"])+"</td><td>"+_esc(x["distance_km"])+"</td><td>"+_esc(x["weight_tons"])+"</td><td>"+_esc(x["vehicle_type"])+"</td><td dir='ltr'>"+_esc(x["owner_phone"])+"</td><td>"+("<a href='/freight-workflow/"+str(x["shipment_id"])+"'>مراجعة وتعديل</a>" if x.get("shipment_id") else _esc(x["status"]))+"</td></tr>"
         for x in data
     )
-    form = """<div class="card"><h2>إضافة حمولة تجريبية</h2><p class="muted">تُستخدم لاختبار المطابقة قبل تركيب تطبيق الهاتف.</p>
+    form = """<div class="card"><h2>إضافة حمولة تجريبية</h2><p class="muted">اختبار للنظام فقط، لا توجد حمولة فعلية ولا حاجة للتحرك. ينتظر السجل رد صاحب الاختبار، ويحتاج عرض السائقين مراجعة واعتمادًا صريحًا قبل الإرسال.</p>
     <form method="post" action="/naqliat/manual"><div class="grid"><input name="origin" placeholder="المنشأ" required><input name="destination" placeholder="الوجهة" required><input name="distance_km" type="number" placeholder="المسافة كم"><input name="weight_tons" type="number" step="0.01" placeholder="الوزن طن"><input name="vehicle_type" placeholder="نوع المركبة"><input name="owner_phone" dir="ltr" placeholder="رقم صاحب الحمولة"></div><textarea name="description" placeholder="وصف الحمولة"></textarea><button class="btn">حفظ للاختبار</button></form></div>"""
     body = _nav()+"<h1>شحنات نقليات</h1><p class='muted'>المستخدم: "+_esc(session["email"])+"</p><div class='grid'><div class='kpi'>إجمالي الالتقاطات<b>"+str(total)+"</b></div><div class='kpi'>حمولات جديدة<b>"+str(fresh)+"</b></div><div class='kpi'>بها رقم تواصل<b>"+str(with_phone)+"</b></div></div>"+form+"<div class='card scroll'><table><tr><th>وقت الالتقاط</th><th>المنشأ</th><th>الوجهة</th><th>كم</th><th>طن</th><th>المركبة</th><th>التواصل</th><th>الحالة</th></tr>"+table+"</table></div>"
     return HTMLResponse(_page("شحنات نقليات", body))

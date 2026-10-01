@@ -13,7 +13,7 @@ def nav():return '<div class="nav"><a href="/revenue-growth">Revenue Growth</a><
 def engine():
  now=utcnow();acc=rows('SELECT * FROM accounts');out=[]
  for a in acc:
-  ships=rows('SELECT s.*,x.actual_cost FROM shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id WHERE s.account_id=? ORDER BY s.created_at DESC',(a['id'],));opps=rows('SELECT * FROM opportunities WHERE account_id=?',(a['id'],));
+  ships=rows('SELECT s.*,x.actual_cost FROM business_shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id WHERE s.account_id=? ORDER BY s.created_at DESC',(a['id'],));opps=rows('SELECT * FROM opportunities WHERE account_id=?',(a['id'],));
   if not ships and not opps:continue
   bycur={};services=set()
   for s in ships:

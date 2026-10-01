@@ -14,7 +14,7 @@ def nav():return '<div class="nav"><a href="/customer-success">Customer Success<
 def intelligence():
  now=utcnow();accounts=rows('SELECT * FROM accounts ORDER BY name');out=[]
  for a in accounts:
-  ships=rows('SELECT s.*,x.actual_cost FROM shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id WHERE s.account_id=? ORDER BY s.created_at DESC',(a['id'],));opps=rows('SELECT * FROM opportunities WHERE account_id=? ORDER BY created_at DESC',(a['id'],));
+  ships=rows('SELECT s.*,x.actual_cost FROM business_shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id WHERE s.account_id=? ORDER BY s.created_at DESC',(a['id'],));opps=rows('SELECT * FROM opportunities WHERE account_id=? ORDER BY created_at DESC',(a['id'],));
   if not ships and not opps:continue
   last_ship=ships[0]['created_at'] if ships else None;days=(now-last_ship).days if last_ship else 999;used={str(x['service_type']).lower() for x in ships};missing=[s for s in SERVICES if s not in used];rev=sum(float(x['revenue'] or 0) for x in ships);cost=sum(float(x.get('actual_cost') or 0) for x in ships);margin=((rev-cost)/rev*100) if rev else 0;won=sum(1 for x in opps if x['stage']=='won');lost=sum(1 for x in opps if x['stage']=='lost');risk=0;reasons=[]
   if days>90:risk+=45;reasons.append('لا توجد عملية منذ أكثر من 90 يومًا')

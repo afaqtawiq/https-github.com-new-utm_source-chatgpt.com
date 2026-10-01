@@ -95,9 +95,9 @@ def home(request: Request):
     overdue = one("SELECT COUNT(*) n FROM sales_followups WHERE status='open' AND due_at<=NOW()")['n']
     pending = one("SELECT COUNT(*) n FROM approvals WHERE status='pending'")['n']
     drafts = one("SELECT COUNT(*) n FROM outbound_messages WHERE status='draft'")['n']
-    active_shipments = one("SELECT COUNT(*) n FROM shipments WHERE status NOT IN ('delivered','closed')")['n']
+    active_shipments = one("SELECT COUNT(*) n FROM business_shipments WHERE status NOT IN ('delivered','closed')")['n']
     unassigned = rows("""SELECT s.id,s.reference,s.origin,s.destination,s.service_type
-        FROM shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id
+        FROM business_shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id
         WHERE s.status NOT IN ('delivered','closed') AND COALESCE(x.driver_name,'')='' ORDER BY s.id DESC LIMIT 20""")
     candidates = one("SELECT COUNT(*) n FROM drivers WHERE availability='متاح'")['n']
     qrows = ''.join('<tr><td>'+str(x['rank_no'])+'</td><td><a href="/sales-workspace/'+str(x['opportunity_id'])+'" style="color:white"><b>'+esc(x['company_name'])+'</b></a><br><span class="muted">'+esc(x['reason'])+'</span></td><td>'+str(x['score'])+'</td><td>'+esc(x.get('priority') or 'غير مجهز')+'</td><td>'+esc(x.get('services') or '—')+'</td><td>'+esc(x.get('message_status') or 'لا توجد')+'</td><td>'+esc(x.get('next_followup') or '—')+'</td><td>'+('<form method="post" action="/daily-command/'+str(x['opportunity_id'])+'/prepare"><button class="btn">تجهيز البيع والمسودة</button></form>' if not x.get('message_id') else '<a class="btn" href="/outbound/'+str(x['message_id'])+'">فتح المسودة</a>')+' <a class="btn secondary" href="/quotes/new/'+str(x['opportunity_id'])+'">عرض سعر</a></td></tr>' for x in queue) or '<tr><td colspan="8" class="muted">اضغط «إنشاء قائمة اليوم» لاختيار أفضل 10 فرص.</td></tr>'
@@ -148,7 +148,7 @@ def recommend_drivers(shipment_id: int, request: Request):
     session = auth(request)
     if not session:
         return RedirectResponse('/login', 303)
-    shipment = one('SELECT * FROM shipments WHERE id=?', (shipment_id,))
+    shipment = one('SELECT * FROM business_shipments WHERE id=?', (shipment_id,))
     if not shipment:
         raise HTTPException(404, 'Shipment not found')
     drivers = rows("SELECT * FROM drivers WHERE availability='متاح' ORDER BY driver_name")
