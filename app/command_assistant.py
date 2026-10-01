@@ -376,6 +376,8 @@ async def refresh_broadcast_preview(broadcast_id: int, request: Request):
         campaign = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s FOR UPDATE', (broadcast_id,)).fetchone()
         if not campaign:
             raise HTTPException(404)
+        if not campaign.get('is_test'):
+            raise HTTPException(409, 'تحديث المعاينة هذا مخصص لمسودات الاختبار المعلن فقط')
         recipients = c.execute('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=%s ORDER BY id FOR UPDATE', (broadcast_id,)).fetchall()
         plan = preview_plan(campaign, recipients, _preview_message(c, campaign))
         if data.get('refresh_preview') != plan['digest']:
@@ -418,7 +420,9 @@ def broadcast_review(broadcast_id: int, request: Request):
             needs_refresh = plan['changed'] or not plan['active']
             if not plan['active']:
                 validation = '<p>لا يوجد مستلمون صالحون للإرسال في هذه المسودة.</p>'
-            if plan['changed']:
+            if plan['changed'] and not broadcast.get('is_test'):
+                validation += '<p>راجع بيانات المسودة قبل الإرسال؛ التحديث المباشر هنا مخصص للاختبار المعلن.</p>'
+            if plan['changed'] and broadcast.get('is_test'):
                 reasons = ''.join('<li dir=ltr>' + e(r['phone']) + ' — ' + e(r['reason']) + '</li>' for r in plan['excluded'])
                 validation = f"""<h2>تحديث معاينة المسودة دون إرسال</h2><p>المستلمون الصالحون بعد التحقق: {len(plan['active'])} · المستبعدون: {len(plan['excluded'])}</p>
                 <div class=msg>{e(plan['message'])}</div><ul>{reasons}</ul>

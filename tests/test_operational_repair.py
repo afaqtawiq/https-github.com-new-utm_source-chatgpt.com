@@ -616,3 +616,16 @@ def test_refresh_requires_role_csrf_explicit_and_current_preview(modules,monkeyp
     with pytest.raises(HTTPException):
         asyncio.run(commands.refresh_broadcast_preview(bid,refresh_request({'csrf':csrf,'refresh_confirmed':confirmed,'refresh_preview':plan['digest'] if digest=='valid' else digest})))
     assert database.rows('SELECT * FROM driver_broadcast_recipients') == before
+
+
+def test_refresh_is_limited_to_disclosed_test_drafts(modules,monkeypatch):
+    commands, _, database, bid, _ = legacy_driver_draft(modules,monkeypatch)
+    plan = refresh_plan(commands,database,bid)
+    database.execute('UPDATE driver_broadcasts SET is_test=0 WHERE id=?',(bid,))
+    database.execute('UPDATE shipments SET is_test=0')
+    before = database.rows('SELECT * FROM driver_broadcast_recipients')
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(commands.refresh_broadcast_preview(bid,refresh_request({'csrf':'safe-csrf','refresh_confirmed':'yes','refresh_preview':plan['digest']})))
+    assert exc.value.status_code == 409
+    assert database.rows('SELECT * FROM driver_broadcast_recipients') == before
+    assert 'name=refresh_preview' not in commands.broadcast_review(bid,types.SimpleNamespace()).body.decode()
