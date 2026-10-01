@@ -20,7 +20,7 @@ import socket
 import sys
 from threading import Barrier, Lock
 from unittest.mock import patch
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -502,7 +502,7 @@ def main():
     try:
         options = '-c search_path=' + schema + ' -c statement_timeout=30000 -c lock_timeout=15000'
         environment = {
-            'DATABASE_URL': url + '?' + urlencode({'options': options}),
+            'DATABASE_URL': url + '?' + urlencode({'options': options}, quote_via=quote),
             'DISCOVERY_AUTO_ENABLED': '0', 'ENABLE_EXTERNAL_ACTIONS': '1',
             'ADMIN_EMAIL': 'transport-acceptance@example.invalid',
             'ADMIN_PASSWORD': secrets.token_urlsafe(24),
