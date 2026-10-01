@@ -190,7 +190,7 @@ from app.document_parsing import document_metadata
 
 @router.get("/shipping-agents/identify", response_class=HTMLResponse)
 def identify_page(request: Request):
-    current = auth(request); shipments = rows("SELECT id,reference,origin,destination FROM shipments ORDER BY id DESC LIMIT 300")
+    current = auth(request); shipments = rows("SELECT id,reference,origin,destination FROM business_shipments ORDER BY id DESC LIMIT 300")
     recent = rows("""SELECT d.*,a.name agent_name,s.reference shipment_reference FROM shipping_agent_documents d
         LEFT JOIN shipping_agents a ON a.id=d.detected_agent_id LEFT JOIN shipments s ON s.id=d.shipment_id ORDER BY d.id DESC LIMIT 50""")
     opts = "<option value=''>بدون ربط الآن</option>" + "".join(f"<option value='{x['id']}'>{esc(x['reference'])} - {esc(x['origin'])} إلى {esc(x['destination'])}</option>" for x in shipments)
@@ -307,7 +307,7 @@ def agent_detail(agent_id: int, request: Request):
     contacts = rows("SELECT * FROM shipping_agent_contacts WHERE agent_id=? ORDER BY purpose,email", (agent_id,))
     cases = rows("""SELECT x.*,s.reference shipment_reference FROM shipping_agent_cases x LEFT JOIN shipments s ON s.id=x.shipment_id
         WHERE x.agent_id=? ORDER BY x.id DESC""", (agent_id,))
-    shipments = rows("SELECT id,reference,origin,destination FROM shipments ORDER BY id DESC LIMIT 300")
+    shipments = rows("SELECT id,reference,origin,destination FROM business_shipments ORDER BY id DESC LIMIT 300")
     contact_rows = "".join(f"<tr><td>{esc(x['purpose'])}</td><td dir=ltr>{esc(x['email'])}</td><td dir=ltr>{esc(x['phone'])}</td><td>{'موثق' if x['is_verified'] else 'من الملف - يحتاج تحقق عند الاستخدام'}</td></tr>" for x in contacts)
     case_rows = "".join(f"<tr><td><a href='/shipping-agent-cases/{x['id']}'>{esc(x['reference'] or ('CASE-'+str(x['id'])))}</a></td><td>{esc(x['case_type'])}</td><td>{esc(x.get('shipment_reference'))}</td><td>{esc(x['status'])}</td><td>{esc(x['due_at'])}</td></tr>" for x in cases)
     ship_opts = "<option value=''>بدون ربط بشحنة</option>" + "".join(f"<option value='{x['id']}'>{esc(x['reference'])} - {esc(x['origin'])} إلى {esc(x['destination'])}</option>" for x in shipments)

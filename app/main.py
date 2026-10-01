@@ -52,7 +52,7 @@ def dashboard(r:Request):
  s=require(r)
  if not s:return rl()
  a=one('SELECT COUNT(*) n FROM accounts')['n'];o=one('SELECT COUNT(*) n FROM opportunities')['n'];d=one('SELECT COUNT(*) n FROM drivers')['n'];sig=one('SELECT COUNT(*) n FROM discovered_signals')['n'];src=one('SELECT COUNT(*) n FROM source_watches WHERE enabled=1')['n'];pipe=one("SELECT COALESCE(SUM(estimated_value),0) v FROM opportunities WHERE stage NOT IN ('lost','won')")['v']
- pending=one("SELECT COUNT(*) n FROM approvals WHERE status='pending'")['n'];exceptions=one("SELECT COUNT(*) n FROM shipment_exceptions WHERE status='open'")['n'];overdue=one("SELECT COUNT(*) n FROM operations_tasks WHERE status='open' AND due_at<?",(utcnow(),))['n'];drafts=one("SELECT COUNT(*) n FROM outbound_messages WHERE status='draft'")['n'];missing_routes=one("SELECT COUNT(*) n FROM shipments WHERE status NOT IN ('delivered','closed') AND (COALESCE(TRIM(origin),'')='' OR COALESCE(TRIM(destination),'')='')")['n']
+ pending=one("SELECT COUNT(*) n FROM approvals WHERE status='pending'")['n'];exceptions=one("SELECT COUNT(*) n FROM shipment_exceptions WHERE status='open'")['n'];overdue=one("SELECT COUNT(*) n FROM operations_tasks WHERE status='open' AND due_at<?",(utcnow(),))['n'];drafts=one("SELECT COUNT(*) n FROM outbound_messages WHERE status='draft'")['n'];missing_routes=one("SELECT COUNT(*) n FROM business_shipments WHERE status NOT IN ('delivered','closed') AND (COALESCE(TRIM(origin),'')='' OR COALESCE(TRIM(destination),'')='')")['n']
  maps_setup=0 if os.getenv('GOOGLE_MAPS_API_KEY','').strip() else 1
  search_setup=0 if os.getenv('BRAVE_SEARCH_API_KEY','').strip() else 1
  actions=[]
@@ -126,7 +126,7 @@ async def add_opportunity(r:Request):
 def shipments(r:Request):
  s=require(r)
  if not s:return rl()
- data=rows('SELECT * FROM shipments ORDER BY id DESC');f='<div class="card"><form method="post" action="/shipments"><div class="formgrid"><input name="reference" placeholder="المرجع" required><select name="service_type"><option>Customs Clearance</option><option>Transport</option><option>Shipping</option><option>Warehousing</option><option>Door to Door</option></select><input name="origin" placeholder="المنشأ"><input name="destination" placeholder="الوجهة"><input name="revenue" type="number" value="0"><input name="cost" type="number" value="0"></div><button class="btn">إضافة شحنة</button></form></div>';trs=''.join(f'<tr><td>{esc(x["reference"])}</td><td>{esc(x["service_type"])}</td><td>{esc(x["origin"])}</td><td>{esc(x["destination"])}</td><td>{esc(x["status"])}</td></tr>' for x in data);return HTMLResponse(page('الشحنات',head(s,'الشحنات')+f+'<div class="card scroll"><table>'+trs+'</table></div>'))
+ data=rows('SELECT * FROM business_shipments ORDER BY id DESC');f='<div class="card"><form method="post" action="/shipments"><div class="formgrid"><input name="reference" placeholder="المرجع" required><select name="service_type"><option>Customs Clearance</option><option>Transport</option><option>Shipping</option><option>Warehousing</option><option>Door to Door</option></select><input name="origin" placeholder="المنشأ"><input name="destination" placeholder="الوجهة"><input name="revenue" type="number" value="0"><input name="cost" type="number" value="0"></div><button class="btn">إضافة شحنة</button></form></div>';trs=''.join(f'<tr><td>{esc(x["reference"])}</td><td>{esc(x["service_type"])}</td><td>{esc(x["origin"])}</td><td>{esc(x["destination"])}</td><td>{esc(x["status"])}</td></tr>' for x in data);return HTMLResponse(page('الشحنات',head(s,'الشحنات')+f+'<div class="card scroll"><table>'+trs+'</table></div>'))
 @app.post('/shipments')
 async def add_shipment(r:Request):
  s=require(r)
@@ -155,5 +155,5 @@ def api_accounts(r:Request): current(r);return rows('SELECT * FROM accounts ORDE
 @app.get('/api/v7/opportunities')
 def api_opps(r:Request): current(r);return rows('SELECT * FROM opportunities ORDER BY id DESC')
 @app.get('/api/v7/shipments')
-def api_shipments(r:Request): current(r);return rows('SELECT * FROM shipments ORDER BY id DESC')
+def api_shipments(r:Request): current(r);return rows('SELECT * FROM business_shipments ORDER BY id DESC')
 

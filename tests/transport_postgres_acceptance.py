@@ -69,7 +69,7 @@ class Providers:
 
     async def driver(self, recipient, message):
         from app.zernio_whatsapp import WhatsAppBlocked
-        match = re.search(r'WA-[A-F0-9]{12}', message)
+        match = re.search(r'(?:WA-[A-F0-9]{12}|NQ-\d+)', message)
         if not match:
             raise AssertionError('Unexpected non-transport driver send: ' + message)
         reference = match.group(0)
@@ -526,6 +526,8 @@ def run(providers):
         assert (one('SELECT COUNT(*) n FROM shipments')['n'], one('SELECT COUNT(*) n FROM drivers')['n']) == (records_before[0] + 1, records_before[1])
         assert not providers.unexpected, providers.unexpected
         print('PASS: read-only transport status, legacy fallback, signed natural greeting/query, duplicate idempotency and no chat-triggered sends.')
+        from transport_disclosed_acceptance import run_disclosed
+        run_disclosed(providers, inbound)
     client.close()
 
 

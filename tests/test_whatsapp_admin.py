@@ -54,7 +54,7 @@ class Connection:
                 vehicle_type TEXT,availability TEXT,offer_consent INTEGER,notes TEXT,created_at TEXT,updated_at TEXT);
             CREATE TABLE shipments(id INTEGER PRIMARY KEY,reference TEXT UNIQUE,service_type TEXT,
                 origin TEXT,destination TEXT,status TEXT,created_at TEXT,updated_at TEXT,
-                revenue REAL,cost REAL,currency TEXT);
+                revenue REAL,cost REAL,currency TEXT,is_test INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,notes TEXT,created_at TEXT,updated_at TEXT);
             CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER UNIQUE,
                 owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT,\n                contact_channel TEXT,record_kind TEXT DEFAULT 'shipment_request',

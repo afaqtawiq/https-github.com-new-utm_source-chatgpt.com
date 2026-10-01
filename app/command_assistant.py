@@ -12,6 +12,7 @@ from app.discovery import run_discovery_cycle
 from app.data_import import _phone
 from app.whatsapp_integration import send_text_message
 from app.zernio_whatsapp import WhatsAppBlocked
+from app.transport_test import test_broadcast_context
 
 router = APIRouter()
 
@@ -39,6 +40,10 @@ def _init_storage():
         created_by BIGINT, confirmed_by BIGINT, created_at TIMESTAMPTZ NOT NULL,
         confirmed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL
     )""")
+    execute("ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE")
+    execute("ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS test_approved_by BIGINT")
+    execute("ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS test_approved_at TIMESTAMPTZ")
+    execute("ALTER TABLE driver_broadcasts ADD COLUMN IF NOT EXISTS test_preview_digest TEXT")
     execute("""CREATE TABLE IF NOT EXISTS driver_broadcast_recipients(
         id BIGSERIAL PRIMARY KEY,
         broadcast_id BIGINT NOT NULL REFERENCES driver_broadcasts(id) ON DELETE CASCADE,
@@ -344,15 +349,21 @@ def broadcast_review(broadcast_id: int, request: Request):
     broadcast = one("SELECT * FROM driver_broadcasts WHERE id=?", (broadcast_id,))
     if not broadcast:
         raise HTTPException(404)
+    test_context = test_broadcast_context(broadcast)
     recipients = rows("SELECT driver_name,phone,status,last_error FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id", (broadcast_id,))
+    manual_link = (lambda x: 'يتطلب اعتماد الاختبار أدناه' if test_context else
+                   f"<a class=wa target=_blank rel=noopener href='https://wa.me/{e(str(x['phone']).lstrip('+'))}?text={urllib.parse.quote(broadcast['message'])}'>فتح واتساب</a>")
     table = "".join(
         f"<tr><td>{e(x['driver_name'])}</td><td dir=ltr>{e(x['phone'])}</td><td>{e(x['status'])}</td>"
-        f"<td><a class=wa target=_blank rel=noopener href='https://wa.me/{e(str(x['phone']).lstrip('+'))}?text={urllib.parse.quote(broadcast['message'])}'>فتح واتساب</a></td>"
+        f"<td>{manual_link(x)}</td>"
         f"<td>{e(x.get('last_error'))}</td></tr>" for x in recipients
     )
     confirm = ""
+    test_fields = (f"<h2>{e(test_context['disclaimer'])}</h2><p>الأسعار والأوزان بيانات محاكاة، ولا يوجد التزام نقل أو دفع.</p>"
+                   f"<input type=hidden name=test_preview value='{e(test_context['digest'])}'>"
+                   "<label><input type=checkbox name=test_confirmed value=yes required> أعتمد إرسال الاختبار المعلن بهذا النص إلى المستلمين المعروضين فقط</label>" if test_context else '')
     if broadcast["status"] == "draft":
-        confirm = f"""<form method=post action=/commands/broadcast/{broadcast_id}/send><input type=hidden name=csrf value="{e(current['csrf'])}"><label><input type=checkbox name=confirmed value=yes required> راجعت نص الرسالة وعدد المستلمين وأؤكد الإرسال مرة واحدة للجميع</label><button>إرسال للجميع</button></form>"""
+        confirm = f"""<form method=post action=/commands/broadcast/{broadcast_id}/send><input type=hidden name=csrf value="{e(current['csrf'])}">{test_fields}<label><input type=checkbox name=confirmed value=yes required> راجعت نص الرسالة وعدد المستلمين وأؤكد الإرسال مرة واحدة للجميع</label><button>إرسال للجميع</button></form>"""
     return HTMLResponse(f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>مراجعة حملة السائقين</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;padding:24px}}.card{{max-width:950px;margin:14px auto;background:#102536;padding:22px;border-radius:16px;overflow:auto}}button{{padding:12px 18px;background:#ef4444;color:white;border:0;border-radius:9px;font-weight:bold}}.wa{{display:inline-block;padding:7px 10px;border-radius:8px;background:#22c55e;color:#04130a;text-decoration:none;font-weight:bold;white-space:nowrap}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}input[type=checkbox]{{width:auto}}.msg{{white-space:pre-wrap;background:#081925;padding:14px;border-radius:10px}}</style><div class=card><h1>مراجعة حملة السائقين</h1><p><b>الحالة:</b> {e(broadcast['status'])} | <b>المستلمون:</b> {broadcast['recipient_count']} | <b>نجح:</b> {broadcast['sent_count']} | <b>فشل:</b> {broadcast['failed_count']}</p><div class=msg>{e(broadcast['message'])}</div><p>تشمل القائمة جميع السائقين المسجلين، مع استبعاد الأرقام غير الصالحة والمكررة.</p><p style="color:#fde68a">يمكنك استخدام «فتح واتساب» لكل سائق يدويًا حتى يكتمل ربط WhatsApp Business API. فتح الرابط لا يعني أن الرسالة أُرسلت.</p>{confirm}</div><div class=card><table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>إرسال يدوي</th><th>الخطأ</th></tr>{table}</table><p><a style="color:#86efac" href=/commands>العودة لمساعد الأوامر</a></p></div></html>""")
 
 
@@ -360,8 +371,20 @@ async def deliver_driver_broadcast(broadcast_id):
     campaign = one("SELECT * FROM driver_broadcasts WHERE id=?", (broadcast_id,))
     if not campaign or campaign["status"] != "sending":
         return
+    # Defense in depth: direct/background calls cannot bypass test approval.
+    try:
+        test_broadcast_context(campaign, approved=True)
+    except HTTPException:
+        execute("UPDATE driver_broadcasts SET status='test_blocked',updated_at=? WHERE id=? AND status='sending'", (utcnow(), broadcast_id))
+        return
     recipients = rows("SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? AND status='pending' ORDER BY id", (broadcast_id,))
     for recipient in recipients:
+        current_campaign = one("SELECT * FROM driver_broadcasts WHERE id=?", (broadcast_id,))
+        try:
+            test_broadcast_context(current_campaign, approved=True)
+        except HTTPException:
+            execute("UPDATE driver_broadcasts SET status='test_blocked',updated_at=? WHERE id=? AND status='sending'", (utcnow(), broadcast_id))
+            return
         with db() as c:
             claim = c.execute("""UPDATE driver_broadcast_recipients SET status='sending'
                 WHERE id=%s AND status='pending' AND EXISTS(
@@ -406,8 +429,17 @@ async def send_broadcast(broadcast_id: int, request: Request, background_tasks: 
         raise HTTPException(409, "Campaign is not ready for confirmation")
     now = utcnow()
     with db() as c:
-        claim = c.execute("""UPDATE driver_broadcasts SET status='sending',confirmed_by=%s,confirmed_at=%s,updated_at=%s
-            WHERE id=%s AND status='draft' RETURNING id""", (current['user_id'], now, now, broadcast_id)).fetchone()
+        campaign = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s FOR UPDATE', (broadcast_id,)).fetchone()
+        if not campaign or campaign['status'] != 'draft':
+            raise HTTPException(409, 'تم اعتماد هذا العرض مسبقًا')
+        test_context = test_broadcast_context(campaign)
+        if test_context and (data.get('test_confirmed') != 'yes' or data.get('test_preview') != test_context['digest']):
+            raise HTTPException(400, 'راجع معاينة الاختبار الحالية ثم اعتمد إرسال الاختبار صراحة')
+        claim = c.execute("""UPDATE driver_broadcasts SET status='sending',confirmed_by=%s,confirmed_at=%s,updated_at=%s,
+            test_approved_by=%s,test_approved_at=%s,test_preview_digest=%s
+            WHERE id=%s AND status='draft' RETURNING id""",
+            (current['user_id'], now, now, current['user_id'] if test_context else None,
+             now if test_context else None, test_context['digest'] if test_context else None, broadcast_id)).fetchone()
     if not claim:
         raise HTTPException(409, 'تم اعتماد هذا العرض مسبقًا')
     log(current["user_id"], "driver_broadcast_confirmed", "driver_broadcast", broadcast_id, f"Single confirmation accepted for {campaign['recipient_count']} recipients")

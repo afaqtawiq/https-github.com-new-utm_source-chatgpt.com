@@ -1,0 +1,156 @@
+"""Additional real-PostgreSQL assertions called inside the network-isolated fixture."""
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.parse import urlencode
+
+from fastapi import BackgroundTasks, HTTPException
+
+
+def run_disclosed(providers, inbound):
+    from app import command_assistant as commands, freight_workflow as workflow
+    from app.naqliat_connector import NaqliatLoad, _save
+    from app.storage import one, rows, execute
+    from app.transport_test import DISCLAIMER, display_reference, test_broadcast_context
+    from app.zernio_whatsapp import required_templates, template_parameters
+
+    owner = '+966509999998'
+    payload = dict(origin='جدة', destination='الشارقة', owner_phone=owner,
+                   weight_tons=20, description='CI isolated disclosed transport test')
+    real_id = _save(NaqliatLoad(**payload, capture_method='android_accessibility'))[2]
+    before_real = rows('SELECT * FROM business_shipments ORDER BY id')
+    before_owner_calls = len(providers.owner_calls)
+    saved = _save(NaqliatLoad(**payload, capture_method='manual_test'))
+    sid = saved[2]
+    assert sid != real_id and _save(NaqliatLoad(**payload, capture_method='manual_test'))[2] == sid
+    item = one('SELECT * FROM shipments WHERE id=?', (sid,))
+    ref = item['reference']
+    assert item['is_test'] and item['status'] == 'test_pending'
+    assert not one('SELECT id FROM business_shipments WHERE id=?', (sid,))
+    asyncio.run(workflow.contact_owner(sid, approved=True))
+    assert len(providers.owner_calls) == before_owner_calls
+    assert not workflow.sync_retell_negotiation({'shipment_id': sid, 'freight_negotiation': True}, {'agreed_price': 5000})
+
+    def terms(reference=ref):
+        return (reference + '\nالسعر النهائي: 2000 ريال\nالوزن: 20 طن'
+                '\nالتنزيل: مستودع تجريبي\nطريقة الدفع: محاكاة دون دفع')
+
+    # The verified administrator may also be the test owner. He must name the
+    # test reference; an unrelated manager command must still use admin routing.
+    with patch.dict('os.environ', {'WHATSAPP_COMMAND_OWNER': owner, 'AFAQ_TEAM': '[]'}):
+        inbound('test-owner-no-reference', owner, terms(''))
+        assert not rows('SELECT id FROM driver_broadcasts WHERE shipment_id=?', (sid,))
+        assert 'حدد مرجع' in providers.replies['test-owner-no-reference']['message']
+        inbound('test-owner-wrong-number', '+966509999997', terms())
+        assert not rows('SELECT id FROM driver_broadcasts WHERE shipment_id=?', (sid,))
+        inbound('test-owner-terms', owner, terms())
+        assert inbound('test-owner-terms', owner, terms())['duplicate']
+    offer = one('SELECT * FROM driver_broadcasts WHERE shipment_id=?', (sid,))
+    bid = offer['id']
+    assert offer['is_test'] and offer['status'] == 'draft'
+    assert len(rows('SELECT id FROM driver_broadcasts WHERE shipment_id=?', (sid,))) == 1
+    assert 'اختبار' in providers.replies['test-owner-terms']['message']
+    assert 'تم حفظ الاتفاق' not in providers.replies['test-owner-terms']['message']
+    assert not providers.sent_to_drivers(ref)
+    assert not asyncio.run(workflow.start_driver_broadcast(bid))
+    template = next(t for t in required_templates() if t['name'] == 'afaaq_transport_driver_offer_v1_ar')
+    assert template_parameters(template, offer['message'])[0] == display_reference(ref, True)
+    assert offer['message'].count(DISCLAIMER) == 2
+    assert one('SELECT revenue,cost FROM shipments WHERE id=?', (sid,)) == {'revenue': 0, 'cost': 0}
+    assert workflow.prepare_driver_offer(sid, None) == bid
+
+    admin = {'user_id': one("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1")['id'],
+             'role': 'admin', 'csrf': 'ci-test-csrf'}
+    def request(data):
+        async def body(): return urlencode(data).encode()
+        return SimpleNamespace(body=body)
+    def send(data, role='admin', deliver=False):
+        tasks = BackgroundTasks()
+        with patch.object(commands, 'session', return_value={**admin, 'role': role}):
+            result = asyncio.run(commands.send_broadcast(bid, request(data), tasks))
+            if deliver: asyncio.run(tasks())
+        return result
+    def blocked(data, status, role='admin'):
+        try:
+            send(data, role)
+        except HTTPException as exc:
+            assert exc.status_code == status, (exc.status_code, exc.detail)
+        else:
+            raise AssertionError('Unapproved test broadcast was accepted')
+
+    with patch.object(commands, 'session', return_value=admin):
+        preview = commands.broadcast_review(bid, SimpleNamespace()).body.decode()
+    assert DISCLAIMER in preview and 'name=test_confirmed' in preview and 'name=test_preview' in preview
+    assert 'https://wa.me/' not in preview  # No manual-send bypass in a test preview.
+    base = {'csrf': admin['csrf'], 'confirmed': 'yes'}
+    blocked(base, 400)
+    blocked({**base, 'test_confirmed': 'yes', 'test_preview': 'stale'}, 400)
+    blocked({**base, 'test_confirmed': 'yes'}, 403, role='transport')
+    assert not providers.sent_to_drivers(ref)
+
+    # Direct worker invocation cannot send before the explicit approval record.
+    execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?", (bid,))
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert not providers.sent_to_drivers(ref)
+    assert one('SELECT status FROM driver_broadcasts WHERE id=?', (bid,))['status'] == 'test_blocked'
+    execute("UPDATE driver_broadcasts SET status='draft' WHERE id=?", (bid,))
+    digest = test_broadcast_context(offer)['digest']
+    approved = {**base, 'test_confirmed': 'yes', 'test_preview': digest}
+    # Two approval attempts must claim once. Delivery remains a separate worker.
+    barrier = Barrier(2)
+    # Patch globally once; avoid overlapping patch restorations between threads.
+    with patch.object(commands, 'session', return_value=admin):
+        def approve_race(_):
+            barrier.wait()
+            try:
+                asyncio.run(commands.send_broadcast(bid, request(approved), BackgroundTasks()))
+                return True
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(approve_race, range(2))) == [False, True]
+    barrier = Barrier(2)
+    def deliver_once(_):
+        barrier.wait()
+        asyncio.run(commands.deliver_driver_broadcast(bid))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(deliver_once, range(2)))
+    recipients = rows('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id', (bid,))
+    assert len(providers.sent_to_drivers(ref)) == len(recipients)
+    assert all(x['status'] == 'sent' and x['provider_message_id'] for x in recipients)
+    assert all(DISCLAIMER in x[1] for x in providers.sent_to_drivers(ref))
+    assert not workflow.accept_driver_reply(recipients[0]['phone'], 'موافق ' + ref)
+
+    # Test acceptance is distinct from a booking or an operational assignment.
+    reply = 'موافق ' + display_reference(ref, True)
+    with patch.dict('os.environ', {'WHATSAPP_COMMAND_OWNER': recipients[0]['phone'], 'AFAQ_TEAM': '[]'}):
+        inbound('test-admin-not-driver', recipients[0]['phone'], reply)
+    assert one('SELECT status FROM driver_broadcasts WHERE id=?', (bid,))['status'] == 'awaiting_driver'
+    inbound('test-driver-accept', recipients[0]['phone'], reply)
+    assert inbound('test-driver-accept', recipients[0]['phone'], reply)['duplicate']
+    assert 'لم يتم تعيينك' in providers.replies['test-driver-accept']['message']
+    assert not workflow.accept_driver_reply(recipients[1]['phone'], reply)
+    assert one('SELECT status,revenue,cost FROM shipments WHERE id=?', (sid,)) == {
+        'status': 'test_completed', 'revenue': 0, 'cost': 0}
+    operation = one('SELECT stage,driver_name,driver_phone FROM shipment_operations WHERE shipment_id=?', (sid,))
+    assert operation == {'stage': 'test_completed', 'driver_name': None, 'driver_phone': None}
+    # Missing provider receipts never count as sent and cannot authorize acceptance.
+    other = _save(NaqliatLoad(**{**payload, 'description': 'CI disclosed missing receipt'}, capture_method='manual_test'))
+    other_item = one('SELECT * FROM shipments WHERE id=?', (other[2],))
+    other_ref = other_item['reference']
+    result = asyncio.run(workflow.advance_owner_whatsapp_reply(owner, terms(other_ref), shipment_id=other[2]))
+    bid = result['broadcast_id']
+    other_offer = one('SELECT * FROM driver_broadcasts WHERE id=?', (bid,))
+    providers.driver_modes[other_ref] = 'no_receipt'
+    approved = {**base, 'test_confirmed': 'yes', 'test_preview': test_broadcast_context(other_offer)['digest']}
+    send(approved, deliver=True)
+    uncertain = one('SELECT status,sent_count,failed_count FROM driver_broadcasts WHERE id=?', (bid,))
+    assert uncertain['sent_count'] == 0 and uncertain['failed_count'] == len(recipients)
+    assert uncertain['status'] == 'completed_with_errors'
+    assert not workflow.accept_driver_reply(recipients[0]['phone'], 'موافق ' + display_reference(other_ref, True))
+    assert rows('SELECT * FROM business_shipments ORDER BY id') == before_real
+    assert len(providers.owner_calls) == before_owner_calls
+    print('PASS: disclosed test preview/approval, owner/admin correlation, duplicate/racing send protection, non-business acceptance and KPI isolation.')
