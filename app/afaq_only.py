@@ -16,6 +16,7 @@ from app import multilingual  # noqa: F401  (customers are answered in Arabic, E
 from app import ai_intake  # noqa: F401  (customer conversations understood by Claude, rule-based fallback)
 from app import fasah_ai  # broker assistant inside the FASAH workspace
 from app import team  # noqa: F401  (manager and staff numbers, respectful replies, staff read-only)
+from app import manager_actions  # noqa: F401  (voice/image media fix, send WhatsApp messages on command)
 
 
 def _afaq_only(text, interactive="", previous=None):
