@@ -40,7 +40,7 @@ def init_social_content():
         created_by BIGINT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
         published_at TIMESTAMPTZ)""")
     now = utcnow()
-    execute("UPDATE social_channels SET status='superseded' WHERE platform='TikTok' AND profile_url='https://www.tiktok.com/@afaqt79' AND created_by IS NULL")
+    execute("UPDATE social_channels SET status='superseded' WHERE platform='TikTok' AND profile_url='https://www.tiktok.com/@afaqtawaiq6' AND created_by IS NULL")
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
         ("YouTube","آفاق طويق — @afaqtaw","https://www.youtube.com/@afaqtaw","linked",None,now,now))
@@ -49,7 +49,10 @@ def init_social_content():
         ("Instagram","آفاق طويق — @afaqwaiq","https://www.instagram.com/afaqwaiq/","linked",None,now,now))
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
-        ("TikTok","آفاق طويق — @afaqtawaiq6","https://www.tiktok.com/@afaqtawaiq6","saved",None,now,now))
+        ("TikTok","آفاق طويق — @afaqt79","https://www.tiktok.com/@afaqt79","saved",None,now,now))
+    execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
+        ("Facebook","آفاق طويق — @afaqtawiq","https://www.facebook.com/afaqtawiq/","saved",None,now,now))
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
         ("LinkedIn","آفاق طويق — Afaq Tuwaiq","https://www.linkedin.com/in/%D8%A7%D9%81%D8%A7%D9%82-%D8%B7%D9%88%D9%8A%D9%82-afaqtawiq-8096bb434/","linked",None,now,now))
