@@ -85,9 +85,11 @@ def callback(request:Request,code:str='',state:str='',error:str=''):
 @router.post('/settings/email/disconnect')
 def disconnect(request:Request):
  s=auth(request);execute('DELETE FROM email_connections WHERE user_id=?',(s['user_id'],));log(s['user_id'],'disconnect_gmail','email_connection',None,'Gmail sender disconnected');return RedirectResponse('/settings/email',303)
-def send_gmail(user_id,recipient,subject,body):
+def send_gmail(user_id,recipient,subject,body,*,return_metadata=False):
  from app.spacemail import connection as official_connection,send as official_send
- if official_connection(user_id):return official_send(user_id,recipient,subject,body)
+ if official_connection(user_id):
+  mid=official_send(user_id,recipient,subject,body)
+  return {'provider':'spacemail','message_id':mid} if return_metadata else mid
  if os.getenv('ENABLE_EXTERNAL_ACTIONS','0')!='1':raise RuntimeError('External actions are disabled')
  c=connection(user_id)
  if not c or c.get('status')!='connected':raise RuntimeError('Gmail is not connected')
@@ -95,7 +97,8 @@ def send_gmail(user_id,recipient,subject,body):
  with httpx.Client(timeout=25) as client:
   sr=client.post(SEND,headers={'Authorization':'Bearer '+access},json={'raw':raw})
   if sr.status_code>=400:raise RuntimeError(safe_google_error(sr))
-  return sr.json().get('id','')
+  mid=sr.json().get('id','')
+  return {'provider':'gmail','message_id':mid} if return_metadata else mid
 
 def send_gmail_with_attachment(user_id,recipient,subject,body,filename,media_type,content):
  from app.spacemail import connection as official_connection,send as official_send

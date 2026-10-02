@@ -11,7 +11,7 @@ from app.storage import db, execute, get_session, log, one, rows, utcnow
 from app.discovery import run_discovery_cycle
 from app.data_import import _phone
 from app.whatsapp_integration import send_text_message
-from app.zernio_whatsapp import WhatsAppBlocked
+from app.zernio_whatsapp import WhatsAppBlocked, WhatsAppPreflightBlocked, transport_batch, dispatch_guard
 from app.transport_test import test_broadcast_context
 from app.driver_offer import driver_phone, offer_message, preview_plan, require_valid_audience, require_unattempted
 
@@ -53,6 +53,11 @@ def _init_storage():
         provider_message_id TEXT, last_error TEXT, sent_at TIMESTAMPTZ,
         UNIQUE(broadcast_id,phone)
     )""")
+    execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS send_phase TEXT")
+    execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS preflight_diagnostic TEXT")
+    execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS post_attempted_at TIMESTAMPTZ")
+    execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS provider_response_status INTEGER")
+
 
 
 _init_storage()
@@ -438,18 +443,43 @@ def broadcast_review(broadcast_id: int, request: Request):
     table = "".join(
         f"<tr><td>{e(x['driver_name'])}</td><td dir=ltr>{e(x['phone'])}</td><td>{e(x['status'])}</td>"
         f"<td>{manual_link(x)}</td>"
-        f"<td>{e(x.get('last_error'))}</td></tr>" for x in recipients
+        f"<td>{e(x.get('last_error'))}<p>المرحلة: {e(x.get('send_phase'))} · HTTP: {e(x.get('provider_response_status'))}</p><pre>{e(x.get('preflight_diagnostic'))}</pre></td></tr>" for x in recipients
     )
+    recovery = (f'<p><a style="color:#86efac" href=/commands/broadcast/{broadcast_id}/recovery>استعادة الاختبار مع حفظ السجل السابق</a></p>' if broadcast.get('is_test') and broadcast['status'] in ('completed_with_errors', 'test_completed') else '')
     confirm = ""
     test_fields = (f"<h2>{e(test_context['disclaimer'])}</h2><p>الأسعار والأوزان بيانات محاكاة، ولا يوجد التزام نقل أو دفع.</p>"
                    f"<input type=hidden name=test_preview value='{e(test_context['digest'])}'>"
                    "<label><input type=checkbox name=test_confirmed value=yes required> أعتمد إرسال الاختبار المعلن بهذا النص إلى المستلمين المعروضين فقط</label>" if test_context else '')
     if broadcast["status"] == "draft" and not needs_refresh:
         confirm = f"""<form method=post action=/commands/broadcast/{broadcast_id}/send><input type=hidden name=csrf value="{e(current['csrf'])}">{test_fields}<label><input type=checkbox name=confirmed value=yes required> راجعت نص الرسالة وعدد المستلمين وأؤكد الإرسال مرة واحدة للجميع</label><button>إرسال للجميع</button></form>"""
-    return HTMLResponse(f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>مراجعة حملة السائقين</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;padding:24px}}.card{{max-width:950px;margin:14px auto;background:#102536;padding:22px;border-radius:16px;overflow:auto}}button{{padding:12px 18px;background:#ef4444;color:white;border:0;border-radius:9px;font-weight:bold}}.wa{{display:inline-block;padding:7px 10px;border-radius:8px;background:#22c55e;color:#04130a;text-decoration:none;font-weight:bold;white-space:nowrap}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}input[type=checkbox]{{width:auto}}.msg{{white-space:pre-wrap;background:#081925;padding:14px;border-radius:10px}}</style><div class=card><h1>مراجعة حملة السائقين</h1><p><b>الحالة:</b> {e(broadcast['status'])} | <b>المستلمون:</b> {broadcast['recipient_count']} | <b>نجح:</b> {broadcast['sent_count']} | <b>فشل:</b> {broadcast['failed_count']}</p><div class=msg>{e(broadcast['message'])}</div><p>تشمل القائمة جميع السائقين المسجلين، مع استبعاد الأرقام غير الصالحة والمكررة.</p><p style="color:#fde68a">يمكنك استخدام «فتح واتساب» لكل سائق يدويًا حتى يكتمل ربط WhatsApp Business API. فتح الرابط لا يعني أن الرسالة أُرسلت.</p>{validation}{confirm}</div><div class=card><table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>إرسال يدوي</th><th>الخطأ</th></tr>{table}</table><p><a style="color:#86efac" href=/commands>العودة لمساعد الأوامر</a></p></div></html>""")
+    return HTMLResponse(f"""<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>مراجعة حملة السائقين</title><style>body{{font-family:Arial;background:#07131f;color:#eef6fb;padding:24px}}.card{{max-width:950px;margin:14px auto;background:#102536;padding:22px;border-radius:16px;overflow:auto}}button{{padding:12px 18px;background:#ef4444;color:white;border:0;border-radius:9px;font-weight:bold}}.wa{{display:inline-block;padding:7px 10px;border-radius:8px;background:#22c55e;color:#04130a;text-decoration:none;font-weight:bold;white-space:nowrap}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #28475d;text-align:right}}input[type=checkbox]{{width:auto}}.msg{{white-space:pre-wrap;background:#081925;padding:14px;border-radius:10px}}</style><div class=card><h1>مراجعة حملة السائقين</h1><p><b>الحالة:</b> {e(broadcast['status'])} | <b>المستلمون:</b> {broadcast['recipient_count']} | <b>قبل المزود:</b> {broadcast['sent_count']} | <b>فشل/غير مؤكد:</b> {broadcast['failed_count']}</p><p>قبول المزود لا يثبت تسليم الرسالة أو قراءتها. قد يظهر فشل التسليم لاحقًا لدى المزود.</p><div class=msg>{e(broadcast['message'])}</div><p>تشمل القائمة جميع السائقين المسجلين، مع استبعاد الأرقام غير الصالحة والمكررة.</p><p style="color:#fde68a">يمكنك استخدام «فتح واتساب» لكل سائق يدويًا حتى يكتمل ربط WhatsApp Business API. فتح الرابط لا يعني أن الرسالة أُرسلت.</p>{validation}{confirm}{recovery}</div><div class=card><table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>إرسال يدوي</th><th>الخطأ</th></tr>{table}</table><p><a style="color:#86efac" href=/commands>العودة لمساعد الأوامر</a></p></div></html>""")
 
 
 async def deliver_driver_broadcast(broadcast_id):
+    # Lazy account-scoped transport context; mock/non-Zernio senders open no client.
+    async with transport_batch():
+        await _deliver_driver_broadcast(broadcast_id)
+
+
+def _record_dispatch_boundary(broadcast_id, recipient_id, expected_message, expected_phone):
+    # Recheck after any preflight backoff. Once this marker is committed the
+    # outcome may be uncertain and must never enter preflight-only recovery.
+    if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
+        raise HTTPException(409, 'الإرسال الخارجي غير مفعّل؛ أوقفت المحاولة قبل إرسال الرسالة')
+    with db() as c:
+        campaign = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s FOR UPDATE', (broadcast_id,)).fetchone()
+        recipient = c.execute('SELECT * FROM driver_broadcast_recipients WHERE id=%s FOR UPDATE', (recipient_id,)).fetchone()
+        if (not campaign or campaign['status'] != 'sending' or campaign.get('accepted_driver_id')
+                or campaign.get('accepted_at') or not recipient or recipient['status'] != 'sending'
+                or recipient.get('provider_message_id') or recipient.get('post_attempted_at')
+                or campaign['message'] != expected_message or recipient['phone'] != expected_phone):
+            raise HTTPException(409, 'توقف الإرسال: تغيرت الحملة أو بدأت محاولة هذا المستلم')
+        _validate_before_send(c, campaign)
+        test_broadcast_context(campaign, approved=True)
+        c.execute("UPDATE driver_broadcast_recipients SET post_attempted_at=%s,send_phase='dispatching' WHERE id=%s", (utcnow(),recipient_id))
+
+
+async def _deliver_driver_broadcast(broadcast_id):
     campaign = one("SELECT * FROM driver_broadcasts WHERE id=?", (broadcast_id,))
     if not campaign or campaign["status"] != "sending":
         return
@@ -476,21 +506,34 @@ async def deliver_driver_broadcast(broadcast_id):
             execute("UPDATE driver_broadcasts SET status='test_blocked',updated_at=? WHERE id=? AND status='sending'", (utcnow(), broadcast_id))
             return
         with db() as c:
-            claim = c.execute("""UPDATE driver_broadcast_recipients SET status='sending'
+            claim = c.execute("""UPDATE driver_broadcast_recipients SET status='sending',send_phase='preflight'
                 WHERE id=%s AND status='pending' AND EXISTS(
                 SELECT 1 FROM driver_broadcasts WHERE id=%s AND status='sending') RETURNING id""",
                 (recipient['id'], broadcast_id)).fetchone()
         if not claim:
             continue
         try:
-            result = await send_text_message(recipient["phone"], campaign["message"])
+            with dispatch_guard(lambda: _record_dispatch_boundary(broadcast_id, recipient['id'], campaign['message'], recipient['phone'])):
+                result = await send_text_message(recipient["phone"], campaign["message"])
             messages = result.get("messages") or []
             provider_id = str(messages[0].get("id") or "") if messages else ""
             if not provider_id:
                 raise RuntimeError('لم يرجع مزود الرسائل معرفًا؛ يلزم التحقق قبل إعادة المحاولة')
-            execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN status='sending' THEN 'sent' ELSE status END,provider_message_id=?,sent_at=? WHERE id=?", (provider_id, utcnow(), recipient["id"]))
+            execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN status='sending' THEN 'sent' ELSE status END,provider_message_id=?,sent_at=?,send_phase='accepted',provider_response_status=? WHERE id=?", (provider_id, utcnow(), result.get('http_status'), recipient["id"]))
         except Exception as exc:
-            execute("UPDATE driver_broadcast_recipients SET status=?,last_error=? WHERE id=? AND status='sending'", ('failed' if isinstance(exc, WhatsAppBlocked) else 'uncertain', str(exc)[:300], recipient["id"]))
+            preflight = isinstance(exc, WhatsAppPreflightBlocked)
+            diagnostic = json.dumps({key:value for key,value in exc.diagnostic.items() if key in
+                {'phase','endpoint','http_status','error_category','attempts','retryable','rate_limit',
+                 'rate_remaining','rate_reset_unix','retry_after_seconds'}}, ensure_ascii=False) if preflight else None
+            response = getattr(exc, 'response', None)
+            response_status = getattr(exc, 'http_status', None) or getattr(response, 'status_code', None)
+            evidence = one('SELECT post_attempted_at FROM driver_broadcast_recipients WHERE id=?', (recipient['id'],)) or {}
+            blocked_phase = 'post_rejected' if evidence.get('post_attempted_at') or response_status is not None else 'preflight_blocked'
+            phase = 'preflight_failed' if preflight else blocked_phase if isinstance(exc, WhatsAppBlocked) else 'uncertain'
+            execute("""UPDATE driver_broadcast_recipients SET status=?,last_error=?,send_phase=?,
+                preflight_diagnostic=?,provider_response_status=? WHERE id=? AND status='sending'""",
+                ('failed' if isinstance(exc, WhatsAppBlocked) else 'uncertain', str(exc)[:300],
+                 phase, diagnostic, response_status, recipient['id']))
     counts = one("""SELECT COUNT(*) FILTER (WHERE provider_message_id IS NOT NULL AND provider_message_id<>'') sent,
         COUNT(*) FILTER (WHERE status IN ('failed','uncertain')) failed,
         COUNT(*) FILTER (WHERE status IN ('pending','sending')) pending FROM driver_broadcast_recipients WHERE broadcast_id=?""", (broadcast_id,))

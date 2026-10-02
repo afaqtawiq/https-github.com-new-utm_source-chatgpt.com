@@ -17,13 +17,18 @@ def index(request:Request):
  return shell(nav()+'<h1>Customer 360 + Profitability Intelligence</h1><p class="muted">رؤية موحدة للعميل من أول فرصة حتى الربحية التشغيلية.</p><div class="card"><h2>العملاء</h2><table><tr><th>العميل</th><th>الدولة</th><th>الفرص</th><th>Won</th><th>العمليات</th><th></th></tr>'+tr+'</table></div><div class="card"><h2>العملاء حسب الربحية</h2><table><tr><th>العميل</th><th>العمليات</th><th>الإيراد</th><th>الربح التشغيلي</th></tr>'+pr+'</table></div>')
 @router.get('/customers360/{aid}')
 def detail(aid:int,request:Request):
- auth(request);a=one('SELECT * FROM accounts WHERE id=?',(aid,));
+ session=auth(request);a=one('SELECT * FROM accounts WHERE id=?',(aid,));
  if not a:raise HTTPException(404)
  opp=rows('SELECT * FROM opportunities WHERE account_id=? ORDER BY id DESC',(aid,));ships=rows('SELECT s.*,x.actual_cost,x.stage ops_stage,x.customs_port FROM business_shipments s LEFT JOIN shipment_operations x ON x.shipment_id=s.id WHERE s.account_id=? ORDER BY s.id DESC',(aid,));quotes=rows('SELECT q.* FROM sales_quotes q JOIN opportunities o ON o.id=q.opportunity_id WHERE o.account_id=? ORDER BY q.id DESC',(aid,));msgs=rows('SELECT m.* FROM outbound_messages m JOIN opportunities o ON o.id=m.opportunity_id WHERE o.account_id=? ORDER BY m.id DESC LIMIT 30',(aid,));replies=rows('SELECT r.* FROM inbound_replies r JOIN opportunities o ON o.id=r.opportunity_id WHERE o.account_id=? ORDER BY r.id DESC LIMIT 30',(aid,));curr={}
  for s in ships:
   c=s['currency'];d=curr.setdefault(c,{'rev':0,'cost':0,'jobs':0});d['rev']+=float(s['revenue'] or 0);d['cost']+=float(s.get('actual_cost') or 0);d['jobs']+=1
  fin=''.join('<div class="k">'+e(c)+'<b>'+format(v['rev'],',.2f')+' Revenue</b><span>Profit '+format(v['rev']-v['cost'],',.2f')+' | '+str(v['jobs'])+' عمليات</span></div>' for c,v in curr.items()) or '<div class="k">لا توجد عمليات مالية بعد</div>';won=sum(1 for x in opp if x['stage']=='won');lost=sum(1 for x in opp if x['stage']=='lost');rate=round(won/(won+lost)*100,1) if won+lost else 0;repeat=len(ships);orows=''.join('<tr><td>'+str(x['id'])+'</td><td>'+e(x['signal'])+'</td><td>'+e(x['stage'])+'</td><td>'+str(x['score'])+'</td><td>'+format(float(x['estimated_value'] or 0),',.2f')+' '+e(x['currency'])+'</td></tr>' for x in opp);srows=''.join('<tr><td><a href="/operations/'+str(x['id'])+'">'+e(x['reference'])+'</a></td><td>'+e(x['service_type'])+'</td><td>'+e(x.get('customs_port') or '—')+'</td><td>'+e(x.get('ops_stage') or x['status'])+'</td><td>'+format(float(x['revenue'] or 0),',.2f')+'</td><td>'+format(float(x.get('actual_cost') or 0),',.2f')+'</td><td>'+format(float(x['revenue'] or 0)-float(x.get('actual_cost') or 0),',.2f')+'</td></tr>' for x in ships);qrows=''.join('<tr><td>'+e(x['quote_number'])+'</td><td>'+e(x['service_type'])+'</td><td>'+e(x['status'])+'</td><td>'+format(float(x['sell_price'] or 0),',.2f')+' '+e(x['currency'])+'</td></tr>' for x in quotes);timeline=[]
- for x in msgs:timeline.append((x.get('created_at'),'Outbound',x.get('subject') or '',x.get('status')))
+ from app.official_sales import authorize
+ visible_msgs=[]
+ for msg in msgs:
+  try:authorize(session,msg);visible_msgs.append(msg)
+  except HTTPException:pass
+ for x in visible_msgs:timeline.append((x.get('created_at'),'Outbound',x.get('subject') or '',x.get('status')))
  for x in replies:timeline.append((x.get('received_at') or x.get('created_at'),'Inbound',x.get('subject') or '',x.get('classification')))
  timeline.sort(key=lambda z:str(z[0]),reverse=True);tl=''.join('<tr><td>'+e(x[0])+'</td><td>'+e(x[1])+'</td><td>'+e(x[2])+'</td><td>'+e(x[3])+'</td></tr>' for x in timeline[:40])
  services={}

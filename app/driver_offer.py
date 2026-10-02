@@ -45,7 +45,8 @@ def require_unattempted(campaign, recipients):
             or campaign.get('accepted_at') or campaign.get('accepted_driver_id')
             or campaign.get('completed_at') or campaign.get('sent_count') or campaign.get('failed_count')
             or any(r['status'] not in ('pending', 'excluded') or r.get('provider_message_id')
-                   or r.get('sent_at') or r.get('replied_at') for r in recipients)):
+                   or r.get('sent_at') or r.get('replied_at') or r.get('post_attempted_at')
+                   or r.get('provider_response_status') is not None for r in recipients)):
         raise HTTPException(409, 'بدأت محاولة إرسال هذه الحملة؛ لا يمكن تحديث مستلميها أو نصها')
 
 

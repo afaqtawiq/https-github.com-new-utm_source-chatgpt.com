@@ -47,7 +47,8 @@ class Database:
             sent_count INTEGER DEFAULT 0,failed_count INTEGER DEFAULT 0,created_by INTEGER,created_at TEXT,updated_at TEXT,
             shipment_id INTEGER,confirmed_by INTEGER,confirmed_at TEXT,completed_at TEXT,accepted_driver_id INTEGER,accepted_at TEXT,is_test INTEGER DEFAULT 0,test_approved_by INTEGER,test_approved_at TEXT,test_preview_digest TEXT);
         CREATE TABLE driver_broadcast_recipients(id INTEGER PRIMARY KEY,broadcast_id INTEGER,driver_id INTEGER,driver_name TEXT,phone TEXT,
-            status TEXT,provider_message_id TEXT,sent_at TEXT,last_error TEXT,replied_at TEXT,UNIQUE(broadcast_id,phone));
+            status TEXT,provider_message_id TEXT,sent_at TEXT,last_error TEXT,replied_at TEXT,send_phase TEXT,preflight_diagnostic TEXT,post_attempted_at TEXT,provider_response_status INTEGER,UNIQUE(broadcast_id,phone));
+        CREATE TABLE driver_recovery_batches(id INTEGER PRIMARY KEY,broadcast_id INTEGER UNIQUE,account_id TEXT);
         CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT,created_by INTEGER);
         CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,driver_name TEXT,driver_phone TEXT,updated_at TEXT);
         INSERT INTO shipments VALUES(1,'NQ-16','الرياض','جدة','new',0,0,'',0);
@@ -574,14 +575,14 @@ def test_refresh_draft_excludes_invalid_audits_and_clears_approval_without_send(
         asyncio.run(commands.refresh_broadcast_preview(bid,refresh_request({'csrf':'safe-csrf','refresh_confirmed':'yes','refresh_preview':plan['digest']})))
 
 
-@pytest.mark.parametrize('change', ['sent','sending','uncertain','failed','provider','sent_at','replied_at','confirmed','completed','accepted'])
+@pytest.mark.parametrize('change', ['sent','sending','uncertain','failed','provider','sent_at','replied_at','post_attempted_at','provider_response_status','confirmed','completed','accepted'])
 def test_refresh_never_mutates_attempted_campaign(modules, monkeypatch, change):
     commands, _, database, bid, _ = legacy_driver_draft(modules, monkeypatch)
     plan = refresh_plan(commands,database,bid)
     if change in ('sent','sending','uncertain','failed'):
         database.execute('UPDATE driver_broadcast_recipients SET status=? WHERE id=1', (change,))
-    elif change in ('provider','sent_at','replied_at'):
-        column = {'provider':'provider_message_id','sent_at':'sent_at','replied_at':'replied_at'}[change]
+    elif change in ('provider','sent_at','replied_at','post_attempted_at','provider_response_status'):
+        column = {'provider':'provider_message_id','sent_at':'sent_at','replied_at':'replied_at','post_attempted_at':'post_attempted_at','provider_response_status':'provider_response_status'}[change]
         database.execute('UPDATE driver_broadcast_recipients SET '+column+"='evidence' WHERE id=1")
     else:
         column = {'confirmed':'confirmed_at','completed':'completed_at','accepted':'accepted_at'}[change]
@@ -629,3 +630,117 @@ def test_refresh_is_limited_to_disclosed_test_drafts(modules,monkeypatch):
     assert exc.value.status_code == 409
     assert database.rows('SELECT * FROM driver_broadcast_recipients') == before
     assert 'name=refresh_preview' not in commands.broadcast_review(bid,types.SimpleNamespace()).body.decode()
+
+
+def test_preflight_diagnostics_are_sanitized_and_never_dispatch(modules,monkeypatch):
+    commands, freight, database = modules
+    from app.zernio_whatsapp import WhatsAppPreflightBlocked
+    bid = freight.prepare_driver_offer(1,1)
+    database.execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?",(bid,))
+    calls=[]
+    async def fail(*args):
+        calls.append(args)
+        raise WhatsAppPreflightBlocked({'phase':'preflight','endpoint':'accounts','http_status':429,
+            'error_category':'http_error','attempts':3,'retryable':True,'rate_remaining':0,
+            'authorization':'must-not-persist'},retryable=True)
+    monkeypatch.setattr(commands,'send_text_message',fail)
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    recipients=database.rows('SELECT * FROM driver_broadcast_recipients')
+    assert len(calls)==3 and all(r['status']=='failed' and r['send_phase']=='preflight_failed' for r in recipients)
+    assert all(r['post_attempted_at'] is None and r['provider_response_status'] is None and r['provider_message_id'] is None for r in recipients)
+    assert all('429' in r['preflight_diagnostic'] and 'must-not-persist' not in r['preflight_diagnostic'] for r in recipients)
+    snapshot=database.rows('SELECT * FROM driver_broadcast_recipients')
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert len(calls)==3 and database.rows('SELECT * FROM driver_broadcast_recipients')==snapshot
+
+
+@pytest.mark.parametrize('outcome',['timeout','invalid_json'])
+def test_post_boundary_timeout_remains_uncertain_and_is_never_retried(modules,monkeypatch,outcome):
+    commands, freight, database = modules
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','1')
+    from app import zernio_whatsapp as z
+    bid = freight.prepare_driver_offer(1,1)
+    database.execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?",(bid,))
+    calls=[]
+    async def uncertain(*args):
+        guard=z._dispatch_guard.get()
+        assert guard
+        guard()
+        calls.append(args)
+        if outcome == 'invalid_json': raise z.WhatsAppSendUncertain(200)
+        raise TimeoutError('unknown after POST')
+    monkeypatch.setattr(commands,'send_text_message',uncertain)
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert len(calls)==3
+    recipients=database.rows('SELECT * FROM driver_broadcast_recipients')
+    assert all(r['status']=='uncertain' and r['send_phase']=='uncertain' and r['post_attempted_at'] for r in recipients)
+    assert all(r['preflight_diagnostic'] is None for r in recipients)
+    assert all(r['provider_response_status'] == (200 if outcome=='invalid_json' else None) for r in recipients)
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert len(calls)==3
+
+
+def test_acceptance_during_preflight_stops_dispatch_at_final_guard(modules,monkeypatch):
+    commands, freight, database = modules
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','1')
+    from app import zernio_whatsapp as z
+    bid=freight.prepare_driver_offer(1,1)
+    database.execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?",(bid,))
+    dispatched=[]
+    async def wait_then_cancel(*args):
+        database.execute("UPDATE driver_broadcasts SET status='test_completed',accepted_driver_id=1 WHERE id=?",(bid,))
+        database.execute("UPDATE driver_broadcast_recipients SET status='closed' WHERE broadcast_id=?",(bid,))
+        z._dispatch_guard.get()()
+        dispatched.append(args)
+        return {'messages':[{'id':'must-not-happen'}]}
+    monkeypatch.setattr(commands,'send_text_message',wait_then_cancel)
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert not dispatched
+    assert all(r['post_attempted_at'] is None and r['provider_message_id'] is None for r in database.rows('SELECT * FROM driver_broadcast_recipients'))
+    assert database.one('SELECT status FROM driver_broadcasts')['status']=='test_completed'
+
+
+def test_provider_accepted_receipts_are_immutable_even_when_delivery_later_failed(modules,monkeypatch):
+    commands, freight, database = modules
+    bid=freight.prepare_driver_offer(1,1)
+    database.execute("UPDATE driver_broadcasts SET status='completed_with_errors',sent_count=1,failed_count=2 WHERE id=?",(bid,))
+    database.execute("UPDATE driver_broadcast_recipients SET status='sent',provider_message_id='accepted-receipt',sent_at='before',send_phase='accepted',last_error='Business eligibility payment issue 131042' WHERE id=1")
+    database.execute("UPDATE driver_broadcast_recipients SET status='failed',last_error='تعذر التحقق من إعداد واتساب لدى Zernio؛ لم تُرسل الرسالة' WHERE id<>1")
+    before=database.rows('SELECT * FROM driver_broadcast_recipients')
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert database.rows('SELECT * FROM driver_broadcast_recipients')==before
+
+
+def test_dispatch_guard_rejects_changed_message_after_preflight(modules,monkeypatch):
+    commands, freight, database = modules
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','1')
+    from app import zernio_whatsapp as z
+    bid=freight.prepare_driver_offer(1,1)
+    database.execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?",(bid,))
+    posts=[]
+    async def changed(*args):
+        database.execute("UPDATE driver_broadcasts SET message=message || ' changed' WHERE id=?",(bid,))
+        z._dispatch_guard.get()()
+        posts.append(args)
+        return {'messages':[{'id':'must-not-happen'}]}
+    monkeypatch.setattr(commands,'send_text_message',changed)
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert not posts
+    assert all(r['post_attempted_at'] is None and r['provider_message_id'] is None for r in database.rows('SELECT * FROM driver_broadcast_recipients'))
+
+
+def test_dispatch_guard_rechecks_external_action_switch_after_wait(modules,monkeypatch):
+    commands, freight, database = modules
+    from app import zernio_whatsapp as z
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','1')
+    bid=freight.prepare_driver_offer(1,1)
+    database.execute("UPDATE driver_broadcasts SET status='sending' WHERE id=?",(bid,))
+    posts=[]
+    async def disabled_after_wait(*args):
+        monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS','0')
+        z._dispatch_guard.get()()
+        posts.append(args)
+    monkeypatch.setattr(commands,'send_text_message',disabled_after_wait)
+    asyncio.run(commands.deliver_driver_broadcast(bid))
+    assert not posts
+    assert all(r['post_attempted_at'] is None for r in database.rows('SELECT * FROM driver_broadcast_recipients'))
