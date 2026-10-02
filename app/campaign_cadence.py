@@ -49,10 +49,15 @@ def prepare(user_id, day=None):
              cm.message_html(url, '__UNSUBSCRIBE__'), url, base, user_id, utcnow())).fetchone()['id']
         for channel in ('email', 'whatsapp'):
             c.execute('INSERT INTO customer_campaign_channels(campaign_id,channel,updated_at) VALUES(%s,%s,%s)', (campaign, channel, utcnow()))
+        saved_count = 0
         for item in listing:
+            if item['channel']=='email':
+                from app.prospect_outreach import campaign_duplicate
+                if campaign_duplicate(c,item['recipient']):continue
+            saved_count += 1
             c.execute('''INSERT INTO customer_campaign_recipients(campaign_id,channel,recipient,company_name,sources,unsubscribe_token)
                 VALUES(%s,%s,%s,%s,%s,%s)''', (campaign, item['channel'], item['recipient'], item['company_name'], json.dumps(item['sources']), secrets.token_urlsafe(24)))
-    log(user_id, 'customer_campaign_prepared', 'customer_campaign', campaign, f'{len(listing)} channel recipients (cadence: intro + one follow-up); no messages sent')
+    log(user_id, 'customer_campaign_prepared', 'customer_campaign', campaign, f'{saved_count} channel recipients (cadence: intro + one follow-up); no messages sent')
     return campaign
 
 

@@ -100,10 +100,15 @@ def prepare(user_id, day=None):
              message_html(url,'__UNSUBSCRIBE__'),url,base,user_id,utcnow())).fetchone()['id']
         for channel in ('email','whatsapp'):
             c.execute('INSERT INTO customer_campaign_channels(campaign_id,channel,updated_at) VALUES(%s,%s,%s)',(campaign,channel,utcnow()))
+        saved_count = 0
         for item in listing:
+            if item['channel']=='email':
+                from app.prospect_outreach import campaign_duplicate
+                if campaign_duplicate(c,item['recipient']):continue
+            saved_count += 1
             c.execute('''INSERT INTO customer_campaign_recipients(campaign_id,channel,recipient,company_name,sources,unsubscribe_token)
                 VALUES(%s,%s,%s,%s,%s,%s)''',(campaign,item['channel'],item['recipient'],item['company_name'],json.dumps(item['sources']),secrets.token_urlsafe(24)))
-    log(user_id,'customer_campaign_prepared','customer_campaign',campaign,f'{len(listing)} channel recipients; no messages sent')
+    log(user_id,'customer_campaign_prepared','customer_campaign',campaign,f'{saved_count} channel recipients; no messages sent')
     return campaign
 
 
@@ -268,6 +273,11 @@ async def deliver(cid,channel,user_id):
             item=c.execute("""UPDATE customer_campaign_recipients SET status='sending',claimed_at=%s WHERE id=(
                 SELECT id FROM customer_campaign_recipients WHERE campaign_id=%s AND channel=%s AND status='pending'
                 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *""",(utcnow(),cid,channel)).fetchone()
+            if item and channel=='email':
+                from app.prospect_outreach import campaign_duplicate
+                if campaign_duplicate(c,item['recipient']):
+                    c.execute("UPDATE customer_campaign_recipients SET status='excluded_prospect',last_error=%s WHERE id=%s",('Manual prospect introduction already exists; excluded from customer campaign',item['id']))
+                    continue
         if not item:break
         url=campaign['unsubscribe_base']+item['unsubscribe_token']
         body=campaign['plain_template'].replace('__UNSUBSCRIBE__',url)

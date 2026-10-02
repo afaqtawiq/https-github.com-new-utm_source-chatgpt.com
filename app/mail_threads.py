@@ -54,10 +54,14 @@ def select_match(candidates, sender, user_id, parent=None, reference_ids=()):
     """All recognized ancestors must agree, including identity/owner, or review."""
     if not candidates:
         return None, 'no_exact_thread'
-    if any(c.get('recipient', '').strip().lower() != sender or c.get('mail_user_id') != user_id for c in candidates):
+    if any((c.get('recipient') or '').strip().lower() != sender or c.get('mail_user_id') != user_id for c in candidates):
         return None, 'sender_or_mailbox_mismatch'
-    identities = {(c.get('opportunity_id'), c.get('account_id')) for c in candidates}
-    if len(identities) != 1 or None in {c.get('opportunity_id') for c in candidates}:
+    # A prospect is its own identity, never an invented request or customer.
+    # Keep every recognized ancestor within exactly one kind of identity.
+    identities = {(c.get('opportunity_id'), c.get('account_id'), c.get('prospect_id')) for c in candidates}
+    if (len(identities) != 1
+            or any(bool(c.get('opportunity_id')) == bool(c.get('prospect_id')) for c in candidates)
+            or any(c.get('prospect_id') and c.get('account_id') is not None for c in candidates)):
         return None, 'ambiguous_thread'
     by_identity = {}
     for item in candidates:

@@ -77,3 +77,40 @@ def test_duplicate_headers_fail_closed():
 
 def test_message_id_whitespace_normalizes_without_lowercasing_identity():
     assert message_id('  <CaseSensitive@example.invalid>  ')=='<CaseSensitive@example.invalid>'
+
+
+def prospect_candidate(**kw):
+    return candidate(opportunity_id=None, account_id=None, prospect_id=5, **kw)
+
+
+def test_exact_prospect_thread_without_request_or_account():
+    row,reason=select_match([prospect_candidate()], 'buyer@example.invalid',7,'<sent@shodai.cc>')
+    assert reason=='exact_thread' and row['prospect_id']==5
+    assert row['opportunity_id'] is None and row['account_id'] is None
+    rows=[prospect_candidate(),prospect_candidate(id=99,provider_message_id='<older@shodai.cc>')]
+    assert select_match(rows,'buyer@example.invalid',7,None,['<older@shodai.cc>','<sent@shodai.cc>'])[0]['id']==1
+
+
+def test_prospect_thread_keeps_sender_mailbox_and_duplicate_guards():
+    for sender,owner in [('stranger@example.invalid',7),('buyer@example.invalid',8)]:
+        row,reason=select_match([prospect_candidate()],sender,owner,'<sent@shodai.cc>')
+        assert row is None and reason=='sender_or_mailbox_mismatch'
+    assert select_match([prospect_candidate(mail_user_id=None)],'buyer@example.invalid',7,'<sent@shodai.cc>')[0] is None
+    assert select_match([prospect_candidate(),prospect_candidate(id=2)],'buyer@example.invalid',7,'<sent@shodai.cc>')[1]=='duplicate_thread_identity'
+
+
+def test_mixed_prospect_request_or_multiple_prospects_stay_review():
+    # Equal numeric IDs across the two tables are still different identities.
+    rows=[candidate(),prospect_candidate(id=2,provider_message_id='<other@shodai.cc>')]
+    assert select_match(rows,'buyer@example.invalid',7,'<sent@shodai.cc>')[1]=='ambiguous_thread'
+    rows=[prospect_candidate(),candidate(id=2,opportunity_id=None,account_id=None,
+                                       prospect_id=6,provider_message_id='<other@shodai.cc>')]
+    assert select_match(rows,'buyer@example.invalid',7,'<sent@shodai.cc>')[1]=='ambiguous_thread'
+
+
+def test_invalid_prospect_identity_combinations_stay_review():
+    for invalid in [candidate(prospect_id=5),candidate(opportunity_id=None,prospect_id=5),
+                    candidate(opportunity_id=None,account_id=None),candidate(opportunity_id=None,account_id=None,prospect_id=None)]:
+        assert select_match([invalid],'buyer@example.invalid',7,'<sent@shodai.cc>')[1]=='ambiguous_thread'
+    # A legacy opportunity without a customer account remains a valid request.
+    assert select_match([candidate(account_id=None)],'buyer@example.invalid',7,'<sent@shodai.cc>')[1]=='exact_thread'
