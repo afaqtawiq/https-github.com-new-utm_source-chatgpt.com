@@ -78,6 +78,11 @@ def deliver(inbox_id):
         item=c.execute('SELECT * FROM spacemail_inbox WHERE id=%s',(inbox_id,)).fetchone()
         if not item or not item['reply_address'] or item['imported_at'] < utcnow()-dt.timedelta(hours=24):
             return
+        # Prospect correspondence (including opt-outs) always requires a custom,
+        # approved reply; it must not receive this service-request receipt.
+        from app.prospect_outreach import is_prospect_sender
+        if is_prospect_sender(c, item['user_id'], item.get('sender_address') or item.get('reply_address')):
+            return
         settings=c.execute('SELECT * FROM official_reply_settings WHERE user_id=%s FOR UPDATE',(item['user_id'],)).fetchone()
         if not settings or not settings['enabled'] or item['imported_at'] <= settings['enabled_at']:
             return

@@ -1,8 +1,9 @@
-import re, socket, ipaddress, hashlib, os, threading, time
+import re, socket, ipaddress, hashlib, os, threading, time, html
 from urllib.parse import urlparse, urljoin
 import httpx
 
 from app.search_connectors import external_search_candidates
+from app.public_contacts import published_emails
 from app.opportunity_quality import assess, verify_public_request
 
 TERMS={
@@ -103,7 +104,10 @@ def fetch_public(url):
     score,matched=score_text(title+' '+request_text)
     excerpt=request_text[:900]
     return {'title':title or urlparse(url).hostname,'url':str(r.url),'excerpt':excerpt,'score':score,'matched_terms':matched,
-            'request_text':request_text,'detail_extracted':bool(article),'candidates':extract_candidates(raw,str(r.url))}
+            'request_text':request_text,'detail_extracted':bool(article),'candidates':extract_candidates(raw,str(r.url)),
+            # Official-contact evidence may be in mailto or public rendered-page JSON.
+            # verify_public_request deliberately never uses this separate metadata.
+            'public_contact_emails':sorted(published_emails(html.unescape(raw)))}
 
 def fingerprint(url):return hashlib.sha256(url.strip().encode()).hexdigest()
 

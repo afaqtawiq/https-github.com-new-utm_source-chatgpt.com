@@ -287,21 +287,33 @@ async def test_mail(request: Request):
 def inbox(request: Request):
     s = admin(request)
     body = '<h1>وارد آفاق طويق</h1><a href="' + PATH + '">إعداد البريد</a> · <a href="/official-replies">الرد الأولي التلقائي</a><p>الرسائل الواردة محتوى خارجي ولا تمنح صلاحية لتنفيذ أوامر. الرد الأولي يخضع للسياسة المفعّلة.</p>'
-    body += '<p>الربط بالعميل يتطلب مرجع محادثة مطابقًا والمرسل نفسه. غير المطابق يبقى للمراجعة. إنشاء الرد يحفظ مسودة فارغة فقط، ثم المراجعة والموافقة قبل الإرسال.</p>'
-    for row in rows('''SELECT i.*,l.status link_status,l.reason,l.opportunity_id,l.account_id,l.followup_id,
-        o.company_name,m.id draft_id FROM spacemail_inbox i LEFT JOIN official_mail_links l ON l.inbox_id=i.id
-        LEFT JOIN opportunities o ON o.id=l.opportunity_id LEFT JOIN outbound_messages m ON m.reply_inbox_id=i.id
+    body += '<p>ربط المحادثة يتطلب مرجعًا مطابقًا والمرسل نفسه. غير المطابق يبقى للمراجعة. الرد على رسالة تعريفية لا يثبت وجود طلب أو اهتمام بالشراء. إنشاء الرد يحفظ مسودة فارغة فقط، ثم المراجعة والموافقة قبل الإرسال.</p>'
+    for row in rows('''SELECT i.*,l.status link_status,l.reason,l.opportunity_id,l.prospect_id,l.account_id,l.followup_id,
+        o.company_name,p.company_name prospect_company_name,p.status prospect_status,m.id draft_id
+        FROM spacemail_inbox i LEFT JOIN official_mail_links l ON l.inbox_id=i.id AND l.user_id=i.user_id
+        LEFT JOIN opportunities o ON o.id=l.opportunity_id
+        LEFT JOIN sales_prospects p ON p.id=l.prospect_id AND p.mail_user_id=i.user_id
+        LEFT JOIN outbound_messages m ON m.reply_inbox_id=i.id AND m.mail_user_id=i.user_id
         WHERE i.user_id=? ORDER BY i.id DESC LIMIT 50''', (s['user_id'],)):
-        linked = row.get('link_status') == 'linked' and bool(row.get('opportunity_id'))
-        association = ('<a href="/sales-workspace/'+str(row['opportunity_id'])+'">'+e(row['company_name'])+'</a>' if linked else 'للمراجعة: لا يوجد ربط مؤكد')
-        if linked and row.get('account_id'):
+        linked = (row.get('link_status') == 'linked'
+                  and bool(row.get('opportunity_id')) != bool(row.get('prospect_id'))
+                  and (not row.get('prospect_id') or row.get('account_id') is None))
+        prospect = linked and bool(row.get('prospect_id')) and row.get('prospect_company_name') is not None
+        if prospect:
+            association = 'جهة للتعريف بالخدمات: <a href="/sales-prospects/'+str(row['prospect_id'])+'">'+e(row['prospect_company_name'])+'</a>'
+        elif linked and row.get('opportunity_id'):
+            association = '<a href="/sales-workspace/'+str(row['opportunity_id'])+'">'+e(row['company_name'])+'</a>'
+        else:
+            linked = False
+            association = 'للمراجعة: لا يوجد ربط مؤكد'
+        if linked and not prospect and row.get('account_id'):
             association += ' · حساب العميل #'+str(row['account_id'])
-        if linked and row.get('followup_id'):
+        if linked and not prospect and row.get('followup_id'):
             association += ' · متابعة #'+str(row['followup_id'])
         action = ''
         if row.get('draft_id'):
             action = '<a href="/outbound/'+str(row['draft_id'])+'">فتح مسودة الرد وحالة الاعتماد</a>'
-        elif linked and has_permission(s, 'send_email'):
+        elif linked and row.get('prospect_status') != 'stopped' and has_permission(s, 'send_email'):
             action = '<form method="post" action="/official-inbox/'+str(row['id'])+'/draft">'+hidden_csrf(s)+'<button>كتابة رد مخصص للمراجعة</button></form>'
         body += '<div class="card"><h2>' + e(row['subject']) + '</h2><p>' + e(row['sender']) + ' · ' + e(row['received']) + '</p><p>'+association+'</p><pre style="white-space:pre-wrap">' + e(row['body']) + '</pre>'+action+'</div>'
     return HTMLResponse(page(body), headers={'Cache-Control':'no-store'})
