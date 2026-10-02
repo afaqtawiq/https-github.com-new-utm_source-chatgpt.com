@@ -1,8 +1,16 @@
 """Transport WhatsApp adapter. Provider acceptance is not delivery confirmation."""
+import asyncio
+import inspect
+import logging
+import math
 import os
 import re
+import time
 import uuid
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from html import escape
 from urllib.parse import quote, parse_qs
 
@@ -12,10 +20,193 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 BASE = 'https://zernio.com/api/v1'
 router = APIRouter()
+logger = logging.getLogger(__name__)
+_READ_ATTEMPTS = 3
+_READ_BUDGET_SECONDS = 90
+_BATCH_WAIT_BUDGET_SECONDS = 180
+_BATCH_BUDGET_SECONDS = 300
+_CACHE_SECONDS = 30
+_sleep = asyncio.sleep
+_monotonic = time.monotonic
+_wall_time = time.time
+_batch = ContextVar('zernio_transport_batch', default=None)
+_dispatch_guard = ContextVar('zernio_dispatch_guard', default=None)
 
 
 class WhatsAppBlocked(RuntimeError):
     """A preflight or explicit rejection proves no message was accepted."""
+
+
+class WhatsAppPreflightBlocked(WhatsAppBlocked):
+    """A read/rate gate failed before the send POST was attempted."""
+
+    def __init__(self, diagnostic, *, retryable):
+        super().__init__('تعذر التحقق من إعداد واتساب لدى Zernio؛ لم تُرسل الرسالة')
+        self.diagnostic = dict(diagnostic)
+        self.retryable = bool(retryable)
+
+
+class WhatsAppSendUncertain(RuntimeError):
+    """The POST happened, but its response did not prove provider acceptance."""
+
+    def __init__(self, http_status):
+        super().__init__('نتيجة إرسال واتساب غير مؤكدة؛ راجع المزود قبل إعادة المحاولة')
+        self.http_status = http_status
+
+
+class _TransportState:
+    def __init__(self, *, cache=False):
+        self.account = account_id()
+        self.cache_enabled = cache
+        self.cache = {}
+        self.windows = {}
+        self.auth_error = None
+        self.lock = asyncio.Lock()
+        self.not_before = 0
+        self.wait_spent = 0
+        self.deadline = _monotonic() + _BATCH_BUDGET_SECONDS
+        self.rate_hints = {}
+        self.stack = AsyncExitStack()
+        self.client = None
+
+    async def get_client(self):
+        async with self.lock:
+            if self.client is None:
+                self.client = await self.stack.enter_async_context(client())
+                self.client._afaaq_whatsapp_state = self
+        return self.client
+
+
+@asynccontextmanager
+async def transport_batch():
+    """Share a lazy client and short account-scoped read cache within one batch."""
+    existing = _batch.get()
+    if existing is not None:
+        _check_account(existing, '/accounts')
+        yield existing
+        return
+    state = _TransportState(cache=True)
+    token = _batch.set(state)
+    try:
+        async with state.stack:
+            yield state
+    finally:
+        _batch.reset(token)
+
+
+@contextmanager
+def dispatch_guard(callback):
+    """Run a caller's ownership/stop check immediately before the only send POST."""
+    token = _dispatch_guard.set(callback)
+    try:
+        yield
+    finally:
+        _dispatch_guard.reset(token)
+
+
+def _state_for(c):
+    state = getattr(c, '_afaaq_whatsapp_state', None)
+    if state is None:
+        state = _TransportState()
+        c._afaaq_whatsapp_state = state
+    return state
+
+
+def _endpoint(path):
+    if path == '/accounts': return 'accounts'
+    if path == '/whatsapp/templates': return 'templates'
+    if path == '/inbox/conversations': return 'conversations'
+    if path.startswith('/inbox/conversations/') and path.endswith('/messages'):
+        return 'conversation_messages'
+    return 'other'
+
+
+def _diagnostic(path, category, *, retryable, status=None, attempt=0, hints=None):
+    # Strictly allowlisted categories and numeric headers; never URLs, IDs, bodies,
+    # request/exception text, recipient data, or credentials in logs or persistence.
+    return {'phase': 'preflight', 'endpoint': _endpoint(path), 'http_status': status,
+            'error_category': category, 'attempts': attempt, 'retryable': bool(retryable), **(hints or {})}
+
+
+def _blocked(path, category, *, retryable, status=None, attempt=0, hints=None):
+    diagnostic = _diagnostic(path, category, retryable=retryable, status=status, attempt=attempt, hints=hints)
+    logger.warning('Zernio WhatsApp preflight blocked: %s', diagnostic)
+    return WhatsAppPreflightBlocked(diagnostic, retryable=retryable)
+
+
+def _number(value):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) and value >= 0 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _observe_rate(state, response):
+    """Honor documented Zernio headers on GET and POST, without parsing bodies."""
+    # https://docs.zernio.com/guides/rate-limits (Reset is Unix seconds).
+    now, hints = _wall_time(), {}
+    for header, key in (('X-RateLimit-Limit', 'rate_limit'),
+                        ('X-RateLimit-Remaining', 'rate_remaining'),
+                        ('X-RateLimit-Reset', 'rate_reset_unix')):
+        value = _number(response.headers.get(header))
+        if value is not None: hints[key] = value
+    retry = response.headers.get('Retry-After')
+    delay = _number(retry)
+    if delay is None and retry:
+        try:
+            delay = max(0, parsedate_to_datetime(retry).timestamp() - now)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    if delay is not None: hints['retry_after_seconds'] = delay
+    if hints.get('rate_remaining') == 0:
+        reset_delay = (max(0, hints['rate_reset_unix'] - now) if 'rate_reset_unix' in hints
+                       else delay if delay is not None else 60)
+        delay = max(delay or 0, reset_delay)
+    if delay is not None:
+        state.not_before = max(state.not_before, _monotonic() + delay)
+    state.rate_hints = hints
+    return hints
+
+
+def _check_account(state, path):
+    if state.account != account_id():
+        raise _blocked(path, 'account_changed', retryable=False)
+    if state.auth_error is not None:
+        raise WhatsAppPreflightBlocked(state.auth_error, retryable=False)
+
+
+def _check_window(state, path, target, cid, proof):
+    if cid is None:
+        return
+    if (not proof or proof[:3] != (state.account, target, str(cid))
+            or not timedelta(0) <= datetime.now(timezone.utc) - proof[3] < timedelta(hours=23, minutes=55)):
+        raise _blocked(path, 'conversation_window_expired', retryable=False)
+
+
+def _check_deadline(state, path, deadline, *, attempt=0, status=None):
+    if _monotonic() >= min(deadline, state.deadline):
+        raise _blocked(path, 'batch_budget_exhausted' if _monotonic() >= state.deadline else 'read_budget_exhausted',
+                       retryable=True, status=status, attempt=attempt, hints=state.rate_hints)
+
+
+async def _wait_ready(state, path, deadline, *, attempt=0, backoff=0, status=None):
+    _check_account(state, path)
+    _check_deadline(state, path, deadline, attempt=attempt, status=status)
+    deadline = min(deadline, state.deadline)
+    delay = max(0, state.not_before - _monotonic(), backoff)
+    remaining = deadline - _monotonic()
+    if delay >= remaining:
+        raise _blocked(path, 'rate_wait_exceeds_budget' if delay else 'read_budget_exhausted',
+                       retryable=True, status=status, attempt=attempt, hints=state.rate_hints)
+    if state.wait_spent + delay > _BATCH_WAIT_BUDGET_SECONDS:
+        raise _blocked(path, 'batch_wait_exceeds_budget', retryable=True,
+                       status=status, attempt=attempt, hints=state.rate_hints)
+    if delay:
+        state.wait_spent += delay
+        await _sleep(delay)
+    _check_deadline(state, path, deadline, attempt=attempt, status=status)
+    _check_account(state, path)
 
 
 def account_id():
@@ -32,12 +223,53 @@ def phone(value):
 
 
 async def read(client, path, params=None):
-    try:
-        response = await client.get(BASE + path, params=params)
-        response.raise_for_status()
-        return response.json()
-    except (httpx.HTTPError, ValueError):
-        raise WhatsAppBlocked('تعذر التحقق من إعداد واتساب لدى Zernio؛ لم تُرسل الرسالة') from None
+    state = _state_for(client)
+    deadline = min(_monotonic() + _READ_BUDGET_SECONDS, state.deadline)
+    key = (state.account, path, tuple(sorted((params or {}).items())))
+    cacheable = state.cache_enabled and path in ('/accounts', '/whatsapp/templates', '/inbox/conversations')
+    async with state.lock:
+        _check_account(state, path)
+        cached = state.cache.get(key) if cacheable else None
+        if cached and cached[0] > _monotonic():
+            return cached[1]
+        status, backoff = None, 0
+        for attempt in range(1, _READ_ATTEMPTS + 1):
+            await _wait_ready(state, path, deadline, attempt=attempt - 1, backoff=backoff, status=status)
+            status, hints = None, {}
+            try:
+                response = await asyncio.wait_for(client.get(BASE + path, params=params),
+                                                 timeout=deadline - _monotonic())
+                status = response.status_code
+                hints = _observe_rate(state, response)
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise ValueError('Expected a JSON object')
+            except httpx.HTTPStatusError:
+                category = ('authentication' if status in (401, 403) else 'rate_limited' if status == 429
+                            else 'server_error' if status >= 500 else 'http_error')
+                retryable = status == 429 or 500 <= status < 600
+            except (httpx.TimeoutException, asyncio.TimeoutError):
+                category, retryable = 'timeout', True
+            except httpx.RequestError:
+                category, retryable = 'network_error', True
+            except ValueError:
+                category, retryable = 'invalid_json', True
+            else:
+                if cacheable:
+                    state.cache[key] = (_monotonic() + _CACHE_SECONDS, payload)
+                return payload
+            diagnostic = _diagnostic(path, category, retryable=retryable, status=status, attempt=attempt, hints=hints)
+            logger.warning('Zernio WhatsApp GET failed: %s', diagnostic)
+            if category == 'authentication':
+                # An account/template cache cannot override a later failed auth
+                # check. Stop every subsequent recipient in this batch before IO.
+                state.cache.clear()
+                state.windows.clear()
+                state.auth_error = diagnostic
+            if not retryable or attempt == _READ_ATTEMPTS:
+                raise WhatsAppPreflightBlocked(diagnostic, retryable=retryable) from None
+            backoff = 2 ** (attempt - 1)
 
 
 def client():
@@ -121,6 +353,7 @@ async def open_conversation(c, target):
                     try:
                         at = datetime.fromisoformat(msg['createdAt'].replace('Z', '+00:00'))
                         if timedelta(0) <= now - at < timedelta(hours=23, minutes=55):
+                            _state_for(c).windows[(target, str(cid))] = (account_id(), target, str(cid), at)
                             return cid
                     except (KeyError, ValueError, TypeError):
                         continue
@@ -139,9 +372,11 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_'):
     target = phone(recipient)
     if not target or not message.strip():
         raise WhatsAppBlocked('رقم المستلم أو نص الرسالة غير صالح')
-    async with client() as c:
+    async with transport_batch() as batch:
+        c = await batch.get_client()
         await validate_account(c)
         cid = await open_conversation(c, target)
+        proof = batch.windows.get((target, str(cid)))
         body = {'accountId': account_id()}
         if cid:
             path = '/inbox/conversations/' + quote(cid, safe='') + '/messages'
@@ -161,16 +396,43 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_'):
             template, params = selected
             path = '/inbox/conversations'
             body.update(participantId=target, templateName=template['name'], templateLanguage='ar', templateParams=params)
-        # No automatic retry after the sending boundary, even with idempotency.
-        response = await c.post(BASE + path, json=body, headers={'Idempotency-Key': 'afaaq-' + uuid.uuid4().hex})
+        # The rate gate and optional caller guard are still BEFORE the sending
+        # boundary. No automatic retry after that boundary, even with idempotency.
+        async with batch.lock:
+            deadline = min(_monotonic() + _READ_BUDGET_SECONDS, batch.deadline)
+            await _wait_ready(batch, path, deadline)
+            _check_window(batch, path, target, cid, proof)
+            guard = _dispatch_guard.get()
+            if guard is not None:
+                result = guard()
+                if inspect.isawaitable(result):
+                    await result
+            # A guard can itself await; never let that extend a freeform window.
+            _check_deadline(batch, path, deadline)
+            _check_account(batch, path)
+            _check_window(batch, path, target, cid, proof)
+            response = await c.post(BASE + path, json=body, headers={'Idempotency-Key': 'afaaq-' + uuid.uuid4().hex})
+            _observe_rate(batch, response)
         if 400 <= response.status_code < 500 and response.status_code not in (408, 409):
-            raise WhatsAppBlocked('رفض مزود واتساب الإرسال (HTTP ' + str(response.status_code) + ')؛ راجع القالب وصلاحية الحساب')
-        response.raise_for_status()
-        data = response.json()
-        mid = (data.get('data') or {}).get('messageId')
-        if data.get('success') is not True or not mid or (data.get('data') or {}).get('partialFailure'):
-            raise RuntimeError('نتيجة إرسال واتساب غير مؤكدة؛ راجع المزود قبل إعادة المحاولة')
-        return {'provider': 'zernio', 'messages': [{'id': mid}], 'conversation_id': data['data'].get('conversationId')}
+            error = WhatsAppBlocked('رفض مزود واتساب الإرسال (HTTP ' + str(response.status_code) + ')؛ راجع القالب وصلاحية الحساب')
+            error.http_status = response.status_code
+            raise error
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            error.http_status = response.status_code
+            raise
+        try:
+            data = response.json()
+        except ValueError:
+            raise WhatsAppSendUncertain(response.status_code) from None
+        receipt = data.get('data') if isinstance(data, dict) else None
+        mid = receipt.get('messageId') if isinstance(receipt, dict) else None
+        if (not isinstance(data, dict) or data.get('success') is not True or not isinstance(mid, str)
+                or not mid.strip() or receipt.get('partialFailure')):
+            raise WhatsAppSendUncertain(response.status_code)
+        return {'provider': 'zernio', 'messages': [{'id': mid}], 'conversation_id': receipt.get('conversationId'),
+                'http_status': response.status_code}
 
 
 def session(request):

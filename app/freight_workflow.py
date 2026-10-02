@@ -469,10 +469,25 @@ def accept_driver_reply(phone, text, connection=None):
             return False
         if not campaign['is_test'] and not accepts_offer(text):
             return False
-        recipient = c.execute("""SELECT id recipient_id,driver_id FROM driver_broadcast_recipients
-            WHERE broadcast_id=%s AND phone=%s AND status='sent'
-              AND COALESCE(provider_message_id,'')<>'' FOR UPDATE""",
-            (campaign['broadcast_id'], normalized)).fetchone()
+        recovery = c.execute("SELECT id,account_id FROM driver_recovery_batches WHERE broadcast_id=%s", (campaign['broadcast_id'],)).fetchone() if campaign['is_test'] else None
+        attempt = None
+        if recovery:
+            from app.zernio_whatsapp import account_id as recovery_account
+            if recovery['account_id'] != recovery_account(): return False
+        if recovery:
+            attempt = c.execute("""SELECT a.* FROM driver_recovery_attempts a
+                WHERE a.batch_id=%s AND a.phone=%s FOR UPDATE""", (recovery['id'], normalized)).fetchone()
+        if attempt:
+            last_receipt = c.execute('SELECT delivery_status FROM driver_recovery_receipts WHERE attempt_id=%s ORDER BY id DESC LIMIT 1', (attempt['id'],)).fetchone()
+            if (attempt['status'] != 'accepted' or not attempt['provider_message_id']
+                    or (last_receipt and last_receipt['delivery_status'] in ('failed','deleted'))):
+                return False
+            recipient = {'recipient_id':attempt['recipient_id'], 'driver_id':attempt['driver_id']}
+        else:
+            recipient = c.execute("""SELECT id recipient_id,driver_id FROM driver_broadcast_recipients
+                WHERE broadcast_id=%s AND phone=%s AND status='sent'
+                  AND COALESCE(provider_message_id,'')<>'' FOR UPDATE""",
+                (campaign['broadcast_id'], normalized)).fetchone()
         if not recipient:
             return False
         row = {**campaign, **recipient}
@@ -481,9 +496,18 @@ def accept_driver_reply(phone, text, connection=None):
             c.execute("""UPDATE driver_broadcasts SET status='test_completed',accepted_driver_id=%s,
                 accepted_at=%s,updated_at=%s WHERE id=%s AND accepted_driver_id IS NULL""",
                 (row['driver_id'], now, now, row['broadcast_id']))
-            c.execute("""UPDATE driver_broadcast_recipients SET status=CASE WHEN id=%s THEN 'test_accepted' ELSE 'closed' END,
-                replied_at=CASE WHEN id=%s THEN %s ELSE replied_at END WHERE broadcast_id=%s AND status<>'excluded'""",
-                (row['recipient_id'], row['recipient_id'], now, row['broadcast_id']))
+            if recovery:
+                # Original send evidence is immutable during recovery. Keep the
+                # winner and stop facts in the linked attempts and parent.
+                c.execute("""UPDATE driver_recovery_attempts SET
+                    status=CASE WHEN id=%s THEN 'test_accepted' WHEN status='pending' THEN 'closed' ELSE status END,
+                    replied_at=CASE WHEN id=%s THEN %s ELSE replied_at END WHERE batch_id=%s""",
+                    (attempt['id'] if attempt else None, attempt['id'] if attempt else None, now, recovery['id']))
+                c.execute("UPDATE driver_recovery_batches SET status='test_completed',completed_at=%s WHERE id=%s", (now,recovery['id']))
+            else:
+                c.execute("""UPDATE driver_broadcast_recipients SET status=CASE WHEN id=%s THEN 'test_accepted' ELSE 'closed' END,
+                    replied_at=CASE WHEN id=%s THEN %s ELSE replied_at END WHERE broadcast_id=%s AND status<>'excluded'""",
+                    (row['recipient_id'], row['recipient_id'], now, row['broadcast_id']))
             c.execute("UPDATE freight_negotiations SET status='test_completed',updated_at=%s WHERE shipment_id=%s", (now,row['shipment_id']))
             c.execute("UPDATE shipments SET status='test_completed',revenue=0,cost=0,updated_at=%s WHERE id=%s", (now,row['shipment_id']))
             c.execute("UPDATE shipment_operations SET stage='test_completed',updated_at=%s WHERE shipment_id=%s", (now,row['shipment_id']))

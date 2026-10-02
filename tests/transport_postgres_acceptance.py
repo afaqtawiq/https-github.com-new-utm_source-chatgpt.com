@@ -77,6 +77,14 @@ class Providers:
             self.driver_calls.append((recipient, message, reference))
             receipt = 'fake-driver-' + str(len(self.driver_calls))
         mode = self.driver_modes.get(reference)
+        if mode == 'preflight_diagnostic':
+            from app.zernio_whatsapp import WhatsAppPreflightBlocked
+            raise WhatsAppPreflightBlocked({'phase':'preflight','endpoint':'accounts','http_status':429,
+                'error_category':'rate_limited','attempts':3,'retryable':True,'rate_remaining':0}, retryable=True)
+        if mode == 'post_timeout':
+            from app.zernio_whatsapp import _dispatch_guard
+            _dispatch_guard.get()()
+            raise TimeoutError('CI outcome unknown after dispatch boundary')
         if mode == 'blocked' or (mode == 'partial' and recipient == DRIVER_PHONES[1]):
             raise WhatsAppBlocked('CI driver preflight blocked; no provider send')
         if mode == 'no_receipt':
@@ -454,6 +462,28 @@ def run(providers):
             asyncio.run(workflow.start_driver_broadcast(offer['id']))
             assert len(providers.sent_to_drivers(blocked_item['reference'])) == calls_before
 
+        # Durable phase evidence preserves the preflight/uncertain distinction.
+        for mode, suffix in (('preflight_diagnostic','155'),('post_timeout','156')):
+            diagnostic_owner = '+966500000' + suffix
+            diagnostic_item, _ = create_request(mode, diagnostic_owner)
+            providers.driver_modes[diagnostic_item['reference']] = mode
+            result = advance(diagnostic_owner, terms(3500, diagnostic_item['reference']), diagnostic_item)
+            diagnostic_bid = result['broadcast_id']
+            snapshot = rows('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id', (diagnostic_bid,))
+            assert all(not r['provider_message_id'] for r in snapshot)
+            if mode == 'preflight_diagnostic':
+                assert all(r['status']=='failed' and r['send_phase']=='preflight_failed' and r['post_attempted_at'] is None for r in snapshot)
+                assert all(json.loads(r['preflight_diagnostic'])['http_status']==429 for r in snapshot)
+            else:
+                assert all(r['status']=='uncertain' and r['send_phase']=='uncertain' and r['post_attempted_at'] for r in snapshot)
+                assert all(r['preflight_diagnostic'] is None for r in snapshot)
+            calls = len(providers.sent_to_drivers(diagnostic_item['reference']))
+            from app.command_assistant import deliver_driver_broadcast
+            asyncio.run(deliver_driver_broadcast(diagnostic_bid))
+            assert rows('SELECT * FROM driver_broadcast_recipients WHERE broadcast_id=? ORDER BY id', (diagnostic_bid,)) == snapshot
+            assert len(providers.sent_to_drivers(diagnostic_item['reference'])) == calls
+        print('PASS: sanitized durable preflight diagnostics, uncertain POST boundary evidence and no automatic replay.')
+
         webhook_blocked, _ = create_request('webhook-blocked', '+966500000108')
         providers.driver_modes[webhook_blocked['reference']] = 'blocked'
         inbound('webhook-blocked-terms', '+966500000108', terms(3600, webhook_blocked['reference']))
@@ -569,6 +599,8 @@ def run(providers):
         print('PASS: read-only transport status, legacy fallback, signed natural greeting/query, duplicate idempotency and no chat-triggered sends.')
         from transport_disclosed_acceptance import run_disclosed
         run_disclosed(providers, inbound)
+        from broadcast_recovery_acceptance import run_recovery
+        run_recovery(providers, inbound)
     client.close()
 
 

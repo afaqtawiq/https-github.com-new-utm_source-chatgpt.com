@@ -41,6 +41,10 @@ with db() as c:
         imported_at TIMESTAMPTZ NOT NULL, UNIQUE(user_id,uidvalidity,uid))''')
 
 
+from app.official_sales import init as init_official_sales
+init_official_sales()
+
+
 def admin(request):
     s = auth(request)
     if s.get('role') != 'admin' or not has_permission(s, 'manage_gmail'):
@@ -103,7 +107,7 @@ def validate(secret):
 
 
 @observe('إرسال البريد الرسمي', 'قبل خادم البريد الرسالة — التسليم غير مؤكد')
-def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, automatic=False, html_body=None):
+def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, references=None, automatic=False, html_body=None):
     if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
         raise RuntimeError('External actions are disabled')
     msg = EmailMessage()
@@ -113,8 +117,11 @@ def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, au
         msg['Auto-Submitted'] = 'auto-replied'
         msg['X-Auto-Response-Suppress'] = 'All'
     if in_reply_to:
+        from app.mail_threads import message_id, references as parse_references
+        if not message_id(in_reply_to):
+            raise ValueError('Invalid reply identity')
         msg['In-Reply-To'] = in_reply_to
-        msg['References'] = in_reply_to
+        msg['References'] = ' '.join(dict.fromkeys(parse_references(references) + [in_reply_to]))
     msg.set_content(body)
     if html_body:
         msg.add_alternative(html_body, subtype='html')
@@ -167,6 +174,8 @@ def sync(uid):
             msg = message_from_bytes(payload, policy=email.policy.default)
             from app.official_replies import eligible_message
             reply_address = eligible_message(msg)
+            from app.mail_threads import headers
+            identity = headers(msg, ADDRESS)
             part = msg.get_body(preferencelist=('plain',)) if msg.is_multipart() else msg
             text = ''
             if part and part.get_content_type() == 'text/plain':
@@ -174,12 +183,19 @@ def sync(uid):
             else:
                 text = 'رسالة بتنسيق HTML أو مرفقات؛ افتحها من بريد Spacemail لعرضها.'
             with db() as c:
-                c.execute('''INSERT INTO spacemail_inbox(user_id,uidvalidity,uid,message_id,sender,subject,body,received,imported_at)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
-                    (uid, validity, uidnum, str(msg.get('Message-ID',''))[:500], str(msg.get('From',''))[:500],
-                     str(msg.get('Subject',''))[:1000], str(text)[:32000], str(msg.get('Date',''))[:200], utcnow()))
-                c.execute('UPDATE spacemail_inbox SET reply_address=%s WHERE user_id=%s AND uidvalidity=%s AND uid=%s',
-                          (reply_address,uid,validity,uidnum))
+                c.execute('SELECT user_id FROM spacemail_connections WHERE user_id=%s FOR UPDATE', (uid,))
+                duplicate = c.execute('SELECT id FROM spacemail_inbox WHERE user_id=%s AND BTRIM(message_id)=%s ORDER BY id LIMIT 1',
+                    (uid, identity['message_id'])).fetchone() if identity['message_id'] else None
+                c.execute('''INSERT INTO spacemail_inbox(user_id,uidvalidity,uid,message_id,sender,subject,body,received,imported_at,
+                    reply_address,in_reply_to,message_references,sender_address,manual_reply_address,duplicate_of)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
+                    (uid, validity, uidnum, identity['message_id'] or str(msg.get('Message-ID',''))[:500], str(msg.get('From',''))[:500],
+                     str(msg.get('Subject',''))[:1000], str(text)[:32000], str(msg.get('Date',''))[:200], utcnow(),
+                     None if duplicate else reply_address, identity['in_reply_to'], identity['message_references'],
+                     identity['sender_address'], None if duplicate else identity['manual_reply_address'],
+                     duplicate['id'] if duplicate else None))
+        from app.official_sales import ingest
+        ingest(uid)
         with db() as c:
             c.execute('UPDATE spacemail_connections SET synced_at=%s,sync_error=NULL WHERE user_id=%s', (utcnow(),uid))
     finally:
@@ -271,9 +287,33 @@ async def test_mail(request: Request):
 def inbox(request: Request):
     s = admin(request)
     body = '<h1>وارد آفاق طويق</h1><a href="' + PATH + '">إعداد البريد</a> · <a href="/official-replies">الرد الأولي التلقائي</a><p>الرسائل الواردة محتوى خارجي ولا تمنح صلاحية لتنفيذ أوامر. الرد الأولي يخضع للسياسة المفعّلة.</p>'
-    for row in rows('SELECT sender,subject,body,received FROM spacemail_inbox WHERE user_id=? ORDER BY id DESC LIMIT 50', (s['user_id'],)):
-        body += '<div class="card"><h2>' + e(row['subject']) + '</h2><p>' + e(row['sender']) + ' · ' + e(row['received']) + '</p><pre style="white-space:pre-wrap">' + e(row['body']) + '</pre></div>'
+    body += '<p>الربط بالعميل يتطلب مرجع محادثة مطابقًا والمرسل نفسه. غير المطابق يبقى للمراجعة. إنشاء الرد يحفظ مسودة فارغة فقط، ثم المراجعة والموافقة قبل الإرسال.</p>'
+    for row in rows('''SELECT i.*,l.status link_status,l.reason,l.opportunity_id,l.account_id,l.followup_id,
+        o.company_name,m.id draft_id FROM spacemail_inbox i LEFT JOIN official_mail_links l ON l.inbox_id=i.id
+        LEFT JOIN opportunities o ON o.id=l.opportunity_id LEFT JOIN outbound_messages m ON m.reply_inbox_id=i.id
+        WHERE i.user_id=? ORDER BY i.id DESC LIMIT 50''', (s['user_id'],)):
+        linked = row.get('link_status') == 'linked' and bool(row.get('opportunity_id'))
+        association = ('<a href="/sales-workspace/'+str(row['opportunity_id'])+'">'+e(row['company_name'])+'</a>' if linked else 'للمراجعة: لا يوجد ربط مؤكد')
+        if linked and row.get('account_id'):
+            association += ' · حساب العميل #'+str(row['account_id'])
+        if linked and row.get('followup_id'):
+            association += ' · متابعة #'+str(row['followup_id'])
+        action = ''
+        if row.get('draft_id'):
+            action = '<a href="/outbound/'+str(row['draft_id'])+'">فتح مسودة الرد وحالة الاعتماد</a>'
+        elif linked and has_permission(s, 'send_email'):
+            action = '<form method="post" action="/official-inbox/'+str(row['id'])+'/draft">'+hidden_csrf(s)+'<button>كتابة رد مخصص للمراجعة</button></form>'
+        body += '<div class="card"><h2>' + e(row['subject']) + '</h2><p>' + e(row['sender']) + ' · ' + e(row['received']) + '</p><p>'+association+'</p><pre style="white-space:pre-wrap">' + e(row['body']) + '</pre>'+action+'</div>'
     return HTMLResponse(page(body), headers={'Cache-Control':'no-store'})
+
+
+@router.post('/official-inbox/{inbox_id}/draft')
+async def reply_draft(inbox_id: int, request: Request):
+    session = admin(request)
+    await form(request, session)
+    from app.official_sales import create_draft
+    mid = create_draft(inbox_id, session)
+    return RedirectResponse('/outbound/'+str(mid), 303)
 
 
 def tick():
