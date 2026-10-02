@@ -35,8 +35,11 @@ only; there is no guessed destination or automatic customer creation.
 The draft uses the existing outbound review, approval and send workflow. The
 recipient and source mailbox are fixed; body and subject require human review.
 Custom replies never append internal proposal notes. Exact approval identity,
-mailbox ownership, send_email permission, MFA step-up, CSRF and the external-action
-gate are enforced. Replies use the official sender and original threading headers.
+mailbox ownership, send_email permission, MFA enrollment, CSRF and the external-action
+gate are enforced. Manual sends from the connected official Spacemail sender use
+the narrow fresh-code exception documented in `prospect-introductions.md`; other
+sensitive actions retain their existing step-up checks. Replies use the official
+sender and original threading headers.
 
 An atomic approved→sending claim precedes SMTP. A timeout or ambiguous provider
 result becomes uncertain and cannot be retried by another click. A process stop

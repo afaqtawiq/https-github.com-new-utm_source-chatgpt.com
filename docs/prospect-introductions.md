@@ -10,7 +10,9 @@ The address is canonical and unique across prospect records. Existing CRM/direct
 
 ## Sending
 
-Every introduction follows draft → pending approval → approved → sending → sent/uncertain. Recipient is fixed to its verified source. The exact purpose, prospect, mailbox, recipient, subject, body, and proposal fields are hashed at approval and rechecked before sending. Admin ownership, mailbox permission, send permission, CSRF, recent MFA, and the external-action switch are required. Only the official Spacemail sender is allowed.
+Every introduction follows draft → pending approval → approved → sending → sent/uncertain. Recipient is fixed to its verified source. The exact purpose, prospect, mailbox, recipient, subject, body, and proposal fields are hashed at approval and rechecked before sending. Admin ownership, mailbox permission, send permission, CSRF, MFA enrollment, and the external-action switch are required. Only the official Spacemail sender is allowed.
+
+The owner's approved fresh-code exception applies only to manual `POST /outbound/{id}/send` using the connected Spacemail sender `afaq@shodai.cc`. This route does not require a recent Authenticator code. Middleware and the send handler use the same bounded policy; other senders and every other sensitive route keep their existing MFA rules. Mailbox connection changes, campaign scheduling, WhatsApp, calls, and security settings are not exempt. Login remains password-based, and the existing ten-minute step-up window is unchanged. A compromised authorized session can therefore send already-approved official email without fresh proof of Authenticator possession; exact approval and the other checks above remain mandatory.
 
 The atomic claim allows at most one provider attempt. `sent` means provider accepted, not delivered. A provider exception yields `uncertain`; no automatic retry exists. A missing receipt or a process interruption requires manual investigation rather than another send.
 

@@ -80,6 +80,8 @@ def detail(mid:int,request:Request):
  context='<p>رد عبر البريد الرسمي داخل المحادثة الأصلية · <a href="/official-inbox">العودة إلى الوارد</a></p>' if m.get('reply_inbox_id') else ''
  if m.get('prospect_id'):context+='<p>تعريف أو رد لعميل محتمل، وليس طلب خدمة مؤكدًا · <a href="/sales-prospects/'+str(m['prospect_id'])+'">سجل العميل المحتمل</a></p>'
  if m['status']=='sent':context+='<p>قبل مزود البريد الرسالة؛ التسليم إلى صندوق المستلم غير مؤكد.</p>'
+ if m['status'] in ('sent','sending','uncertain'):
+  context+='<div class="card"><b>مزود الإرسال:</b> '+esc(m.get('provider'))+'<br><b>معرف الرسالة:</b> <span dir="ltr">'+esc(m.get('provider_message_id'))+'</span><br><b>وقت قبول المزود:</b> '+esc(m.get('sent_at'))+'</div>'
  return HTMLResponse(shell('رسالة',nav()+'<h1>'+esc(m['company_name'])+'</h1>'+context+'<div class="card"><b>الحالة:</b> '+esc(m['status'])+'<br><b>إلى:</b> '+esc(m.get('recipient'))+'<br><b>العنوان:</b> '+esc(m.get('subject'))+'<pre style="white-space:pre-wrap">'+esc(m.get('body'))+'</pre></div>'+edit),headers={'Cache-Control':'no-store'})
 
 
@@ -155,9 +157,13 @@ async def send(mid:int,request:Request):
 def send_approved(mid,s):
  if os.getenv('ENABLE_EXTERNAL_ACTIONS','0')!='1':raise HTTPException(409,'External actions are disabled')
  if not has_permission(s,'send_email'):raise HTTPException(403)
- from app.mfa_stepup import recent_stepup
- if not recent_stepup(s['id']):raise HTTPException(428)
+ from app.mfa_stepup import mfa_state,recent_stepup
+ from app.manual_email_policy import official_manual_send_without_stepup
+ enrollment=mfa_state(s['user_id'])
+ if not enrollment or not enrollment.get('mfa_enabled'):raise HTTPException(428,'MFA enrollment required')
  selected=connection(s['user_id'])
+ official_selected=official_manual_send_without_stepup('POST','/outbound/'+str(mid)+'/send',selected)
+ if not recent_stepup(s['id']) and not official_selected:raise HTTPException(428)
  if not selected or selected.get('status')!='connected':raise HTTPException(409,'Email is not connected')
  parent=None
  with db() as c:
@@ -189,6 +195,12 @@ def send_approved(mid,s):
   elif m.get('purpose')=='intro_prospect':
    from app.spacemail import send as official_send
    provider_id=official_send(s['user_id'],m['recipient'],m['subject'],m['body'])
+   provider='spacemail'
+  elif official_selected:
+   # Pin the transport selected for the MFA exception. Never fall back to Gmail
+   # if the official connection changes between authorization and dispatch.
+   from app.spacemail import send as official_send
+   provider_id=official_send(s['user_id'],m['recipient'],m['subject'],m['body']+'\n\n'+(m.get('proposal_text') or ''))
    provider='spacemail'
   else:
    result=send_gmail(s['user_id'],m['recipient'],m['subject'],m['body']+'\n\n'+(m.get('proposal_text') or ''),return_metadata=True)

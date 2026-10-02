@@ -92,13 +92,17 @@ def run():
     execute('UPDATE approvals SET entity_id=? WHERE id=?',(initial,approval))
     assert client.post(base+'/send',data=csrf).status_code==409
     execute('UPDATE approvals SET entity_id=? WHERE id=?',(mid,approval))
-    # Existing permission and MFA boundaries must remain effective.
+    # Official manual replies waive recency only. Permission checks, immutable
+    # approval, CSRF, source/thread ownership and atomic one-shot claim remain.
+    execute("UPDATE stepup_auth SET expires_at=NOW()-INTERVAL '1 minute' WHERE session_id=?",(session['id'],))
+    stale_stepup=one('SELECT * FROM stepup_auth WHERE session_id=?',(session['id'],))
     with db() as c:c.execute("INSERT INTO role_permissions(role,permission,allowed,updated_at) VALUES('admin','send_email',0,%s)",(now,))
     assert client.post(base+'/send',data=csrf).status_code==403
     execute("UPDATE role_permissions SET allowed=1 WHERE role='admin' AND permission='send_email'")
-    execute("UPDATE stepup_auth SET expires_at=NOW()-INTERVAL '1 minute' WHERE session_id=?",(session['id'],))
-    assert client.post(base+'/send',data=csrf).status_code==428
-    execute("UPDATE stepup_auth SET expires_at=NOW()+INTERVAL '10 minutes' WHERE session_id=?",(session['id'],))
+    assert client.post('/shipping-agent-messages/1/send',data=csrf).status_code==428
+    assert client.post(base+'/send',data={'csrf':'bad'}).status_code==403
+    with patch.object(outbound,'connection',return_value={'provider':'gmail','sender_email':mail.ADDRESS,'status':'connected'}):
+        assert client.post(base+'/send',data=csrf).status_code==428
     with patch.dict(os.environ,{'ENABLE_EXTERNAL_ACTIONS':'0'}),patch.object(mail,'send') as smtp:
         assert client.post(base+'/send',data=csrf).status_code==409;smtp.assert_not_called()
     # Other users cannot read or mutate this mailbox's reply drafts through broader CRM routes.
@@ -119,6 +123,7 @@ def run():
             codes=list(pool.map(lambda _:client.post(base+'/send',data=csrf).status_code,range(4)))
     assert codes.count(303)==1 and codes.count(409)==3,codes
     assert smtp.send_message.call_count==1
+    assert one('SELECT * FROM stepup_auth WHERE session_id=?',(session['id'],))==stale_stepup
     wire=smtp.send_message.call_args.args[0]
     assert wire['From']==mail.ADDRESS and wire['To']=='buyer@example.invalid'
     assert wire['In-Reply-To']=='<reply@example.invalid>'
@@ -150,9 +155,31 @@ def run():
     assert one('SELECT status FROM outbound_messages WHERE id=?',(timeout_mid,))['status']=='uncertain'
     # Regular outreach uses the actual provider and owns the mailbox for future linkage.
     regular=sent(oid,None,status='approved',owner=None)
-    with patch.object(mail,'send',return_value='<outreach@shodai.cc>'),patch.object(outbound,'verify_public_request',return_value={}):
+    with patch.object(mail,'send',return_value='<outreach@shodai.cc>') as regular_send, \
+         patch.object(outbound,'verify_public_request',return_value={}), \
+         patch.object(outbound,'send_gmail',side_effect=AssertionError('Official transport must stay pinned')) as gmail_send:
         assert client.post(f'/outbound/{regular}/send',data=csrf).status_code==303
+        gmail_send.assert_not_called()
+        regular_message=one('SELECT * FROM outbound_messages WHERE id=?',(regular,))
+        regular_send.assert_called_once_with(uid,regular_message['recipient'],regular_message['subject'],regular_message['body']+'\n\n'+(regular_message['proposal_text'] or ''))
     assert one('SELECT provider,mail_user_id FROM outbound_messages WHERE id=?',(regular,))=={'provider':'spacemail','mail_user_id':uid}
+    # A disconnect after authorization may fail this claimed attempt, but may
+    # never reselect Gmail or send from an unapproved alternate mailbox.
+    changed_mailbox=sent(oid,None,status='approved',owner=None)
+    selected_connection=outbound.connection
+    def disconnect_after_selection(user_id):
+        selected=selected_connection(user_id)
+        execute('UPDATE spacemail_connections SET enabled=FALSE WHERE user_id=?',(user_id,))
+        return selected
+    with patch.object(outbound,'connection',side_effect=disconnect_after_selection), \
+         patch.object(outbound,'verify_public_request',return_value={}), \
+         patch.object(outbound,'send_gmail',side_effect=AssertionError('Disconnected official mailbox fell back to Gmail')) as no_fallback, \
+         patch.object(mail,'smtp_login',side_effect=AssertionError('Disconnected mailbox reached SMTP')) as no_smtp:
+        assert client.post(f'/outbound/{changed_mailbox}/send',data=csrf).status_code==503
+        no_fallback.assert_not_called();no_smtp.assert_not_called()
+    execute('UPDATE spacemail_connections SET enabled=TRUE WHERE user_id=?',(uid,))
+    assert one('SELECT status FROM outbound_messages WHERE id=?',(changed_mailbox,))['status']=='uncertain'
+    assert client.post(f'/outbound/{changed_mailbox}/send',data=csrf).status_code==409
     # A late receipt can safely repair only unresolved no-exact-thread records.
     race_oid=opportunity('Receipt race')
     race_mid=sent(race_oid,'<late@shodai.cc>',status='sending')
@@ -170,7 +197,7 @@ def run():
     execute('DELETE FROM opportunities WHERE id=?',(race_oid,))
     assert client.post(f'/official-inbox/{race_iid}/draft',data=csrf).status_code==409
     assert not one('SELECT id FROM outbound_messages WHERE reply_inbox_id=?',(race_iid,))
-    print('PASS: official CRM/thread/task linkage, false-match review, legacy safety, duplicate UID reset, draft races, immutable recipient, approval binding, cross-user/RBAC/CSRF/MFA, single SMTP send, exact thread headers, provider truth, uncertainty terminal. Live mail: 0.')
+    print('PASS: official CRM/thread/task linkage, false-match review, legacy safety, duplicate UID reset, draft races, immutable recipient, approval binding, cross-user/RBAC/CSRF/MFA enrollment, official-only stale-stepup exception, single SMTP send, exact thread headers, pinned official transport without Gmail fallback, provider truth, uncertainty terminal. Live mail: 0.')
 
 
 def main():

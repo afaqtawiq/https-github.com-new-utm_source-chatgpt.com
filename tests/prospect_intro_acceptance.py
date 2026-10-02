@@ -5,6 +5,7 @@ No production database, real contacts, public HTTP requests or live SMTP are all
 """
 import asyncio
 import datetime as dt
+import html
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import formatdate
@@ -20,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def run():
+    from fastapi import HTTPException
     from fastapi.testclient import TestClient
     from app.bootstrap import app
     from app import discovery, outbound, official_sales, official_replies, prospect_outreach as prospects, spacemail as mail
@@ -111,6 +113,10 @@ def run():
             assert count('sales_prospects') == 0 and count('outbound_messages') == 0
 
         mid, first = create('first')
+        # The explicit exception waives only recency, never enrollment or any
+        # approval/safety guard below. Keep this session stale through all sends.
+        execute("UPDATE stepup_auth SET expires_at=NOW()-INTERVAL '1 minute' WHERE session_id=?", (session['id'],))
+        stale_stepup = one('SELECT * FROM stepup_auth WHERE session_id=?', (session['id'],))
         assert fetched.call_count >= 1
         assert {table: count(table) for table in baseline} == baseline
         assert client.get('/outbound/'+str(mid)).status_code == 200
@@ -128,6 +134,55 @@ def run():
         post(base+'/update', {'recipient': first['recipient'], 'subject': 'Changed', 'body': 'Changed'}, 409)
         post(base+'/approve', expected=409)
         assert client.post(base+'/send', data={'csrf': 'wrong'}).status_code == 403
+        assert client.post(base+'/send', data=csrf, headers={'origin': 'https://outsider.example.invalid'}).status_code == 403
+
+        # Enrollment remains required at both the HTTP boundary and the handler.
+        execute('UPDATE user_mfa SET mfa_enabled=0 WHERE user_id=?', (uid,))
+        assert post(base+'/send', expected=428).json()['mfa_setup'] == '/mfa'
+        try:
+            outbound.send_approved(mid, session)
+            raise AssertionError('Direct handler bypassed MFA enrollment')
+        except HTTPException as exc:
+            assert exc.status_code == 428
+        execute('UPDATE user_mfa SET mfa_enabled=1 WHERE user_id=?', (uid,))
+
+        # All neighboring sensitive routes retain the old recent-code boundary,
+        # including other actions that happen to use the send_email permission.
+        for path in (
+            '/outbound/0/send', '/outbound/-1/send', '/outbound/01/send',
+            '/outbound/1/extra/send', '/outbound/invalid/send',
+            '/shipping-agent-messages/1/send', '/customer-campaigns/1/send/email',
+            '/customer-campaigns/schedule', '/production-monitor/settings',
+            '/production-monitor/1/send-support', '/settings/email/spacemail/save',
+            '/settings/email/spacemail/test', '/settings/email/disconnect',
+            '/media-studio/1/run', '/settings/media', '/settings/social',
+            '/content-center/1/schedule', '/commands/broadcast/1/send',
+            '/freight-workflow/1/contact-owner', '/quotes/1/approve-commercial',
+            '/quotes/1/approve-pricing', '/quotes/1/accept', '/team/1/update',
+            '/operations/1/update', '/control-tower/1/update',
+        ):
+            response = post(path, expected=428)
+            assert response.json()['detail'] == 'Recent MFA step-up required', (path, response.text)
+
+        official = {'provider': 'spacemail', 'sender_email': 'afaq@shodai.cc', 'status': 'connected'}
+        for selected in (
+            None, {**official, 'provider': 'gmail'},
+            {**official, 'sender_email': 'other@shodai.cc'},
+            {**official, 'sender_email': 'AFAQ@shodai.cc'},
+            {**official, 'status': 'disconnected'},
+        ):
+            # Canonical selection checks the middleware; only patching the
+            # handler proves a mailbox change after middleware cannot bypass it.
+            with patch('app.gmail_oauth.connection', return_value=selected):
+                assert post(base+'/send', expected=428).json()['detail'] == 'Recent MFA step-up required'
+            with patch.object(outbound, 'connection', return_value=selected):
+                post(base+'/send', expected=428)
+                try:
+                    outbound.send_approved(mid, session)
+                    raise AssertionError('Direct handler waived recent MFA for a nonofficial mailbox')
+                except HTTPException as exc:
+                    assert exc.status_code == 428
+        assert one('SELECT status FROM outbound_messages WHERE id=?', (mid,))['status'] == 'approved'
 
         # Existing contacts are blocked by destination or legal identity, regardless of status.
         for kind in ('account-email', 'account-name', 'directory-email', 'directory-name', 'directory-domain', 'account-domain', 'suppression', 'prior-outbound', 'prior-campaign'):
@@ -174,17 +229,25 @@ def run():
         post('/sales-prospects/create', data('mailbox-permission-block'), 403)
         assert client.get(base).status_code == 403
         execute("UPDATE role_permissions SET allowed=1 WHERE role='admin' AND permission='manage_gmail'")
-        execute("UPDATE stepup_auth SET expires_at=NOW()-INTERVAL '1 minute' WHERE session_id=?", (session['id'],))
-        post(base+'/send', expected=428)
+        # Recent verification still permits ordinary mailboxes to reach the
+        # original prospect-specific official-mailbox validation.
         execute("UPDATE stepup_auth SET expires_at=NOW()+INTERVAL '30 minutes' WHERE session_id=?", (session['id'],))
         with patch.object(outbound, 'connection', return_value={'provider': 'gmail', 'status': 'connected'}):
             post(base+'/send', expected=409)
+        execute('UPDATE stepup_auth SET expires_at=? WHERE session_id=?', (stale_stepup['expires_at'], session['id']))
         approved = one('SELECT * FROM outbound_messages WHERE id=?', (mid,))
         for field, change in [('subject', 'Post-approval subject'), ('body', 'Post-approval body'), ('proposal_text', 'Injected proposal')]:
             execute('UPDATE outbound_messages SET '+field+'=? WHERE id=?', (change, mid))
             post(base+'/send', expected=409)
             execute('UPDATE outbound_messages SET '+field+'=? WHERE id=?', (approved[field], mid))
         aid = approved['approval_id']
+        execute('UPDATE outbound_messages SET approval_id=NULL WHERE id=?', (mid,))
+        post(base+'/send', expected=409)
+        execute('UPDATE outbound_messages SET approval_id=? WHERE id=?', (aid, mid))
+        for state in ('pending', 'rejected'):
+            execute('UPDATE approvals SET status=? WHERE id=?', (state, aid))
+            post(base+'/send', expected=409)
+        execute("UPDATE approvals SET status='approved' WHERE id=?", (aid,))
         execute('UPDATE approvals SET entity_id=? WHERE id=?', (mid+100000, aid))
         post(base+'/send', expected=409)
         execute('UPDATE approvals SET entity_id=? WHERE id=?', (mid, aid))
@@ -216,6 +279,10 @@ def run():
         for role in ('sales', 'admin'):
             other = execute('INSERT INTO users(email,name,password_hash,role,created_at) VALUES(?,?,?,?,?)',
                             (role+'-prospect@example.invalid', 'Other fixture user', hash_password('local-only'), role, now))
+            with db() as c:
+                c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at) VALUES(%s,%s,TRUE,%s)',
+                          (other, mail.cipher().encrypt(b'other-fixture-only').decode(), now))
+                c.execute('INSERT INTO user_mfa(user_id,mfa_enabled,updated_at) VALUES(%s,1,%s)', (other, now))
             sid, token, _ = create_session(other)
             stranger = TestClient(app, base_url='http://testserver', headers={'origin': 'http://testserver'}, follow_redirects=False)
             stranger.cookies.set('gla_session', sid)
@@ -225,7 +292,7 @@ def run():
             assert first['recipient'] not in stranger.get('/sales-prospects').text
             assert stranger.post(base+'/update', data={'csrf': token}).status_code == 403
             assert stranger.post(base+'/approve', data={'csrf': token}).status_code == 403
-            assert stranger.post(base+'/send', data={'csrf': token}).status_code in (403, 428, 409)
+            assert stranger.post(base+'/send', data={'csrf': token}).status_code == 403
 
         # At most one SMTP attempt; accepted is not the same as delivery confirmed.
         smtp = MagicMock(); smtp.send_message.return_value = {}
@@ -242,9 +309,41 @@ def run():
         sent = one('SELECT * FROM outbound_messages WHERE id=?', (mid,))
         assert sent['status'] == 'sent' and sent['provider'] == 'spacemail'
         assert sent['provider_message_id'] == wire['Message-ID']
+        receipt = client.get(base)
+        assert receipt.status_code == 200 and receipt.headers['cache-control'] == 'no-store'
+        assert html.escape(sent['provider_message_id']) in receipt.text and 'spacemail' in receipt.text
+        assert html.escape(str(sent['sent_at'])) in receipt.text
+        # Receipt details remain behind the same mailbox ownership check.
+        assert stranger.get(base).status_code == 403  # The other admin above.
+        viewer = execute('INSERT INTO users(email,name,password_hash,role,created_at) VALUES(?,?,?,?,?)',
+                         ('receipt-viewer@example.invalid', 'Receipt fixture viewer', hash_password('local-only'), 'viewer', now))
+        viewer_sid, _, _ = create_session(viewer)
+        reader = TestClient(app, base_url='http://testserver', follow_redirects=False)
+        reader.cookies.set('gla_session', viewer_sid)
+        assert reader.get(base).status_code == 403
+        assert html.escape(sent['provider_message_id']) not in reader.get('/outbound').text
+        injected_provider = '<script>fixtureProvider()</script>'
+        injected_receipt = '<img src=x onerror="fixtureReceipt()">'
+        execute('UPDATE outbound_messages SET provider=?,provider_message_id=? WHERE id=?',
+                (injected_provider, injected_receipt, mid))
+        rendered = client.get(base).text
+        assert injected_provider not in rendered and injected_receipt not in rendered
+        assert html.escape(injected_provider) in rendered and html.escape(injected_receipt) in rendered
+        execute('UPDATE outbound_messages SET provider=?,provider_message_id=? WHERE id=?',
+                (sent['provider'], sent['provider_message_id'], mid))
         assert one('SELECT status FROM sales_prospects WHERE id=?', (first['id'],))['status'] == 'contacted'
         assert count('opportunities') == baseline['opportunities'] and count('sales_followups') == baseline['sales_followups']
         assert 'delivery unconfirmed' in one("SELECT summary FROM activity WHERE action='send_approved_message' AND entity_id=? ORDER BY id DESC LIMIT 1", (mid,))['summary']
+        assert one('SELECT * FROM stepup_auth WHERE session_id=?', (session['id'],)) == stale_stepup
+        assert post('/customer-campaigns/schedule', expected=428).json()['detail'] == 'Recent MFA step-up required'
+        assert post('/settings/email/spacemail/test', expected=428).json()['detail'] == 'Recent MFA step-up required'
+        password_only = TestClient(app, base_url='http://testserver', headers={'origin': 'http://testserver'}, follow_redirects=False)
+        password_login = password_only.post('/login', data={'email': os.environ['ADMIN_EMAIL'], 'password': os.environ['ADMIN_PASSWORD']})
+        assert password_login.status_code == 303
+        password_session = get_session(password_only.cookies.get('gla_session'))
+        assert password_session and not one('SELECT * FROM stepup_auth WHERE session_id=?', (password_session['id'],))
+        assert password_only.post(base+'/send', data={'csrf': password_session['csrf']}).status_code == 409
+        assert password_only.post('/customer-campaigns/schedule', data={'csrf': password_session['csrf']}).status_code == 428
 
         # A timeout or missing provider receipt cannot be automatically retried.
         for slug, failure in [('timeout', TimeoutError('fixture timeout')), ('missing-receipt', None)]:
@@ -371,7 +470,7 @@ def run():
         campaign_count = one('SELECT COUNT(*) n FROM customer_campaign_recipients WHERE campaign_id=? AND recipient=?', (race_campaign, race_data['recipient']))['n']
         assert prospect_count + campaign_count == 1, (prospect_count, campaign_count)
 
-    print('PASS: isolated prospect storage, exact official evidence, exclusions and cross-campaign dedupe before draft/send, immutable approval, owner/RBAC/CSRF/MFA, single SMTP claim, provider truth, terminal uncertainty, preserved public-request guard, exact prospect reply linkage, opt-out suppression of approved replies, stopped-state persistence, reciprocal campaign exclusion and no automatic acknowledgement. Live mail: 0.')
+    print('PASS: isolated prospect storage, exact official evidence, exclusions and cross-campaign dedupe before draft/send, immutable approval, owner/RBAC/CSRF/MFA enrollment, exact official-only stale-stepup exception, adjacent-route and nonofficial recency guards, unchanged stepup session, single SMTP claim, private escaped provider receipt, provider truth, terminal uncertainty, preserved public-request guard, exact prospect reply linkage, opt-out suppression of approved replies, stopped-state persistence, reciprocal campaign exclusion and no automatic acknowledgement. Live mail: 0.')
 
 
 def main():
