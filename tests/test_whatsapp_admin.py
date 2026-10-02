@@ -59,7 +59,13 @@ class Connection:
             CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER UNIQUE,
                 owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT,\n                contact_channel TEXT,record_kind TEXT DEFAULT 'shipment_request',
                 provider_message_id TEXT,provider_call_id TEXT,contacted_at TEXT);
-            CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,shipment_id INTEGER,status TEXT);
+            CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,shipment_id INTEGER,status TEXT,is_test INTEGER DEFAULT 0);
+            CREATE TABLE driver_broadcast_recipients(id INTEGER PRIMARY KEY,broadcast_id INTEGER,driver_id INTEGER,
+                phone TEXT,status TEXT,provider_message_id TEXT,sent_at TEXT,provider_account_id TEXT);
+            CREATE TABLE driver_recovery_batches(id INTEGER PRIMARY KEY,broadcast_id INTEGER,account_id TEXT);
+            CREATE TABLE driver_recovery_attempts(id INTEGER PRIMARY KEY,batch_id INTEGER,recipient_id INTEGER,status TEXT,
+                provider_message_id TEXT,sent_at TEXT);
+            CREATE TABLE driver_recovery_receipts(id INTEGER PRIMARY KEY,attempt_id INTEGER,delivery_status TEXT);
             CREATE TABLE accounts(id INTEGER PRIMARY KEY,name TEXT,status TEXT);
             CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,
                 event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT);

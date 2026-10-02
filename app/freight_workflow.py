@@ -484,12 +484,15 @@ def accept_driver_reply(phone, text, connection=None):
                 return False
             recipient = {'recipient_id':attempt['recipient_id'], 'driver_id':attempt['driver_id']}
         else:
-            recipient = c.execute("""SELECT id recipient_id,driver_id FROM driver_broadcast_recipients
+            recipient = c.execute("""SELECT id recipient_id,driver_id,provider_account_id FROM driver_broadcast_recipients
                 WHERE broadcast_id=%s AND phone=%s AND status='sent'
                   AND COALESCE(provider_message_id,'')<>'' FOR UPDATE""",
                 (campaign['broadcast_id'], normalized)).fetchone()
         if not recipient:
             return False
+        if campaign['is_test'] and not attempt and recipient.get('provider_account_id'):
+            from app.zernio_whatsapp import account_id as original_account
+            if recipient['provider_account_id'] != original_account(): return False
         row = {**campaign, **recipient}
         now = utcnow()
         if row['is_test']:
@@ -787,9 +790,12 @@ async def send_test_owner_inquiry(shipment_id, user_id, preview):
     if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
         raise HTTPException(409, 'الإرسال الخارجي غير مفعّل؛ لم تُرسل الرسالة')
     with db() as c:
+        # Share one lock order with receipt finalization. A duplicate start must
+        # never hold the shipment while finalization holds its negotiation.
+        c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
         item = c.execute("""SELECT s.*,n.owner_phone,n.status negotiation_status,n.provider_message_id,
             n.test_owner_contact_status FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
-            WHERE s.id=%s FOR UPDATE OF s,n""", (shipment_id,)).fetchone()
+            WHERE s.id=%s FOR UPDATE OF n""", (shipment_id,)).fetchone()
         if not item or not item.get('is_test'):
             raise HTTPException(409, 'هذا الإجراء مخصص لسجل اختبار معلن فقط')
         if (not user_id or not _valid_phone(item.get('owner_phone'))
@@ -810,6 +816,7 @@ async def send_test_owner_inquiry(shipment_id, user_id, preview):
         if not receipt:
             raise RuntimeError('لم يرجع المزود معرفًا؛ تحقق من المحادثة قبل أي محاولة أخرى')
         with db() as c:
+            c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
             now = utcnow()
             c.execute("""UPDATE freight_negotiations SET test_owner_contact_status='sent',provider_message_id=%s,
                 contact_channel='whatsapp',contacted_at=%s,last_error=NULL,updated_at=%s WHERE shipment_id=%s""",
