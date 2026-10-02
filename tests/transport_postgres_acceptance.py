@@ -601,6 +601,8 @@ def run(providers):
         run_disclosed(providers, inbound)
         from broadcast_recovery_acceptance import run_recovery
         run_recovery(providers, inbound)
+        from driver_test_context_acceptance import run_driver_test_context
+        run_driver_test_context(providers, inbound)
     client.close()
 
 

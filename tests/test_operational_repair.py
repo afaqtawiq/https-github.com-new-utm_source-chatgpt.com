@@ -47,7 +47,7 @@ class Database:
             sent_count INTEGER DEFAULT 0,failed_count INTEGER DEFAULT 0,created_by INTEGER,created_at TEXT,updated_at TEXT,
             shipment_id INTEGER,confirmed_by INTEGER,confirmed_at TEXT,completed_at TEXT,accepted_driver_id INTEGER,accepted_at TEXT,is_test INTEGER DEFAULT 0,test_approved_by INTEGER,test_approved_at TEXT,test_preview_digest TEXT);
         CREATE TABLE driver_broadcast_recipients(id INTEGER PRIMARY KEY,broadcast_id INTEGER,driver_id INTEGER,driver_name TEXT,phone TEXT,
-            status TEXT,provider_message_id TEXT,sent_at TEXT,last_error TEXT,replied_at TEXT,send_phase TEXT,preflight_diagnostic TEXT,post_attempted_at TEXT,provider_response_status INTEGER,UNIQUE(broadcast_id,phone));
+            status TEXT,provider_message_id TEXT,sent_at TEXT,last_error TEXT,replied_at TEXT,send_phase TEXT,preflight_diagnostic TEXT,post_attempted_at TEXT,provider_response_status INTEGER,provider_account_id TEXT,UNIQUE(broadcast_id,phone));
         CREATE TABLE driver_recovery_batches(id INTEGER PRIMARY KEY,broadcast_id INTEGER UNIQUE,account_id TEXT);
         CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT,created_by INTEGER);
         CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,driver_name TEXT,driver_phone TEXT,updated_at TEXT);
@@ -63,7 +63,7 @@ class Database:
         self.raw.commit()
 
     def query(self, sql, args=()):
-        sql = re.sub(r' FOR UPDATE(?: OF s,n| OF b)?', '', sql)
+        sql = re.sub(r' FOR UPDATE(?: OF s,n| OF b| OF n)?', '', sql)
         return Result(self.raw.execute(sql.replace('%s', '?'), args))
 
     @contextmanager

@@ -432,7 +432,7 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_'):
                 or not mid.strip() or receipt.get('partialFailure')):
             raise WhatsAppSendUncertain(response.status_code)
         return {'provider': 'zernio', 'messages': [{'id': mid}], 'conversation_id': receipt.get('conversationId'),
-                'http_status': response.status_code}
+                'http_status': response.status_code, 'account_id': batch.account}
 
 
 def session(request):

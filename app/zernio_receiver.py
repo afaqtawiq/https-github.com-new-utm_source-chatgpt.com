@@ -131,6 +131,16 @@ async def receive(request: Request):
                 and not conversation.get('isGroup') and not message.get('isGroup')
                 and transport_phone(conversation.get('participantId')) == contact
                 and (not identity.get('id') or transport_phone(identity['id']) == contact))
+            if private_transport and not sender:
+                from app.driver_test_context import reply_for_driver_test
+                from app.transport_owner import quoted_receipt
+                interactive = str(metadata.get('interactiveId') or '')
+                new_request = (is_transport_request(text) or explicit_agent(text,interactive) is not None
+                    or control_text(text) in {'menu','start','restart','back','القائمة','القايمة','القائمه','القايمه','القائمة الرئيسية','القايمة الرئيسية','البداية','ابدأ','ابدا','رجوع'})
+                test_reply = reply_for_driver_test(c,'+' + contact,text,quoted_receipt(p),
+                    account_id,event_id,message,explicit_new_request=new_request)
+                if test_reply is not None:
+                    return 'afaaq', test_reply
             if private_transport and (not sender or not is_admin_command(text)) and text.strip() and not is_transport_request(text) and not is_menu_request(text) and not explicit_agent(text):
                 from app.logistics_parsing import accepts_offer
                 from app.transport_test import accepts_test_offer, DISCLAIMER

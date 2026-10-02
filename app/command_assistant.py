@@ -53,6 +53,7 @@ def _init_storage():
         provider_message_id TEXT, last_error TEXT, sent_at TIMESTAMPTZ,
         UNIQUE(broadcast_id,phone)
     )""")
+    execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS provider_account_id TEXT")
     execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS send_phase TEXT")
     execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS preflight_diagnostic TEXT")
     execute("ALTER TABLE driver_broadcast_recipients ADD COLUMN IF NOT EXISTS post_attempted_at TIMESTAMPTZ")
@@ -519,7 +520,8 @@ async def _deliver_driver_broadcast(broadcast_id):
             provider_id = str(messages[0].get("id") or "") if messages else ""
             if not provider_id:
                 raise RuntimeError('لم يرجع مزود الرسائل معرفًا؛ يلزم التحقق قبل إعادة المحاولة')
-            execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN status='sending' THEN 'sent' ELSE status END,provider_message_id=?,sent_at=?,send_phase='accepted',provider_response_status=? WHERE id=?", (provider_id, utcnow(), result.get('http_status'), recipient["id"]))
+            provider_account = result.get('account_id') if result.get('provider') == 'zernio' else None
+            execute("UPDATE driver_broadcast_recipients SET status=CASE WHEN status='sending' THEN 'sent' ELSE status END,provider_message_id=?,sent_at=?,send_phase='accepted',provider_response_status=?,provider_account_id=? WHERE id=?", (provider_id, utcnow(), result.get('http_status'), provider_account, recipient["id"]))
         except Exception as exc:
             preflight = isinstance(exc, WhatsAppPreflightBlocked)
             diagnostic = json.dumps({key:value for key,value in exc.diagnostic.items() if key in
