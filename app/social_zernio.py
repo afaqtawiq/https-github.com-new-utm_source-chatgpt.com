@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 import httpx
 
 API = 'https://zernio.com/api/v1'
-TARGETS = {'youtube': 'afaqtaw', 'tiktok': 'afaqtawaiq6'}
-PLATFORMS = {'YouTube': ('youtube',), 'TikTok': ('tiktok',), 'YouTube+TikTok': ('youtube', 'tiktok')}
+TARGETS = {'youtube': 'afaqtaw', 'tiktok': 'afaqt79', 'instagram': 'afaqwaiq'}
+PLATFORMS = {'YouTube': ('youtube',), 'TikTok': ('tiktok',), 'Instagram': ('instagram',), 'YouTube+TikTok': ('youtube', 'tiktok'), 'All': ('youtube', 'tiktok', 'instagram')}
 RIYADH = ZoneInfo('Asia/Riyadh')
 
 
@@ -178,7 +178,7 @@ def publication_result(data, expected):
         actual.add((p.get('platform'), account_id))
         url = p.get('platformPostUrl') or ''
         u = urlsplit(url)
-        allowed_hosts = {'youtube': {'www.youtube.com', 'youtube.com', 'youtu.be'}, 'tiktok': {'www.tiktok.com', 'tiktok.com'}}
+        allowed_hosts = {'youtube': {'www.youtube.com', 'youtube.com', 'youtu.be'}, 'tiktok': {'www.tiktok.com', 'tiktok.com'}, 'instagram': {'www.instagram.com', 'instagram.com'}}
         if u.scheme != 'https' or u.hostname not in allowed_hosts.get(p.get('platform'), set()) or u.username or u.password:
             url = ''
         results.append({'platform': p.get('platform'), 'accountId': account_id, 'status': str(p.get('status') or 'unknown'), 'url': url})

@@ -9,7 +9,8 @@ from app import social_zernio as z
 
 NOW = dt.datetime(2026, 9, 20, 10, tzinfo=dt.timezone.utc)
 ACCOUNTS = {'youtube': {'accountId': 'a' * 24, 'username': 'afaqtaw'},
-            'tiktok': {'accountId': 'b' * 24, 'username': 'afaqtawaiq6'}}
+            'tiktok': {'accountId': 'b' * 24, 'username': 'afaqt79'},
+            'instagram': {'accountId': 'd' * 24, 'username': 'afaqwaiq'}}
 ITEM = {'id': 1, 'platform': 'YouTube+TikTok', 'content_type': 'video', 'title': 'آفاق طويق',
         'body': 'حلول النقل والخدمات اللوجستية', 'media_url': 'https://media.example.com/afaaq.mp4'}
 FORM = {'preview_confirmed': 'yes', 'scheduled_at': '2026-09-20T15:00', 'synthetic': 'yes',

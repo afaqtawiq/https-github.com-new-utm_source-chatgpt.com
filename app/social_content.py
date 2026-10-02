@@ -40,7 +40,7 @@ def init_social_content():
         created_by BIGINT, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
         published_at TIMESTAMPTZ)""")
     now = utcnow()
-    execute("UPDATE social_channels SET status='superseded' WHERE platform='TikTok' AND profile_url='https://www.tiktok.com/@afaqt79' AND created_by IS NULL")
+    execute("UPDATE social_channels SET status='superseded' WHERE platform='TikTok' AND profile_url!='https://www.tiktok.com/@afaqt79?lang=ar' AND created_by IS NULL")
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
         ("YouTube","آفاق طويق — @afaqtaw","https://www.youtube.com/@afaqtaw","linked",None,now,now))
@@ -49,7 +49,7 @@ def init_social_content():
         ("Instagram","آفاق طويق — @afaqwaiq","https://www.instagram.com/afaqwaiq/","linked",None,now,now))
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
-        ("TikTok","آفاق طويق — @afaqtawaiq6","https://www.tiktok.com/@afaqtawaiq6","saved",None,now,now))
+        ("TikTok","آفاق طويق — @afaqt79","https://www.tiktok.com/@afaqt79?lang=ar","linked",None,now,now))
     execute("""INSERT INTO social_channels(platform,account_name,profile_url,status,created_by,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform,profile_url) DO NOTHING""",
         ("LinkedIn","آفاق طويق — Afaq Tuwaiq","https://www.linkedin.com/in/%D8%A7%D9%81%D8%A7%D9%82-%D8%B7%D9%88%D9%8A%D9%82-afaqtawiq-8096bb434/","linked",None,now,now))
@@ -91,7 +91,7 @@ def content_center(request: Request):
         actions = '<a class="btn" href="/content-center/'+str(item['id'])+'">فتح</a>'
         content_rows += '<tr><td>'+str(item['id'])+'</td><td>'+e(item['title'])+'</td><td>'+e(item['platform'])+'</td><td><span class="pill">'+e(item['status'])+'</span></td><td>'+e(item.get('scheduled_at') or 'غير محدد')+'</td><td>'+actions+'</td></tr>'
     body = '<div class="nav"><a href="/dashboard">⌂ الرئيسية</a><a href="/content-center">مركز المحتوى</a><a href="/approvals">الموافقات</a>' + ('<a href="/settings/social">إعدادات النشر</a><a href="/settings/media">إعدادات الإنتاج</a><a href="/media-studio">استوديو الإنتاج</a>' if session.get('role') == 'admin' else '') + '</div>'
-    body += '<div class="hero"><h1>مركز صناعة ونشر المحتوى</h1><p class="muted">أنشئ المحتوى واحفظ حسابات المنصات وحدد موعد النشر. لن يتم أي نشر خارجي قبل موافقة الإدارة وربط واجهة المنصة.</p></div>'
+    body += '<div class="hero"><h1>مركز صناعة ونشر المحتوى</h1><p class="muted">أنشئ المحتوى واحفظ حسابات المنصات. Instagram ينشر تلقائيًا عند وجود وسائط وربط Zernio؛ TikTok وYouTube يحتفظان بمراجعة الإفصاحات المطلوبة قبل النشر.</p></div>'
     body += '<div class="grid"><div class="k">روابط الحسابات المحفوظة<b>'+str(len(channels))+'</b></div><div class="k">مسودات<b>'+str(draft_count)+'</b></div><div class="k">بانتظار الموافقة<b>'+str(review_count)+'</b></div><div class="k">جاهزة للمراجعة والجدولة<b>'+str(approved_count)+'</b></div></div>'
     body += '<div class="card"><h2>إضافة حساب تواصل اجتماعي</h2><form method="post" action="/social-channels"><div class="formgrid"><select name="platform"><option>Instagram</option><option>TikTok</option><option>Facebook</option><option>YouTube</option><option>Snapchat</option><option>LinkedIn</option><option>X</option></select><input name="account_name" placeholder="اسم الحساب" required><input name="profile_url" type="url" placeholder="https://..." required></div><button class="btn">حفظ رابط الحساب</button></form></div>'
     body += '<div class="grid">'+(channel_cards or '<div class="card muted">لم تتم إضافة روابط الحسابات بعد.</div>')+'</div>'
@@ -123,6 +123,12 @@ async def create_content(request: Request):
         except ValueError: raise HTTPException(400, 'موعد غير صحيح')
     content_id = execute("INSERT INTO social_content(title,platform,content_type,body,media_url,scheduled_at,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (data.get("title"),data.get("platform"),data.get("content_type"),data.get("body"),data.get("media_url") or None,scheduled,"draft",session["user_id"],now,now))
     log(session["user_id"],"social_content_created","social_content",content_id,data.get("title"))
+    if data.get("platform") == "Instagram" and data.get("media_url"):
+        from app.social_publishing import PublishingError, auto_publish_instagram
+        try:
+            auto_publish_instagram(content_id, session["user_id"])
+        except PublishingError as exc:
+            log(session["user_id"], "social_auto_publish_blocked", "social_content", content_id, str(exc))
     return RedirectResponse("/content-center/"+str(content_id),303)
 
 
