@@ -59,13 +59,14 @@ class Connection:
             CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER UNIQUE,
                 owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT,\n                contact_channel TEXT,record_kind TEXT DEFAULT 'shipment_request',
                 provider_message_id TEXT,provider_call_id TEXT,contacted_at TEXT);
-            CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,shipment_id INTEGER,status TEXT,is_test INTEGER DEFAULT 0);
+            CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,shipment_id INTEGER,status TEXT,is_test INTEGER DEFAULT 0,
+                sent_count INTEGER,failed_count INTEGER,confirmed_at TEXT,completed_at TEXT,accepted_driver_id INTEGER,accepted_at TEXT);
             CREATE TABLE driver_broadcast_recipients(id INTEGER PRIMARY KEY,broadcast_id INTEGER,driver_id INTEGER,
                 phone TEXT,status TEXT,provider_message_id TEXT,sent_at TEXT,provider_account_id TEXT);
-            CREATE TABLE driver_recovery_batches(id INTEGER PRIMARY KEY,broadcast_id INTEGER,account_id TEXT);
+            CREATE TABLE driver_recovery_batches(id INTEGER PRIMARY KEY,broadcast_id INTEGER,account_id TEXT,status TEXT,approved_at TEXT,completed_at TEXT);
             CREATE TABLE driver_recovery_attempts(id INTEGER PRIMARY KEY,batch_id INTEGER,recipient_id INTEGER,status TEXT,
                 provider_message_id TEXT,sent_at TEXT);
-            CREATE TABLE driver_recovery_receipts(id INTEGER PRIMARY KEY,attempt_id INTEGER,delivery_status TEXT);
+            CREATE TABLE driver_recovery_receipts(id INTEGER PRIMARY KEY,attempt_id INTEGER,provider_message_id TEXT,delivery_status TEXT,checked_at TEXT);
             CREATE TABLE accounts(id INTEGER PRIMARY KEY,name TEXT,status TEXT);
             CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,
                 event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT);
@@ -635,3 +636,38 @@ def test_unknown_quote_never_falls_back_to_unique_pending(db, outbound, metadata
     assert not db.transport_actions
     assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
     assert 'NQ-' not in outbound[-1]['message']
+
+
+def test_recovery_status_preserves_original_and_timestamped_receipts(db):
+    sid = status_shipment(db, status='driver_offer_pending_approval')
+    db.execute('UPDATE shipments SET is_test=1 WHERE id=%s', (sid,))
+    db.execute("""INSERT INTO driver_broadcasts(id,shipment_id,status,is_test,sent_count,failed_count,completed_at)
+        VALUES(20,%s,'completed_with_errors',1,15,66,'2026-10-01T10:00:00+00:00')""", (sid,))
+    db.execute("""INSERT INTO driver_recovery_batches(id,broadcast_id,account_id,status,completed_at)
+        VALUES(21,20,'business','completed','2026-10-02T10:00:00+00:00')""")
+    db.execute("""INSERT INTO driver_recovery_attempts(id,batch_id,status,provider_message_id)
+        VALUES(22,21,'accepted','recovery-message')""")
+    db.execute("""INSERT INTO driver_recovery_receipts(attempt_id,provider_message_id,delivery_status,checked_at)
+        VALUES(22,'recovery-message','delivered','2026-10-03T14:00:00+00:00')""")
+    # Older and unrelated observations inserted later cannot replace new facts.
+    db.execute("""INSERT INTO driver_recovery_receipts(attempt_id,provider_message_id,delivery_status,checked_at)
+        VALUES(22,'recovery-message','failed','2026-10-02T10:03:00+00:00')""")
+    db.execute("""INSERT INTO driver_recovery_receipts(attempt_id,provider_message_id,delivery_status,checked_at)
+        VALUES(22,'different-message','read','2026-10-03T15:00:00+00:00')""")
+    before = db.db.total_changes
+    reply = admin.shipment_status(db,'NQ-28')
+    assert '(awaiting_test_driver_reply)' in reply
+    assert 'قبل المزود 15' in reply and 'فشل/غير مؤكد 66' in reply
+    assert 'delivered: 1' in reply and 'failed: 1' not in reply and 'read: 1' not in reply
+    assert '2026-10-03T14:00:00+00:00' in reply and 'ليست قراءة مباشرة الآن' in reply
+    assert 'لم يُسجل قبول سائق' in reply
+    assert db.db.total_changes == before
+    assert db.execute('SELECT status FROM freight_negotiations WHERE shipment_id=%s',(sid,)).fetchone()['status']=='driver_offer_pending_approval'
+    db.execute('''INSERT INTO driver_recovery_receipts(attempt_id,provider_message_id,delivery_status,checked_at)
+        VALUES(22,'recovery-message','failed','2026-10-03T14:30:00+00:00')''')
+    reply = admin.shipment_status(db,'NQ-28')
+    assert '(recovery_needs_review)' in reply and '(awaiting_test_driver_reply)' not in reply
+    db.execute("UPDATE driver_broadcasts SET status='test_completed',accepted_driver_id=7,accepted_at='2026-10-03T15:00:00+00:00' WHERE id=20")
+    reply = admin.shipment_status(db,'NQ-28')
+    assert '(test_completed)' in reply and 'دون تعيين أو تحريك شحنة' in reply
+    assert 'لم يُسجل قبول سائق' not in reply

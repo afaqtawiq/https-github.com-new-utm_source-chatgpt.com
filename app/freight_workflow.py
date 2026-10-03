@@ -447,7 +447,7 @@ async def advance_owner_whatsapp_reply(owner_phone, text, shipment_id=None, quot
                         else "لم يرجع مزود واتساب تأكيد قبول الإرسال؛ يلزم مراجعة حالة المستلمين.") if not broadcast or not broadcast['sent_count'] else ""}
 
 
-def accept_driver_reply(phone, text, connection=None):
+def accept_driver_reply(phone, text, connection=None, *, event_id=None, inbound_message_id=None):
     normalized = _valid_phone(phone)
     references = set(re.findall(r"(?<!\w)(?:NQ-\d+|WA-[A-F0-9]{12})(?!\w)", (text or "").upper()))
     if not normalized or len(references) != 1 or not (accepts_offer(text) or accepts_test_offer(text)):
@@ -478,13 +478,13 @@ def accept_driver_reply(phone, text, connection=None):
             attempt = c.execute("""SELECT a.* FROM driver_recovery_attempts a
                 WHERE a.batch_id=%s AND a.phone=%s FOR UPDATE""", (recovery['id'], normalized)).fetchone()
         if attempt:
-            last_receipt = c.execute('SELECT delivery_status FROM driver_recovery_receipts WHERE attempt_id=%s ORDER BY id DESC LIMIT 1', (attempt['id'],)).fetchone()
+            last_receipt = c.execute('SELECT delivery_status FROM driver_recovery_receipts WHERE attempt_id=%s AND provider_message_id=%s ORDER BY checked_at DESC,id DESC LIMIT 1', (attempt['id'],attempt['provider_message_id'])).fetchone()
             if (attempt['status'] != 'accepted' or not attempt['provider_message_id']
                     or (last_receipt and last_receipt['delivery_status'] in ('failed','deleted'))):
                 return False
             recipient = {'recipient_id':attempt['recipient_id'], 'driver_id':attempt['driver_id']}
         else:
-            recipient = c.execute("""SELECT id recipient_id,driver_id,provider_account_id FROM driver_broadcast_recipients
+            recipient = c.execute("""SELECT id recipient_id,driver_id,provider_account_id,provider_message_id FROM driver_broadcast_recipients
                 WHERE broadcast_id=%s AND phone=%s AND status='sent'
                   AND COALESCE(provider_message_id,'')<>'' FOR UPDATE""",
                 (campaign['broadcast_id'], normalized)).fetchone()
@@ -495,6 +495,20 @@ def accept_driver_reply(phone, text, connection=None):
             if recipient['provider_account_id'] != original_account(): return False
         row = {**campaign, **recipient}
         now = utcnow()
+        # Persist the exact successful linkage in the same first-wins transaction.
+        # A delivery receipt alone never creates this event or driver consent.
+        audit = {'event_id':event_id, 'inbound_message_id':inbound_message_id,
+            'broadcast_id':row['broadcast_id'], 'recipient_id':row['recipient_id'],
+            'driver_id':row['driver_id'], 'accepted':True, 'is_test':bool(row['is_test']),
+            'source':'recovery' if attempt else 'original',
+            'recovery_attempt_id':attempt['id'] if attempt else None,
+            'provider_message_id':attempt['provider_message_id'] if attempt else recipient['provider_message_id'],
+            'account_id':recovery['account_id'] if attempt else recipient.get('provider_account_id'),
+            'text':str(text)[:2000]}
+        c.execute('''INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
+            VALUES(%s,%s,%s,%s,%s)''', (row['shipment_id'],
+            'driver_test_accepted' if row['is_test'] else 'driver_offer_accepted',
+            json.dumps(audit,ensure_ascii=False), 'test_completed' if row['is_test'] else 'driver_assigned', now))
         if row['is_test']:
             c.execute("""UPDATE driver_broadcasts SET status='test_completed',accepted_driver_id=%s,
                 accepted_at=%s,updated_at=%s WHERE id=%s AND accepted_driver_id IS NULL""",
@@ -530,11 +544,17 @@ def accept_driver_reply(phone, text, connection=None):
 def workflow_page(request: Request):
     session(request)
     items = rows("""SELECT s.id,s.reference,s.origin,s.destination,s.status,s.is_test,n.record_kind,n.owner_phone,n.status negotiation_status,
-        n.agreed_owner_price,n.driver_offer_price,b.status broadcast_status,d.driver_name
+        n.agreed_owner_price,n.driver_offer_price,b.id broadcast_id,b.status broadcast_status,d.driver_name
         FROM shipments s JOIN freight_negotiations n ON n.shipment_id=s.id
         LEFT JOIN LATERAL (SELECT * FROM driver_broadcasts x WHERE x.shipment_id=s.id ORDER BY x.id DESC LIMIT 1) b ON TRUE
         LEFT JOIN drivers d ON d.id=b.accepted_driver_id ORDER BY s.id DESC""")
-    table = "".join(f"<tr><td><a href='/freight-workflow/{x['id']}'>{esc(display_reference(x['reference'],x.get('is_test')))}</a></td><td>{esc(x['origin'])} → {esc(x['destination'])}</td><td dir=ltr>{esc(x['owner_phone'])}</td><td>{esc('عرض ناقل يبحث عن حمولة' if x.get('record_kind') == 'carrier_offer' else x['negotiation_status'])}</td><td>{esc(x['agreed_owner_price'])}</td><td>{esc(x['driver_offer_price'])}</td><td>{esc(x.get('broadcast_status'))}</td><td>{esc(x.get('driver_name'))}</td></tr>" for x in items)
+    from app.transport_status import snapshot, current_status
+    with db() as c:
+        for item in items:
+            broadcast = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s', (item['broadcast_id'],)).fetchone() if item.get('broadcast_id') else None
+            evidence = snapshot(c,broadcast)
+            item['effective_status'] = current_status(item['status'],item['negotiation_status'],evidence)
+    table = "".join(f"<tr><td><a href='/freight-workflow/{x['id']}'>{esc(display_reference(x['reference'],x.get('is_test')))}</a></td><td>{esc(x['origin'])} → {esc(x['destination'])}</td><td dir=ltr>{esc(x['owner_phone'])}</td><td>{esc('عرض ناقل يبحث عن حمولة' if x.get('record_kind') == 'carrier_offer' else x['negotiation_status'])}</td><td>{esc(x['agreed_owner_price'])}</td><td>{esc(x['driver_offer_price'])}</td><td>{esc(x.get('effective_status'))}</td><td>{esc(x.get('driver_name'))}</td></tr>" for x in items)
     return HTMLResponse(_page("إدارة عروض الشحن", f"<h1>إدارة عروض الشحن</h1><p><a href='/dashboard'>الرئيسية</a></p><div class=card><table><tr><th>الشحنة</th><th>المسار</th><th>صاحب الشحنة</th><th>التفاوض</th><th>اتفاق المالك</th><th>عرض السائق</th><th>الإرسال</th><th>السائق المقبول</th></tr>{table or '<tr><td colspan=8>لا توجد شحنات.</td></tr>'}</table></div>"))
 
 
@@ -566,6 +586,9 @@ def workflow_detail(shipment_id: int, request: Request):
         <p>محفوظ كعرض ناقل؛ لا يُرسل له طلب تسعير بصفته صاحب حمولة، ولا يُجهز منه عرض للسائقين.</p>
         {classification}</div>"""))
     broadcast = one("SELECT * FROM driver_broadcasts WHERE shipment_id=? ORDER BY id DESC LIMIT 1", (shipment_id,))
+    from app.transport_status import snapshot, evidence_lines, current_status
+    with db() as c: transport_evidence = snapshot(c, broadcast)
+    effective_status = current_status(item['status'],item['negotiation_status'],transport_evidence)
     source = one("SELECT raw_text,description,capture_method,captured_at FROM naqliat_loads WHERE id=?",
                  (item.get('naqliat_load_id'),)) if item.get('naqliat_load_id') else None
     source_text = ((source or {}).get('raw_text') or (source or {}).get('description') or '').strip()
@@ -581,7 +604,7 @@ def workflow_detail(shipment_id: int, request: Request):
     owner_state = ('قبل مزود التواصل الطلب؛ هذا لا يثبت وصوله للمستلم'
                    if item.get('provider_message_id') or item.get('provider_call_id') else
                    owner_states.get(item['negotiation_status'], 'لا يوجد معرّف إرسال موثق في هذا السجل'))
-    driver_state = (f"عرض موجود — {broadcast['status']}؛ راجع سجل المستلمين" if broadcast else
+    driver_state = (f"عرض موجود — {effective_status}؛ راجع سجل المستلمين" if broadcast else
                     'لم يُجهز عرض للسائقين بعد؛ يلزم استكمال بيانات الشحنة وتوثيق السعر وطريقة الدفع')
     diagnostics = f"""<section class=card id=contact-diagnostics><h2>تشخيص التواصل</h2>
     <p><b>status:</b> {esc(item.get('negotiation_status'))}</p>
@@ -592,6 +615,7 @@ def workflow_detail(shipment_id: int, request: Request):
     progress = f"""<section class=card id=shipment-progress><h2>ماذا تم في هذه الشحنة؟</h2>
     <p>الاستلام: محفوظة بالمرجع {esc(item['reference'])}.</p>
     <p>صاحب الشحنة: {esc(owner_state)}.</p><p>السائقون: {esc(driver_state)}.</p></section>"""
+    progress += '<section class=card id=transport-evidence><h2>دليل الإرسال والقبول</h2>' + ''.join('<p>' + esc(line) + '</p>' for line in evidence_lines(transport_evidence)) + '</section>'
     if source:
         from app.transport_intake import extract_transport
         extracted = extract_transport(source_text)
@@ -653,7 +677,7 @@ def workflow_detail(shipment_id: int, request: Request):
         controls = '<h2 class=warn>' + DISCLAIMER + '</h2><p>قيم المحاكاة لا تمثل التزامًا ماليًا. أرسل شروط الاختبار من رقم صاحبه المسجل، أو رد مباشرة على رسالة الاستفسار. لا يُرسل عرض السائقين تلقائيًا.</p>' + controls
     if broadcast:
         controls += f"<p><a href='/commands/broadcast/{broadcast['id']}'>مراجعة العرض وتأكيد الإرسال الجماعي مرة واحدة</a> — الحالة: {esc(broadcast['status'])}</p>"
-    return HTMLResponse(_page(item["reference"], f"<div class=card><h1>{esc(item['reference'])}</h1><p>{esc(item['origin'])} → {esc(item['destination'])}</p><p>صاحب الشحنة: <span dir=ltr>{esc(item['owner_phone'])}</span> | الحالة: {esc(item['negotiation_status'])}</p><p class=warn>{esc(item.get('last_error'))}</p>{controls}</div>"))
+    return HTMLResponse(_page(item["reference"], f"<div class=card><h1>{esc(item['reference'])}</h1><p>{esc(item['origin'])} → {esc(item['destination'])}</p><p>صاحب الشحنة: <span dir=ltr>{esc(item['owner_phone'])}</span> | الحالة الحالية: {esc(effective_status)}</p><p class=warn>{esc(item.get('last_error'))}</p>{controls}</div>"))
 
 
 @router.post('/freight-workflow/{shipment_id}/reextract')
@@ -901,7 +925,14 @@ async def save_agreement(shipment_id: int, request: Request):
 @router.get("/api/v7/freight-workflow")
 def workflow_api(request: Request):
     session(request)
+    from app.transport_status import snapshot, current_status
+    items = rows("SELECT n.*,s.status shipment_status FROM freight_negotiations n JOIN shipments s ON s.id=n.shipment_id ORDER BY n.id DESC LIMIT 200")
+    with db() as c:
+        for item in items:
+            broadcast = c.execute('SELECT * FROM driver_broadcasts WHERE shipment_id=%s ORDER BY id DESC LIMIT 1', (item['shipment_id'],)).fetchone()
+            evidence = snapshot(c, broadcast)
+            item['transport_evidence'] = evidence
+            item['effective_status'] = current_status(item['shipment_status'],item['status'],evidence)
     return {"owner_auto_contact_enabled": os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") == "1",
-            "driver_margin_sar": 150,
-            "items": rows("SELECT * FROM freight_negotiations ORDER BY id DESC LIMIT 200")}
+            "driver_margin_sar": 150, "items": items}
 

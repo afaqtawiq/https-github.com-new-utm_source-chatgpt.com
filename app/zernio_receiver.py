@@ -146,7 +146,7 @@ async def receive(request: Request):
                 from app.transport_test import accepts_test_offer, DISCLAIMER
                 if not sender and re.search(r'(?:NQ-\d+|WA-[A-F0-9]{12})', text.upper()) and (accepts_offer(text) or accepts_test_offer(text)):
                     from app.freight_workflow import accept_driver_reply
-                    if accept_driver_reply('+' + contact, text, connection=c):
+                    if accept_driver_reply('+' + contact, text, connection=c, event_id=event_id, inbound_message_id=message.get('id')):
                         if accepts_test_offer(text):
                             return 'afaaq', {'message': DISCLAIMER + '؛ تم تسجيل نجاح رد الاختبار فقط، ولم يتم تعيينك لتنفيذ شحنة.'}
                         return 'afaaq', {'message': 'تم تسجيل موافقتك على عرض النقل وربطك بالشحنة. سنتابع معك تفاصيل التنفيذ.'}

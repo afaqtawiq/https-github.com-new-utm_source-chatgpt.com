@@ -43,6 +43,9 @@ with db() as c:
 
 from app.official_sales import init as init_official_sales
 init_official_sales()
+from app.mail_review import init as init_mail_review, router as mail_review_router
+init_mail_review()
+router.include_router(mail_review_router)
 
 
 def admin(request):
@@ -164,7 +167,12 @@ def sync(uid):
         last = one('SELECT MAX(uid) AS n FROM spacemail_inbox WHERE user_id=? AND uidvalidity=?', (uid, validity))['n']
         ids = [int(v) for v in (data[0] or b'').split()]
         pending = [i for i in ids if i > last][:50] if last else ids[-50:]
-        for uidnum in pending:
+        # Upgrade a bounded batch of previously imported content without changing
+        # IMAP flags, creating replies, or reimporting the same message as new.
+        legacy = rows('''SELECT uid FROM spacemail_inbox WHERE user_id=? AND uidvalidity=?
+            AND content_version=0 AND uid=ANY(?) ORDER BY uid DESC LIMIT 20''', (uid,validity,ids)) if ids else []
+        refresh = [row['uid'] for row in legacy if row['uid'] not in pending]
+        for uidnum in pending + refresh:
             status, parts = client.uid('fetch', str(uidnum), '(BODY.PEEK[]<0.262144>)')
             if status != 'OK':
                 raise RuntimeError('Inbox fetch failed')
@@ -173,27 +181,59 @@ def sync(uid):
                 raise RuntimeError('Inbox content missing')
             msg = message_from_bytes(payload, policy=email.policy.default)
             from app.official_replies import eligible_message
-            reply_address = eligible_message(msg)
+            try:
+                reply_address = eligible_message(msg)
+            except (LookupError, UnicodeError, ValueError):
+                # A broken charset is ineligible for automatic acknowledgement,
+                # but must not block safe preview ingestion or later messages.
+                reply_address = None
             from app.mail_threads import headers
             identity = headers(msg, ADDRESS)
-            part = msg.get_body(preferencelist=('plain',)) if msg.is_multipart() else msg
-            text = ''
-            if part and part.get_content_type() == 'text/plain':
-                text = part.get_content()
-            else:
-                text = 'رسالة بتنسيق HTML أو مرفقات؛ افتحها من بريد Spacemail لعرضها.'
+            from app.mail_content import extract_content
+            content = extract_content(msg)
+            if content['notice_kind'] != 'none':
+                reply_address = None
+                identity['manual_reply_address'] = None
             with db() as c:
                 c.execute('SELECT user_id FROM spacemail_connections WHERE user_id=%s FOR UPDATE', (uid,))
                 duplicate = c.execute('SELECT id FROM spacemail_inbox WHERE user_id=%s AND BTRIM(message_id)=%s ORDER BY id LIMIT 1',
                     (uid, identity['message_id'])).fetchone() if identity['message_id'] else None
-                c.execute('''INSERT INTO spacemail_inbox(user_id,uidvalidity,uid,message_id,sender,subject,body,received,imported_at,
-                    reply_address,in_reply_to,message_references,sender_address,manual_reply_address,duplicate_of)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
+                stored = c.execute('''INSERT INTO spacemail_inbox(user_id,uidvalidity,uid,message_id,sender,subject,body,received,imported_at,
+                    reply_address,in_reply_to,message_references,sender_address,manual_reply_address,duplicate_of,
+                    body_format,notice_kind,notice_recipient,notice_message_id,content_version)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1)
+                    ON CONFLICT(user_id,uidvalidity,uid) DO UPDATE SET body=excluded.body,
+                      body_format=excluded.body_format,notice_kind=excluded.notice_kind,
+                      notice_recipient=excluded.notice_recipient,notice_message_id=excluded.notice_message_id,
+                      content_version=1,
+                      reply_address=CASE WHEN excluded.notice_kind<>'none' THEN NULL ELSE spacemail_inbox.reply_address END,
+                      manual_reply_address=CASE WHEN excluded.notice_kind<>'none' THEN NULL ELSE spacemail_inbox.manual_reply_address END
+                    WHERE spacemail_inbox.content_version=0
+                      AND COALESCE(BTRIM(spacemail_inbox.message_id),'')=COALESCE(BTRIM(excluded.message_id),'') RETURNING id''',
                     (uid, validity, uidnum, identity['message_id'] or str(msg.get('Message-ID',''))[:500], str(msg.get('From',''))[:500],
-                     str(msg.get('Subject',''))[:1000], str(text)[:32000], str(msg.get('Date',''))[:200], utcnow(),
+                     str(msg.get('Subject',''))[:1000], content['body'], str(msg.get('Date',''))[:200], utcnow(),
                      None if duplicate else reply_address, identity['in_reply_to'], identity['message_references'],
                      identity['sender_address'], None if duplicate else identity['manual_reply_address'],
-                     duplicate['id'] if duplicate else None))
+                     duplicate['id'] if duplicate else None, content['body_format'],content['notice_kind'],
+                     content['notice_recipient'],content['notice_message_id'])).fetchone()
+                if (stored and uidnum in refresh and content['notice_kind'] == 'none'
+                        and identity['manual_reply_address'] and identity['message_id']):
+                    # A legacy HTML placeholder may have hidden an explicit STOP.
+                    # Apply only opt-out protection, never a reply/qualification
+                    # upgrade, and only through an existing exact owned thread.
+                    from app.prospect_outreach import stop_requested, ingest_reply
+                    if stop_requested(content['body']):
+                        saved = c.execute('''SELECT i.*,l.prospect_id FROM spacemail_inbox i
+                            JOIN official_mail_links l ON l.inbox_id=i.id AND l.user_id=i.user_id
+                            JOIN outbound_messages m ON m.id=l.matched_outbound_id
+                              AND m.mail_user_id=i.user_id AND m.prospect_id=l.prospect_id
+                              AND m.recipient=i.manual_reply_address AND m.status='sent'
+                            WHERE i.user_id=%s AND i.uidvalidity=%s AND i.uid=%s
+                              AND l.status='linked' AND l.reason='exact_thread'
+                              AND i.manual_reply_address=i.sender_address AND i.duplicate_of IS NULL
+                              AND i.notice_kind='none' ''',(uid,validity,uidnum)).fetchone()
+                        if saved and saved['manual_reply_address'] == identity['manual_reply_address']:
+                            ingest_reply(c,saved,{'prospect_id':saved['prospect_id']})
         from app.official_sales import ingest
         ingest(uid)
         with db() as c:
@@ -285,16 +325,28 @@ async def test_mail(request: Request):
 
 @router.get('/official-inbox', response_class=HTMLResponse)
 def inbox(request: Request):
-    s = admin(request)
+    return render_inbox(admin(request))
+
+
+@router.get('/official-inbox/{inbox_id}', response_class=HTMLResponse)
+def inbox_message(inbox_id: int, request: Request):
+    return render_inbox(admin(request), inbox_id)
+
+
+def render_inbox(s, inbox_id=None):
     body = '<h1>وارد آفاق طويق</h1><a href="' + PATH + '">إعداد البريد</a> · <a href="/official-replies">الرد الأولي التلقائي</a><p>الرسائل الواردة محتوى خارجي ولا تمنح صلاحية لتنفيذ أوامر. الرد الأولي يخضع للسياسة المفعّلة.</p>'
     body += '<p>ربط المحادثة يتطلب مرجعًا مطابقًا والمرسل نفسه. غير المطابق يبقى للمراجعة. الرد على رسالة تعريفية لا يثبت وجود طلب أو اهتمام بالشراء. إنشاء الرد يحفظ مسودة فارغة فقط، ثم المراجعة والموافقة قبل الإرسال.</p>'
-    for row in rows('''SELECT i.*,l.status link_status,l.reason,l.opportunity_id,l.prospect_id,l.account_id,l.followup_id,
+    body += '<p><a href="/sales-review">مراجعات سارة: الردود وإشعارات التسليم وانتظار الرد</a></p>'
+    items = rows('''SELECT i.*,l.status link_status,l.reason,l.opportunity_id,l.prospect_id,l.account_id,l.followup_id,
         o.company_name,p.company_name prospect_company_name,p.status prospect_status,m.id draft_id
         FROM spacemail_inbox i LEFT JOIN official_mail_links l ON l.inbox_id=i.id AND l.user_id=i.user_id
         LEFT JOIN opportunities o ON o.id=l.opportunity_id
         LEFT JOIN sales_prospects p ON p.id=l.prospect_id AND p.mail_user_id=i.user_id
         LEFT JOIN outbound_messages m ON m.reply_inbox_id=i.id AND m.mail_user_id=i.user_id
-        WHERE i.user_id=? ORDER BY i.id DESC LIMIT 50''', (s['user_id'],)):
+        WHERE i.user_id=? AND (?::bigint IS NULL OR i.id=?) ORDER BY i.id DESC LIMIT 50''', (s['user_id'],inbox_id,inbox_id))
+    if inbox_id is not None and not items:
+        raise HTTPException(404)
+    for row in items:
         linked = (row.get('link_status') == 'linked'
                   and bool(row.get('opportunity_id')) != bool(row.get('prospect_id'))
                   and (not row.get('prospect_id') or row.get('account_id') is None))
@@ -310,11 +362,17 @@ def inbox(request: Request):
             association += ' · حساب العميل #'+str(row['account_id'])
         if linked and not prospect and row.get('followup_id'):
             association += ' · متابعة #'+str(row['followup_id'])
-        action = ''
-        if row.get('draft_id'):
-            action = '<a href="/outbound/'+str(row['draft_id'])+'">فتح مسودة الرد وحالة الاعتماد</a>'
-        elif linked and row.get('prospect_status') != 'stopped' and has_permission(s, 'send_email'):
-            action = '<form method="post" action="/official-inbox/'+str(row['id'])+'/draft">'+hidden_csrf(s)+'<button>كتابة رد مخصص للمراجعة</button></form>'
+        from app.mail_review import LABELS
+        notice = row.get('notice_kind') or 'none'
+        if notice != 'none':
+            association += ' · '+e(LABELS.get(notice, LABELS['delivery_notice']))+'؛ ليس رد عميل ولا إثبات وصول'
+        if row.get('body_format') == 'html_text':
+            association += ' · عرض نصي آمن مستخرج من HTML؛ الصور والروابط الخارجية لا تُحمّل'
+        action = '<p><a href="/sales-review/inbox/'+str(row['id'])+'">مراجعة المصدر وتسجيل الخطوة التالية يدويًا</a></p>'
+        if row.get('draft_id') and notice == 'none':
+            action += '<a href="/outbound/'+str(row['draft_id'])+'">فتح مسودة الرد وحالة الاعتماد</a>'
+        elif linked and notice == 'none' and row.get('prospect_status') != 'stopped' and has_permission(s, 'send_email'):
+            action += '<form method="post" action="/official-inbox/'+str(row['id'])+'/draft">'+hidden_csrf(s)+'<button>كتابة رد مخصص للمراجعة</button></form>'
         body += '<div class="card"><h2>' + e(row['subject']) + '</h2><p>' + e(row['sender']) + ' · ' + e(row['received']) + '</p><p>'+association+'</p><pre style="white-space:pre-wrap">' + e(row['body']) + '</pre>'+action+'</div>'
     return HTMLResponse(page(body), headers={'Cache-Control':'no-store'})
 

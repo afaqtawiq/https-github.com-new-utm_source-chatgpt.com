@@ -217,10 +217,13 @@ def review(bid: int, request: Request):
             <button>إرسال محاولة الاستعادة مرة واحدة</button></form>'''
         body += '<table><tr><th>السائق</th><th>الرقم</th><th>الحالة</th><th>دليل الفشل السابق</th><th>نتيجة التسليم الحالية</th><th>معرف المحاولة الجديدة</th></tr>'
         for item in attempts:
-            result = one('SELECT delivery_status,error_code,checked_at FROM driver_recovery_receipts WHERE attempt_id=? ORDER BY id DESC LIMIT 1', (item['id'],))
+            result = one('SELECT delivery_status,error_code,checked_at FROM driver_recovery_receipts WHERE attempt_id=? AND provider_message_id=? ORDER BY checked_at DESC,id DESC LIMIT 1', (item['id'],item['provider_message_id']))
             body += '<tr>' + ''.join('<td>' + escape(str(x or '—')) + '</td>' for x in (item['driver_name'],item['phone'],item['status'],item['source_evidence']['kind'],result,item['provider_message_id'] or item['last_error'])) + '</tr>'
         body += '</table>'
         body += f'''<form method=post action=/commands/broadcast/{bid}/recovery/reconcile><input type=hidden name=csrf value="{escape(current['csrf'])}"><button>تحقق من التسليم دون إعادة إرسال</button></form>'''
+    from app.transport_status import snapshot, evidence_lines
+    with db() as c: evidence = snapshot(c, campaign)
+    body += '<h2>دليل الإرسال والقبول</h2>' + ''.join('<p>' + escape(line) + '</p>' for line in evidence_lines(evidence))
     body += f'</div><a href=/commands/broadcast/{bid}>السجل الأصلي</a>'
     return _page('استعادة اختبار السائقين', body)
 
@@ -354,7 +357,10 @@ async def reconcile(bid: int, request: Request):
         for item in attempts:
             cids = index.get(transport.phone(item['phone']),[])
             if len(cids) != 1: continue
+            # Timestamp the observation request, not a later DB insertion. A
+            # slow concurrent request must not supersede a newer observation.
+            checked_at = utcnow()
             result = await receipt(client,cids[0],item['provider_message_id'])
             execute('''INSERT INTO driver_recovery_receipts(attempt_id,provider_message_id,delivery_status,error_code,checked_at)
-                VALUES(?,?,?,?,?)''',(item['id'],item['provider_message_id'],result['delivery_status'],result.get('error_code'),utcnow()))
+                VALUES(?,?,?,?,?)''',(item['id'],item['provider_message_id'],result['delivery_status'],result.get('error_code'),checked_at))
     return RedirectResponse(f'/commands/broadcast/{bid}/recovery',303)
