@@ -1,6 +1,6 @@
 # Afaaq video publishing
 
-Verified targets: YouTube `@afaqtaw` and TikTok `@afaqtawaiq6`.
+Approved targets: YouTube `@afaqtaw` and TikTok `@afaqt79`.
 
 The integration schedules approved video/reel drafts through Zernio. Zernio
 executes the schedule; the application does not need an additional cron job.
@@ -19,6 +19,16 @@ An existing draft or approval is never submitted by deployment or startup.
    source control, logs or issue bodies. Keep the encryption key stable.
 5. `ENABLE_EXTERNAL_ACTIONS=1` must already be explicitly authorized and enabled
    before scheduling. The connection can be verified while sending is disabled.
+
+For an already configured connection, use **تحديث الاتصال المحفوظ** on
+`/settings/social`. This uses the existing encrypted credential internally to
+verify both approved accounts and their posting permissions. It preserves the
+saved YouTube identity and encrypted credential, updates only the saved account
+mapping and verification metadata, and does not publish or schedule content.
+The page shows the actual saved handles and account IDs separately from the
+approved targets. A failed verification or a concurrent configuration change
+leaves the previous mapping untouched. Admin, CSRF, permission and recent MFA
+checks also apply to this refresh; no new API key is required.
 
 The existing `ZERNIO_API_KEY` belongs to the WhatsApp integration. This publishing
 integration never reads, changes or falls back to it.

@@ -67,8 +67,9 @@ def cipher():
     return Fernet(base64.urlsafe_b64encode(key))
 
 
-def connection():
-    row = one('SELECT * FROM social_publishing_settings WHERE id=1')
+def connection(row=None):
+    if row is None:
+        row = one('SELECT * FROM social_publishing_settings WHERE id=1')
     if not row:
         raise PublishingError('أكمل إعداد ربط Zernio في إعدادات النشر أولًا.')
     try:
@@ -122,9 +123,18 @@ def settings_page(request: Request):
     session = admin(request)
     status = connection_status()
     body = '<div class="nav"><a href="/content-center">مركز المحتوى</a><a href="/settings/media">إعدادات الإنتاج</a></div><div class="hero"><h1>ربط النشر لآفاق طويق</h1>'
-    body += '<p>YouTube: <b dir="ltr">@afaqtaw</b> · TikTok: <b dir="ltr">@afaqtawaiq6</b></p></div>'
+    body += '<p>الحسابات المعتمدة: ' + ' · '.join(e(p) + ': <b dir="ltr">@' + e(TARGETS[p]) + '</b>' for p in TARGETS) + '</p></div>'
     if status['configured']:
         body += '<div class="card"><b class="ok">مفتاح الربط محفوظ ومشفّر</b><p>آخر تحقق: ' + e(status['verified_at']) + '</p></div>'
+        body += '<div class="card"><h2>الحسابات المحفوظة للنشر</h2>'
+        for platform in TARGETS:
+            account = status['accounts'].get(platform, {})
+            body += '<p>' + e(platform) + ': <b dir="ltr">@' + e(account.get('username')) + '</b> · <span dir="ltr">' + e(account.get('accountId')) + '</span></p>'
+        if any(status['accounts'].get(p, {}).get('username') != TARGETS[p] for p in TARGETS):
+            body += '<p>الحساب المحفوظ لا يطابق الحساب المعتمد؛ حدّث الاتصال قبل الجدولة.</p>'
+        body += '<p>يتحقق التحديث من الحسابين وصلاحية النشر باستخدام المفتاح المحفوظ، مع إبقاء حساب YouTube نفسه. لا ينشر أي محتوى.</p>'
+        body += '<form method="post" action="/settings/social/refresh">' + hidden_csrf(session)
+        body += '<button class="btn">تحديث الاتصال المحفوظ</button></form></div>'
     else:
         body += '<div class="card">الحسابات متصلة في Zernio، ويلزم حفظ مفتاح ربطها هنا لتشغيل الجدولة من الوكيل.</div>'
     body += '<div class="card"><p>أنشئ مفتاحًا من حساب Zernio الذي يحتوي حسابَي آفاق، وأدخله هنا. يتحقق النظام من الحسابين وصلاحية النشر قبل الحفظ.</p>'
@@ -157,6 +167,38 @@ async def save_settings(request: Request):
         accounts_json=excluded.accounts_json,verified_at=excluded.verified_at,updated_by=excluded.updated_by''',
         (encrypted, json.dumps(accounts), utcnow(), session['user_id']))
     log(session['user_id'], 'social_connection_verified', 'social_publishing', None, 'Verified Afaaq YouTube and TikTok')
+    return RedirectResponse('/settings/social', 303)
+
+
+@router.post('/settings/social/refresh')
+async def refresh_settings(request: Request):
+    session = admin(request)
+    raw = await request.body()
+    if len(raw) > 4096:
+        raise HTTPException(413)
+    csrf(session, parse(raw))
+    row = one('SELECT * FROM social_publishing_settings WHERE id=1')
+    if not row:
+        return message_page('أكمل إعداد ربط Zernio في إعدادات النشر أولًا.')
+    try:
+        key, saved = connection(row)
+        accounts = await run_in_threadpool(verified_accounts, key)
+        if not saved.get('youtube') or accounts['youtube'] != saved['youtube']:
+            raise PublishingError('تغير حساب YouTube؛ لم يُحفظ التحديث حفاظًا على الحساب المعتمد.')
+    except PublishingError as error:
+        return message_page(str(error))
+    now = utcnow()
+    with db() as c:
+        # Preserve the ciphertext and reject a concurrent credential/mapping change.
+        updated = c.execute('''UPDATE social_publishing_settings
+            SET accounts_json=%s,verified_at=%s,updated_by=%s
+            WHERE id=1 AND api_key_enc=%s AND accounts_json=%s RETURNING id''',
+            (json.dumps(accounts), now, session['user_id'], row['api_key_enc'], row['accounts_json'])).fetchone()
+        if not updated:
+            return message_page('تغير إعداد الربط أثناء التحقق؛ أعد فتح الإعدادات ثم حدّث الاتصال.', 409)
+        c.execute('''INSERT INTO activity(user_id,action,entity_type,summary,created_at)
+            VALUES(%s,%s,%s,%s,%s)''', (session['user_id'], 'social_connection_refreshed',
+            'social_publishing', 'Verified saved Afaaq connection; preserved YouTube', now))
     return RedirectResponse('/settings/social', 303)
 
 
