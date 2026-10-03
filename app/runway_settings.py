@@ -11,14 +11,16 @@ from starlette.concurrency import run_in_threadpool
 
 from app.media_runway import RunwayError, organization_balance
 from app.media_settings import media_admin
+from app.fine_permissions import has_permission
 from app.mfa_stepup import mfa_state, recent_stepup
 from app.social_content import e, page
 from app.social_publishing import csrf, hidden_csrf
-from app.storage import db, one, utcnow
+from app.storage import db, one, utcnow, get_session
 
 router = APIRouter()
 SETTINGS_PATH = '/settings/runway'
 NO_STORE = {'Cache-Control': 'no-store'}
+RUNWAY_KEY_LOCK = 70600503
 
 
 def init_runway_settings():
@@ -49,7 +51,8 @@ def connection_status():
             'updated_at': row['updated_at'] if row else None,
             'checked_at': row['checked_at'] if row else None,
             'credit_balance': row['credit_balance'] if row else None,
-            'generation_enabled': False}
+            'generation_available': True,
+            'generation_enabled': bool(row and row['verified_at'] and os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') == '1')}
 
 
 def credential():
@@ -68,11 +71,25 @@ def require_stepup(session):
         raise HTTPException(428, 'أكمل التحقق الثنائي الحديث قبل إعداد ربط Runway أو فحصه.', headers=NO_STORE)
 
 
-async def form_data(request, session):
+def fresh_approval(session_id, user_id, csrf_token):
+    """Revalidate authorization after body/network/lock waits, immediately before claim."""
+    fresh = get_session(session_id)
+    if not fresh or fresh['user_id'] != user_id:
+        raise HTTPException(401, headers=NO_STORE)
+    user = one('SELECT is_active,must_change_password FROM users WHERE id=?', (user_id,))
+    if (not user or not user['is_active'] or user['must_change_password'] or
+            fresh.get('role') != 'admin' or not has_permission(fresh, 'manage_media')):
+        raise HTTPException(403, headers=NO_STORE)
+    require_stepup(fresh)
+    csrf(fresh, {'csrf': csrf_token})
+    return fresh
+
+
+async def form_data(request, session, *, max_size=4096):
     raw = bytearray()
     async for chunk in request.stream():
         raw.extend(chunk)
-        if len(raw) > 4096:
+        if len(raw) > max_size:
             raise HTTPException(413, headers=NO_STORE)
     try:
         fields = parse_qs(raw.decode(), keep_blank_values=True, max_num_fields=8)
@@ -105,7 +122,7 @@ def settings_response(session, *, error=None, status_code=200):
     else:
         body += '<div class="card">لم يتم حفظ مفتاح Runway Developer API بعد.</div>'
     body += '<div class="card"><h2>نطاق الربط</h2><p>رصيد Developer API منفصل عن رصيد تطبيق Runway. هذا الفحص يخص المشروع المرتبط بالمفتاح الذي أدخلته؛ لا يفترض تطابقه مع أي اتصال آخر. يُفحص الرصيد عند طلبك فقط وقد يتغير بعد الفحص.</p>'
-    body += '<p>توليد المحتوى عبر Runway غير مفعّل في هذا الإصدار. فحص الاتصال لا ينشئ صورة أو فيديو ولا يشتري رصيدًا. استوديو fal.ai الحالي مستقل ولا يتغير.</p></div>'
+    body += '<p>توليد فيديو Runway يبدأ فقط بعد مراجعة وصف المهمة وتقديرها والموافقة عليهما. فحص الاتصال لا ينشئ صورة أو فيديو ولا يشتري رصيدًا. استوديو fal.ai الحالي مستقل ولا يتغير.</p><a class="btn" href="/runway-studio">تجهيز فيديو Runway ومراجعة تقديره</a></div>'
     state = mfa_state(session['user_id'])
     if not state or not state.get('mfa_enabled'):
         body += '<div class="card"><p>فعّل التحقق الثنائي لإعداد الربط.</p><a class="btn" href="/mfa">إعداد التحقق الثنائي</a></div>'
@@ -140,8 +157,17 @@ async def save_settings(request: Request):
         encrypted = runway_cipher().encrypt(key.encode()).decode()
     except RunwayError as error:
         return settings_response(session, error=str(error), status_code=503)
-    now = utcnow()
+    await run_in_threadpool(store_key, encrypted, session, data.get('csrf'))
+    return RedirectResponse(SETTINGS_PATH, 303, headers=NO_STORE)
+
+
+def store_key(encrypted, session, csrf_token):
+    """A concurrent paid submission must not block the web event loop on replacement."""
     with db() as c:
+        # Serialize replacement with the one paid submission using the old key.
+        c.execute('SELECT pg_advisory_xact_lock(%s)', (RUNWAY_KEY_LOCK,))
+        fresh_approval(session['id'], session['user_id'], csrf_token)
+        now = utcnow()
         c.execute('''INSERT INTO runway_provider_settings(id,api_key_enc,updated_at,updated_by)
             VALUES(1,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET
             api_key_enc=excluded.api_key_enc,updated_at=excluded.updated_at,updated_by=excluded.updated_by,
@@ -149,14 +175,14 @@ async def save_settings(request: Request):
         c.execute('''INSERT INTO activity(user_id,action,entity_type,entity_id,summary,created_at)
             VALUES(%s,'runway_credential_saved','runway_provider',1,%s,%s)''',
             (session['user_id'], 'Saved encrypted Runway credential; no provider call or generation.', now))
-    return RedirectResponse(SETTINGS_PATH, 303, headers=NO_STORE)
 
 
 @router.post(SETTINGS_PATH + '/check')
 async def check_connection(request: Request):
     session = media_admin(request)
     require_stepup(session)
-    await form_data(request, session)
+    data = await form_data(request, session)
+    fresh_approval(session['id'], session['user_id'], data.get('csrf'))
     version = connection_status()['updated_at']
     try:
         key, version = credential()
