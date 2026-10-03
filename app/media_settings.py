@@ -58,7 +58,7 @@ def media_connection():
 def settings_response(session, *, error=None, status_code=200):
     # Never retrieve the credential when rendering its status.
     saved = one('SELECT updated_at FROM media_provider_settings WHERE id=1')
-    body = '<div class="nav"><a href="/content-center">مركز المحتوى</a><a href="/settings/social">إعدادات النشر</a></div>'
+    body = '<div class="nav"><a href="/content-center">مركز المحتوى</a><a href="/settings/social">إعدادات النشر</a><a href="/settings/runway">ربط Runway</a></div>'
     body += '<div class="hero"><h1>إعداد إنتاج الصور والفيديو</h1><p>fal.ai · آفاق طويق</p></div>'
     if error:
         body += '<div class="card" role="alert">' + e(error) + '</div>'

@@ -46,13 +46,14 @@ from app.saber_workflow import router as saber_workflow_router
 from app.social_content import router as social_content_router
 from app.social_publishing import router as social_publishing_router
 from app.media_settings import router as media_settings_router
+from app.runway_settings import router as runway_settings_router
 from app.media_studio import router as media_studio_router,register_worker as register_media_worker
 from app.advert_studio import router as advert_studio_router,register_worker as register_advert_worker
 from app.production_monitor import router as production_monitor_router,register_worker as register_monitor_worker
 from app.readiness import router as readiness_router
 from app.storage import get_session,one,execute,utcnow
 ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/soc','/incidents','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'viewer':()}
-SENSITIVE=[('manage_media','POST','/media-studio/','/run'),('manage_media','POST','/settings/media',''),('manage_social','POST','/settings/social',''),('publish_social','POST','/content-center/','/schedule'),('send_email','POST','/outbound/','/send'),('send_email','POST','/shipping-agent-messages/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('make_phone_call','POST','/freight-workflow/','/contact-owner'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
+SENSITIVE=[('manage_media','POST','/settings/runway',''),('manage_media','POST','/media-studio/','/run'),('manage_media','POST','/settings/media',''),('manage_social','POST','/settings/social',''),('publish_social','POST','/content-center/','/schedule'),('send_email','POST','/outbound/','/send'),('send_email','POST','/shipping-agent-messages/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('make_phone_call','POST','/freight-workflow/','/contact-owner'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
 def role_allowed(request,s):
  if not s:return True
  role=s.get('role','viewer');path=request.url.path
@@ -98,7 +99,7 @@ async def enterprise_security_guard(request,call_next):
   if perm=='send_email' and is_manual_outbound_send(request.method,request.url.path):
    from app.gmail_oauth import connection
    official_send=official_manual_send_without_stepup(request.method,request.url.path,connection(sess['user_id']))
-  if not recent_stepup(sess['id']) and not official_send:return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+(request.url.path.rsplit('/',1)[0] if request.url.path=='/settings/social/refresh' or '/recovery/' in request.url.path or request.url.path.endswith(('/contact-owner','/test-owner-inquiry','/refresh-preview')) else '/settings/whatsapp/channel' if request.url.path=='/settings/whatsapp/channel/templates' else request.url.path),'permission':perm},status_code=428)
+  if not recent_stepup(sess['id']) and not official_send:return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+(request.url.path.rsplit('/',1)[0] if request.url.path in ('/settings/social/refresh','/settings/runway/check') or '/recovery/' in request.url.path or request.url.path.endswith(('/contact-owner','/test-owner-inquiry','/refresh-preview')) else '/settings/whatsapp/channel' if request.url.path=='/settings/whatsapp/channel/templates' else request.url.path),'permission':perm},status_code=428)
  from app.live_activity import tracked_request
  response=await tracked_request(request,call_next,sess);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(self), geolocation=()' if request.url.path in ('/retell-web-test','/commands') else 'camera=(), microphone=(), geolocation=()';return response
 for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router,mfa_stepup_router,security_operations_router,incident_response_router,retell_integration_router,phone_sales_router,crm_contacts_router):app.include_router(r)
@@ -117,6 +118,7 @@ app.include_router(saber_workflow_router)
 app.include_router(social_content_router)
 app.include_router(social_publishing_router)
 app.include_router(media_settings_router)
+app.include_router(runway_settings_router)
 app.include_router(media_studio_router)
 register_media_worker(app)
 app.include_router(advert_studio_router)
