@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 API = 'https://zernio.com/api/v1'
-TARGETS = {'youtube': 'afaqtaw', 'tiktok': 'afaqtawaiq6'}
+TARGETS = {'youtube': 'afaqtaw', 'tiktok': 'afaqt79'}
 PLATFORMS = {'YouTube': ('youtube',), 'TikTok': ('tiktok',), 'YouTube+TikTok': ('youtube', 'tiktok')}
 RIYADH = ZoneInfo('Asia/Riyadh')
 

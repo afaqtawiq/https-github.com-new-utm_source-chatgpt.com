@@ -9,7 +9,7 @@ from app import social_zernio as z
 
 NOW = dt.datetime(2026, 9, 20, 10, tzinfo=dt.timezone.utc)
 ACCOUNTS = {'youtube': {'accountId': 'a' * 24, 'username': 'afaqtaw'},
-            'tiktok': {'accountId': 'b' * 24, 'username': 'afaqtawaiq6'}}
+            'tiktok': {'accountId': 'b' * 24, 'username': 'afaqt79'}}
 ITEM = {'id': 1, 'platform': 'YouTube+TikTok', 'content_type': 'video', 'title': 'آفاق طويق',
         'body': 'حلول النقل والخدمات اللوجستية', 'media_url': 'https://media.example.com/afaaq.mp4'}
 FORM = {'preview_confirmed': 'yes', 'scheduled_at': '2026-09-20T15:00', 'synthetic': 'yes',
@@ -77,6 +77,17 @@ def test_wrong_account_key_and_revoked_permissions_rejected(monkeypatch):
     records[0]['username'] = 'afaqtaw'
     health['a' * 24]['permissions']['canPost'] = False
     with pytest.raises(z.PublishingError): z.verified_accounts('dedicated-social-key')
+
+
+def test_legacy_tiktok_is_not_an_approved_publishing_target(monkeypatch):
+    assert z.TARGETS == {'youtube': 'afaqtaw', 'tiktok': 'afaqt79'}
+    legacy = {**ACCOUNTS, 'tiktok': {'accountId': 'b' * 24, 'username': 'afaqtawaiq6'}}
+    with pytest.raises(z.PublishingError):
+        z.make_payload(ITEM, legacy, FORM, CREATOR, NOW)
+    monkeypatch.setattr(z, 'provider_request', lambda *args, **kwargs: {'accounts': [
+        {'platform': 'tiktok', '_id': 'b' * 24, 'username': 'afaqtawaiq6', 'isActive': True}]})
+    with pytest.raises(z.PublishingError):
+        z.verified_accounts('dedicated-social-key', ('tiktok',))
 
 
 def result(state='scheduled'):
