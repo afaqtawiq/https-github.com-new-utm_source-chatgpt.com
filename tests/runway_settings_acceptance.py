@@ -116,11 +116,12 @@ def run(client, app):
             assert status['verified_at'] and status['credit_balance'] == balance
             screen = client.get(path)
             assert f'<b>{balance} credits</b>' in screen.text
-            assert 'توليد المحتوى عبر Runway غير مفعّل' in screen.text
+            assert 'توليد فيديو Runway يبدأ فقط بعد مراجعة' in screen.text
             assert key not in screen.text
             readiness = client.get('/api/v7/readiness').json()
             item = next(x for x in readiness['integrations'] if 'Runway' in x['name'])
-            assert item['connection_verified'] and not item['live_tested'] and not item['generation_enabled']
+            assert item['connection_verified'] and not item['live_tested']
+            assert item['generation_enabled'] == (os.environ.get('ENABLE_EXTERNAL_ACTIONS') == '1')
             assert item['state_label'] in client.get('/readiness').text
         with patch.object(r, 'organization_balance', side_effect=RunwayError('تعذر فحص الاتصال')):
             response = client.post(check, data={'csrf': csrf})

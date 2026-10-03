@@ -25,18 +25,13 @@ This page verifies only the Developer API project belonging to the user-entered
 key; a balance from another connection is not automatically the same project.
 It does not transfer credits or select a web-app workspace.
 
-## Scope and remaining production work
+## Connection versus production
 
-This release supports secure credential intake and read-only connection/balance
-verification only. It has no generation, purchase, replenishment, scheduler, or
-Runway task submission method. The existing media and cinematic studios still
-use fal. No Runway model is selected or promised by this connection check.
-
-Producing Afaaq content using these credits requires a separate explicitly
-approved generation integration: current model/pricing selection, cost review,
-durable single-submission task receipts and polling, safe output validation and
-storage, content drafts, and a live cost-approved quality review. A verified key
-is not generation acceptance.
+The connection page remains read-only apart from credential storage. A separate
+`/runway-studio` now supports one explicitly approved five-second video; see
+[Runway video production](runway-production.md). No generation starts from the
+connection page or its balance check. Saving/verifying a key still is not proof
+of generation or publication. fal remains independent.
 
 ## Validation
 
