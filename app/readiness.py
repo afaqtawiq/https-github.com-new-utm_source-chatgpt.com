@@ -64,6 +64,8 @@ def configuration_status():
         direct = configured()
     from app.social_publishing import connection_status
     social = connection_status()
+    from app.runway_settings import connection_status as runway_status
+    runway = runway_status()
     published = None
     published_ok = False
     for candidate in rows("SELECT content_id,results_json,updated_at FROM social_publications WHERE status='published' ORDER BY updated_at DESC LIMIT 100"):
@@ -80,6 +82,7 @@ def configuration_status():
     advert = one("SELECT j.id FROM advert_jobs j WHERE j.status='complete' AND j.approved_at IS NOT NULL AND EXISTS(SELECT 1 FROM advert_exports x WHERE x.job_id=j.id) ORDER BY j.id DESC LIMIT 1")
     return [
         {'name': 'نشر فيديوهات آفاق على YouTube وTikTok', 'configured': social['configured'], 'live_tested': published_ok, 'detail': ('ثبت نجاح النشر على الحسابين؛ راجع المحتوى رقم ' + str(published['content_id'])) if published_ok else 'يلزم إيصال نشر مؤكد للحسابين؛ حفظ الربط وحده لا يثبت نجاح النشر'},
+        {'name': 'ربط Runway Developer API — فحص الرصيد فقط', 'configured': runway['configured'], 'live_tested': False, 'connection_verified': bool(runway['verified_at']), 'generation_enabled': False, 'state_label': 'نجح فحص الاتصال؛ الإنتاج غير مفعّل' if runway['verified_at'] else 'إعداد محفوظ؛ لم يُعتمد الاتصال' if runway['configured'] else 'إعداد ناقص', 'detail': ('نجح فحص المفتاح والرصيد في ' + str(runway['verified_at']) + '؛ إنتاج Runway غير مفعّل') if runway['verified_at'] else 'احفظ المفتاح ثم افحص الاتصال من /settings/runway؛ إنتاج Runway غير مفعّل'},
         {'name': 'إنتاج الصور والفيديو عبر fal.ai', 'configured': bool(one('SELECT id FROM media_provider_settings WHERE id=1')), 'live_tested': bool(produced), 'detail': ('اكتملت صورة وفيديو في مهمة الإنتاج رقم ' + str(produced['id'])) if produced else 'اعتماد التكلفة ثم إنتاج فعلي وحفظ النتيجة؛ حفظ المفتاح لا يثبت نجاح التوليد'},
         {'name': 'إعلان كامل بالتعليق العربي والهوية', 'configured': bool(one('SELECT id FROM media_provider_settings WHERE id=1')), 'live_tested': bool(advert), 'detail': ('اكتمل الإعلان رقم ' + str(advert['id'])) if advert else 'المسار متاح؛ يحتاج اعتماد تكلفة إعلان ثم إنتاجًا حيًا ومراجعة الصوت والمونتاج'},
         {'name': 'أوامر واتساب الإدارية', 'configured': present('ZERNIO_API_KEY', 'ZERNIO_WEBHOOK_SECRET', 'WHATSAPP_COMMAND_OWNER', 'WHATSAPP_COMMAND_ACCOUNT_ID'), 'detail': 'تحتاج اختبار رسالة واردة وتنفيذ موثق من رقم الإدارة'},
@@ -117,7 +120,7 @@ def readiness_api(request: Request):
 def readiness_page(request: Request):
     from app.main import page, esc, head, current
     data = snapshot(request)
-    table = ''.join('<tr><td>' + esc(x['name']) + '</td><td>' + ('اختبار إنتاج موثق ناجح' if x.get('live_tested') else ('إعداد موجود — لم يُختبر حيًا' if x['configured'] else 'إعداد ناقص')) + '</td><td>' + esc(x['detail']) + '</td></tr>' for x in data['integrations'])
+    table = ''.join('<tr><td>' + esc(x['name']) + '</td><td>' + esc(x.get('state_label') or ('اختبار إنتاج موثق ناجح' if x.get('live_tested') else ('إعداد موجود — لم يُختبر حيًا' if x['configured'] else 'إعداد ناقص'))) + '</td><td>' + esc(x['detail']) + '</td></tr>' for x in data['integrations'])
     sources = ''.join('<tr><td>' + esc(x['name']) + '</td><td>' + esc(x['last_status'] or 'لم يُفحص') + '</td><td>' + esc(x['last_checked_at']) + '</td></tr>' for x in data['sources'])
     operations = ''.join('<tr><td><a href="' + esc(x['url']) + '">' + esc(x['name']) + '</a></td><td>' + esc(x['state_label']) + '</td><td>' + esc(x['detail']) + '</td></tr>' for x in data['operations'])
     return HTMLResponse(page('جاهزية التشغيل', head(current(request), 'جاهزية التشغيل') +
