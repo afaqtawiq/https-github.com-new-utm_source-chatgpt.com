@@ -98,6 +98,7 @@ def validate_reply(c, outbound, uid):
             or bool(item.get('opportunity_id')) == bool(item.get('prospect_id'))
             or (item.get('prospect_id') and item.get('account_id') is not None)
             or not item.get('matched_outbound_id') or item.get('duplicate_of')
+            or item.get('notice_kind') not in (None, 'none')
             or item.get('opportunity_id') != outbound.get('opportunity_id')
             or item.get('prospect_id') != outbound.get('prospect_id')
             or not address(item.get('manual_reply_address'))
@@ -128,6 +129,7 @@ def create_draft(inbox_id, session):
                 or bool(item.get('opportunity_id')) == bool(item.get('prospect_id'))
                 or (item.get('prospect_id') and item.get('account_id') is not None)
                 or not item.get('matched_outbound_id') or item.get('duplicate_of')
+                or item.get('notice_kind') not in (None, 'none')
                 or not address(item.get('manual_reply_address')) or not message_id(item['message_id'])):
             raise HTTPException(409, 'Unmatched or ambiguous mail needs review; no reply draft created')
         if item.get('prospect_id'):

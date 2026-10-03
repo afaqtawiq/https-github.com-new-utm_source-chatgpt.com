@@ -4,6 +4,7 @@ Every provider interaction is synthetic. This file is invoked only by the
 localhost-only, socket-guarded transport_postgres_acceptance fixture.
 """
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from decimal import Decimal
@@ -166,6 +167,31 @@ def run_recovery(providers, inbound):
         assert history(case)==snapshot
         print('PASS: recovery role/CSRF/MFA, explicit current failures only, original rows immutable, duplicate approval/worker claims and append-only receipt reconciliation.')
 
+        # Status is derived from linked recovery without rewriting the original.
+        from app.transport_status import snapshot as transport_snapshot
+        with db() as c:
+            evidence = transport_snapshot(c, c.execute('SELECT * FROM driver_broadcasts WHERE id=%s',(case['bid'],)).fetchone())
+        assert evidence['effective_status']=='awaiting_test_driver_reply'
+        assert evidence['recovery']['provider_accepted']==3
+        assert evidence['recovery']['delivery_statuses']=={'delivered':3}
+        assert evidence['recovery']['observed_from'] and evidence['recovery']['observed_to']
+        web = TestClient(app,base_url='http://testserver',follow_redirects=False)
+        web.cookies.set('gla_session',session_id)
+        detail = web.get(f"/freight-workflow/{case['sid']}")
+        assert detail.status_code==200 and 'awaiting_test_driver_reply' in detail.text
+        assert 'ليست قراءة مباشرة الآن' in detail.text and 'لم يُسجل قبول سائق' in detail.text
+        api = web.get('/api/v7/freight-workflow').json()
+        item = next(x for x in api['items'] if x['shipment_id']==case['sid'])
+        assert item['effective_status']=='awaiting_test_driver_reply' and item['status']=='owner_agreed'
+        for stage in ('in_transit','delivered','closed'):
+            execute('UPDATE shipments SET status=? WHERE id=?',(stage,case['sid']))
+            detail = web.get(f"/freight-workflow/{case['sid']}")
+            assert 'الحالة الحالية: '+stage in detail.text
+            item = next(x for x in web.get('/api/v7/freight-workflow').json()['items'] if x['shipment_id']==case['sid'])
+            assert item['effective_status']==stage
+        execute("UPDATE shipments SET status='test_pending' WHERE id=?",(case['sid'],))
+        web.close()
+
         reply = 'موافق '+display_reference(case['ref'],True)
         first = case['recipients'][0]
         assert not workflow.accept_driver_reply(first['phone'],'موافق '+case['ref'])
@@ -176,6 +202,14 @@ def run_recovery(providers, inbound):
         inbound('recovery-first-driver',first['phone'],reply)
         assert inbound('recovery-first-driver',first['phone'],reply)['duplicate']
         assert 'لم يتم تعيينك' in providers.replies['recovery-first-driver']['message']
+        accepted = rows("SELECT summary FROM shipment_events WHERE shipment_id=? AND event_type='driver_test_accepted'",(case['sid'],))
+        assert len(accepted)==1
+        audit=json.loads(accepted[0]['summary'])
+        assert audit['event_id']=='recovery-first-driver' and audit['accepted'] is True
+        assert audit['source']=='recovery' and audit['account_id']==account
+        assert audit['recipient_id']==first['id'] and audit['driver_id']==first['driver_id']
+        assert audit['recovery_attempt_id']==attempts(batch)[0]['id']
+        assert audit['provider_message_id']==attempts(batch)[0]['provider_message_id']
         assert not workflow.accept_driver_reply(case['recipients'][1]['phone'],reply)
         assert one('SELECT status,revenue,cost FROM shipments WHERE id=?',(case['sid'],))=={'status':'test_completed','revenue':0,'cost':0}
         assert one('SELECT stage,driver_name,driver_phone FROM shipment_operations WHERE shipment_id=?',(case['sid'],))=={'stage':'test_completed','driver_name':None,'driver_phone':None}
@@ -231,6 +265,18 @@ def run_recovery(providers, inbound):
         assert len(posts)==before+1
         assert not workflow.accept_driver_reply(uncertain['recipients'][0]['phone'],'موافق '+display_reference(uncertain['ref'],True))
         print('PASS: changed delivery proof stops before POST; uncertain retry consumes its unique attempt and never authorizes a reply or automatic replay.')
+
+        # A delayed older observation or unrelated receipt cannot hide a newer failure.
+        stale_receipt=fixture(['legacy'])
+        rb=prepare(stale_receipt);approve(stale_receipt);asyncio.run(recovery.deliver(rb['id']))
+        attempt=attempts(rb)[0]
+        for mid,status,at in [(attempt['provider_message_id'],'failed','2026-10-03T13:00:00Z'),
+                              (attempt['provider_message_id'],'delivered','2026-10-02T13:00:00Z'),
+                              ('unrelated-receipt','read','2026-10-03T14:00:00Z')]:
+            execute('INSERT INTO driver_recovery_receipts(attempt_id,provider_message_id,delivery_status,checked_at) VALUES(?,?,?,?)',
+                    (attempt['id'],mid,status,at))
+        assert not workflow.accept_driver_reply(stale_receipt['recipients'][0]['phone'], 'موافق '+display_reference(stale_receipt['ref'],True))
+        assert not one("SELECT id FROM shipment_events WHERE shipment_id=? AND event_type='driver_test_accepted'",(stale_receipt['sid'],))
 
         # Every source field that proves preflight safety must invalidate approval.
         stale = fixture(['preflight'])

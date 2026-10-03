@@ -99,7 +99,8 @@ def reply_for_driver_test(c, phone, text, quote_id, account, event_id, message,
         CASE WHEN a.id IS NOT NULL THEN a.sent_at ELSE r.sent_at END sent_at,
         CASE WHEN a.id IS NOT NULL THEN rb.account_id ELSE r.provider_account_id END sender_account_id,
         (SELECT dr.delivery_status FROM driver_recovery_receipts dr
-            WHERE dr.attempt_id=a.id ORDER BY dr.id DESC LIMIT 1) delivery_status
+            WHERE dr.attempt_id=a.id AND dr.provider_message_id=a.provider_message_id
+            ORDER BY dr.checked_at DESC,dr.id DESC LIMIT 1) delivery_status
         FROM driver_broadcasts b JOIN shipments s ON s.id=b.shipment_id
         JOIN driver_broadcast_recipients r ON r.broadcast_id=b.id
         LEFT JOIN driver_recovery_batches rb ON rb.broadcast_id=b.id
@@ -128,7 +129,7 @@ def reply_for_driver_test(c, phone, text, quote_id, account, event_id, message,
     # A quoted TEST is context, never permission to manufacture an acceptance.
     if accepts_test_offer(text):
         from app.freight_workflow import accept_driver_reply
-        if accept_driver_reply(phone,text,connection=c):
+        if accept_driver_reply(phone,text,connection=c,event_id=event_id,inbound_message_id=message.get('id')):
             return {'message':DISCLAIMER + '؛ تم تسجيل نجاح رد الاختبار فقط، ولم يتم تعيينك لتنفيذ شحنة.'}
     kinds = sorted({str(a.get('type') or 'attachment')[:40] for a in (message.get('attachments') or []) if isinstance(a,dict)})
     summary = json.dumps({'event_id':event_id,'broadcast_id':item['broadcast_id'],

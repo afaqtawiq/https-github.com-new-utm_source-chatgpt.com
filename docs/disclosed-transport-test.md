@@ -51,3 +51,25 @@ The signed private Zernio receiver checks disclosed-driver TEST context before i
 A price objection, greeting, short agreement, emoji or voice message is never promoted into acceptance. The existing exact disclosed acceptance text, receipt checks and first-wins transaction remain required. A matched non-acceptance reply gets only the TEST/no-cargo/no-movement/no-payment clarification and a shipment TEST reply event, without generic AF intake, real shipment creation, assignment, price negotiation or financial commitment. Completed TESTs retain this non-operational clarification while their context is applicable. Admin commands, unambiguous owner flows and explicitly identified real requests continue through their existing routes. A simultaneous recent TEST and owner negotiation requires a quote/reference rather than guessing from an unquoted reply. Reaction events remain ignored. No media is transcribed or inferred, earlier inbound events are not replayed, no proactive message is added, and existing per-event claims allow at most the one response already belonging to each new inbound event.
 
 The concurrent disclosed-owner inquiry regression also exposed a pre-existing lock-order race in local testing (no production deadlock was observed). Both the initial claim and receipt-finalization transaction now explicitly lock the shipment before its negotiation. This changes only locking order: the message, approval checks, one-send claim, receipts and business state transitions are unchanged.
+
+## Linked readiness and accepted-reply evidence
+
+The freight detail/list, the existing freight API, original-broadcast/recovery reviews, and manager WhatsApp status now derive a read-only current transport view from the original broadcast plus its linked recovery. A completed recovery with a reply-eligible provider receipt reports `awaiting_test_driver_reply` until a genuine acceptance exists; a completed recovery with no eligible attempt reports `recovery_needs_review`. This does not rewrite `freight_negotiations.status`, original send counters, original recipient evidence, or any delivery observations. The API preserves the historical `status` and adds `effective_status` and `transport_evidence`.
+
+The view distinguishes original send outcomes, recovery attempt outcomes, stored delivery observations and driver acceptance. Stored delivery aggregates include the observation time range and are explicitly not a live provider check. No previously observed count is hard-coded. Delivery selection uses the matching attempt **and provider message ID**, ordered by `checked_at DESC, id DESC`, so a delayed older insertion or unrelated receipt cannot override newer evidence. Reconciliation records the start of each observation request and remains append-only. The same selection is used for TEST context and acceptance validation.
+
+Successful driver acceptance now appends exactly one `driver_test_accepted` or `driver_offer_accepted` shipment event inside the locked first-wins transaction. It records the inbound event/message identifiers when supplied by the signed receiver, the source broadcast/recipient, original or recovery provider receipt, account, driver, exact text and TEST marker. Old acceptances are not backfilled or invented. Ordinary replies, delivery/read receipts, administrator messages and ambiguous or failed attempts do not create an acceptance event. TEST acceptance still produces only `test_completed`, no operational assignment or dispatch and zero revenue/cost.
+
+### Remaining external acceptance check (not executed by this change)
+
+After separately approved review/merge/deployment, an already messaged, registered TEST recipient must voluntarily send the exact disclosed acceptance instruction from their own WhatsApp identity, preferably replying to their actual recovery message. Do not impersonate a driver, inject an acceptance into production, replay a historical webhook, resend the campaign or treat delivered/read as consent. If no genuine reply arrives, report the test as waiting.
+
+Verify in the signed webhook and shipment records that:
+
+1. The real inbound event maps to the correct transport account, private conversation, phone and latest eligible provider receipt
+2. The new accepted event references that same event, broadcast, recipient and recovery attempt, with a real acceptance timestamp
+3. Only the first valid acceptance wins; duplicate delivery of that webhook does not add an event or repeat a response
+4. Shipment, negotiation and recovery end at `test_completed`; operational driver fields remain unassigned, revenue/cost remain zero and no booking/dispatch is created
+5. The original recipients/counters and prior delivery observations remain intact
+
+No code in this change enables proactive attachment reading, tracking acceptance, manager/team permissions, automatic external outreach or additional sending. Local regression receipts/identities are synthetic and run only against a disposable localhost PostgreSQL schema with provider calls stubbed and external sockets blocked.

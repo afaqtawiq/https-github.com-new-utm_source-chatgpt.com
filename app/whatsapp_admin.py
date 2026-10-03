@@ -153,7 +153,7 @@ def shipment_status(c, reference):
     """Read only the requested shipment; provider acceptance is not delivery."""
     row = c.execute('''SELECT s.reference,s.origin,s.destination,s.status,s.is_test,
         n.status negotiation_status,n.contact_channel,n.provider_message_id,
-        n.provider_call_id,n.contacted_at,b.status broadcast_status
+        n.provider_call_id,n.contacted_at,b.id broadcast_id,b.status broadcast_status
         FROM shipments s LEFT JOIN freight_negotiations n ON n.shipment_id=s.id
         LEFT JOIN driver_broadcasts b ON b.id=(SELECT MAX(x.id) FROM driver_broadcasts x WHERE x.shipment_id=s.id)
         WHERE s.reference=%s''', (reference,)).fetchone()
@@ -183,6 +183,11 @@ def shipment_status(c, reference):
         'draft': 'عرض السائقين مسودة بانتظار الاعتماد',
         'sending': 'جارٍ إرسال عرض السائقين',
         'awaiting_driver': 'بانتظار قبول سائق',
+        'awaiting_test_driver_reply': 'الاستعادة انتهت؛ بانتظار رد اختبار من سائق',
+        'recovery_prepared': 'الاستعادة مجهزة وبانتظار اعتماد الإدارة',
+        'recovery_sending': 'جارٍ إرسال الاستعادة المعتمدة',
+        'recovery_needs_review': 'الاستعادة انتهت دون إيصال مؤهل للقبول؛ راجع السجل',
+        'recovery_stopped': 'توقفت الاستعادة؛ راجع سجل المحاولات',
         'completed_with_errors': 'إرسال عرض السائقين انتهى بأخطاء؛ يحتاج مراجعة',
         'driver_accepted': 'تم قبول سائق وربطه بالشحنة',
         'driver_assigned': 'تم تعيين سائق',
@@ -191,9 +196,10 @@ def shipment_status(c, reference):
     }
     # Dispatch progresses independently of negotiation. Later shipment stages
     # (including delivered/closed) must not regress to the old negotiation stage.
-    stage = row['broadcast_status'] or row['negotiation_status']
-    if row['status'] and row['status'] not in {'new', 'carrier_offer', 'test_pending'}:
-        stage = row['status']
+    from app.transport_status import snapshot, evidence_lines, current_status
+    broadcast = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s', (row['broadcast_id'],)).fetchone() if row.get('broadcast_id') else None
+    evidence = snapshot(c,broadcast)
+    stage = current_status(row['status'],row['negotiation_status'],evidence)
     lines = [heading, f"الحالة التشغيلية: {labels.get(stage, stage)} ({stage})"]
     if row['provider_message_id']:
         lines.append('تواصل صاحب الشحنة: قبل مزود واتساب طلب الإرسال وله معرف مسجل.')
@@ -204,6 +210,7 @@ def shipment_status(c, reference):
         lines.append('تواصل صاحب الشحنة: لا يوجد معرف قبول مسجل من المزود.')
     if (row['provider_message_id'] or row['provider_call_id']) and row['contacted_at']:
         lines.append('وقت قبول طلب التواصل: ' + str(row['contacted_at']))
+    lines.extend(evidence_lines(evidence))
     return '\n'.join(lines)
 
 
