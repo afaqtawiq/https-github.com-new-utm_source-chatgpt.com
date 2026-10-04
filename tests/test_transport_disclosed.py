@@ -84,7 +84,7 @@ def test_short_owner_inquiry_has_only_approved_questions_and_no_reference():
     assert owner_inquiry({'is_test':True,'reference':'NQ-29','origin':'جدة','destination':'الشارقة'}) == DISCLAIMER + '\n' + body
 
 
-def test_real_owner_inquiry_preserves_existing_v2_body_and_all_required_questions():
+def test_real_owner_branding_changes_only_greeting_under_new_v4_identity():
     from app.transport_owner import inquiry
     from app.zernio_whatsapp import required_templates
     # Frozen pre-existing v2 payload: adding requirements must not mutate a
@@ -102,8 +102,13 @@ def test_real_owner_inquiry_preserves_existing_v2_body_and_all_required_question
     template = next(t for t in required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
     assert template['components'][0]['text'] == template_body
     body = inquiry('جدة', 'دبي')
-    assert body == template_body.replace('{{1}}', 'جدة').replace('{{2}}', 'دبي')
-    assert template_parameters(template, body) == ['جدة', 'دبي']
+    expected = template_body.replace('{{1}}', 'جدة').replace('{{2}}', 'دبي').replace(
+        'السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.',
+        'السلام عليكم، معك آفاق طويق للتخليص الجمركي والنقل.', 1)
+    assert body == expected
+    assert template_parameters(template, body) is None
+    current = next(t for t in required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v4_ar')
+    assert template_parameters(current, body) == ['جدة', 'دبي']
     assert 'NQ-' not in body and DISCLAIMER not in body
 
 

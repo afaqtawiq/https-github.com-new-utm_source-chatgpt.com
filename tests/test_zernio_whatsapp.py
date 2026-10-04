@@ -1,6 +1,9 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+import sys
+from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -149,12 +152,12 @@ def test_legacy_owner_template_still_exact_matches(provider):
     assert provider['posts'][0]['templateParams'] == ['رابغ','دبي']
 
 
-def test_real_owner_inquiry_uses_existing_v2_with_route_only_parameters(provider):
+def test_real_owner_inquiry_uses_new_v4_with_route_only_parameters(provider):
     from app.transport_owner import inquiry
     provider['templates'] = [{**t, 'status': 'APPROVED'} for t in z.required_templates()]
     asyncio.run(z.send('+966500000001', inquiry('جدة', 'دبي')))
     assert provider['posts'] == [{'accountId': 'account-test', 'participantId': '966500000001',
-        'templateName': 'afaaq_transport_owner_inquiry_v2_ar', 'templateLanguage': 'ar',
+        'templateName': 'afaaq_transport_owner_inquiry_v4_ar', 'templateLanguage': 'ar',
         'templateParams': ['جدة', 'دبي']}]
 
 
@@ -163,9 +166,9 @@ def test_real_owner_inquiry_never_substitutes_incomplete_or_unapproved_template(
     from app.transport_owner import inquiry
     specs = z.required_templates()
     provider['templates'] = [{**t, 'status': 'APPROVED'} for t in specs
-                             if t['name'] != 'afaaq_transport_owner_inquiry_v2_ar']
+                             if t['name'] != 'afaaq_transport_owner_inquiry_v4_ar']
     if problem != 'missing':
-        template = next(t for t in specs if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+        template = next(t for t in specs if t['name'] == 'afaaq_transport_owner_inquiry_v4_ar')
         template = {**template, 'status': 'PENDING' if problem == 'pending' else 'APPROVED'}
         if problem == 'body_changed':
             template['components'][0]['text'] = template['components'][0]['text'].replace('ووزنها الفعلي ', '')
@@ -175,12 +178,12 @@ def test_real_owner_inquiry_never_substitutes_incomplete_or_unapproved_template(
     assert not provider['posts']  # No send, automatic registration, or fallback.
 
 
-@pytest.mark.parametrize('problem', ['widened_v2', 'generic_alternative', 'extra_component', 'changed_fixed_whitespace'])
-def test_real_owner_template_requires_literal_v2_schema(provider, problem):
+@pytest.mark.parametrize('problem', ['widened_v4', 'generic_alternative', 'extra_component', 'changed_fixed_whitespace'])
+def test_real_owner_template_requires_literal_v4_schema(provider, problem):
     from app.transport_owner import inquiry
-    template = next(t for t in z.required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+    template = next(t for t in z.required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v4_ar')
     template['status'] = 'APPROVED'
-    if problem == 'widened_v2':
+    if problem == 'widened_v4':
         template['components'] = [{'type': 'BODY', 'text': 'السلام عليكم، {{1}}'}]
     elif problem == 'generic_alternative':
         template['name'] = 'afaaq_transport_generic_ar'
@@ -206,6 +209,62 @@ def test_recent_recipient_window_preserves_complete_real_owner_inquiry(provider)
     message = inquiry('جدة', 'دبي')
     asyncio.run(z.send('+966500000001', message))
     assert provider['posts'] == [{'accountId': 'account-test', 'message': message}]
+
+
+def template_request(fields):
+    async def body(): return urlencode(fields, doseq=True).encode()
+    return SimpleNamespace(body=body, cookies={'gla_session': 'local-test'})
+
+
+def test_scoped_owner_template_registration_creates_only_v4(provider, monkeypatch):
+    monkeypatch.setattr(z, 'session', lambda _: {'csrf': 'safe-csrf'})
+    response = asyncio.run(z.provision_templates(template_request({
+        'csrf': 'safe-csrf', 'template_name': 'afaaq_transport_owner_inquiry_v4_ar'})))
+    assert response.status_code == 303
+    expected = next(t for t in z.required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v4_ar')
+    assert provider['posts'] == [{'accountId': 'account-test', **expected}]
+    assert 'معك آفاق طويق للتخليص الجمركي والنقل.' in expected['components'][0]['text']
+
+
+@pytest.mark.parametrize('selector', ['', 'unknown', 'afaaq_transport_owner_inquiry_v2_ar',
+    ['afaaq_transport_owner_inquiry_v4_ar', 'afaaq_transport_owner_inquiry_v4_ar']])
+def test_invalid_template_selector_never_falls_back_to_bulk(provider, monkeypatch, selector):
+    monkeypatch.setattr(z, 'session', lambda _: {'csrf': 'safe-csrf'})
+    with pytest.raises(z.HTTPException) as error:
+        asyncio.run(z.provision_templates(template_request({'csrf': 'safe-csrf', 'template_name': selector})))
+    assert error.value.status_code == 400
+    assert not provider['gets'] and not provider['posts']
+
+
+@pytest.mark.parametrize('role,csrf,expected', [('transport', 'safe-csrf', 403),
+    ('admin', 'wrong-csrf', 403), (None, 'safe-csrf', 401)])
+def test_scoped_registration_retains_admin_and_csrf_gates(provider, monkeypatch, role, csrf, expected):
+    current = {'role': role, 'csrf': 'safe-csrf'} if role else None
+    monkeypatch.setitem(sys.modules, 'app.storage', SimpleNamespace(get_session=lambda _: current))
+    with pytest.raises(z.HTTPException) as error:
+        asyncio.run(z.provision_templates(template_request({
+            'csrf': csrf, 'template_name': 'afaaq_transport_owner_inquiry_v4_ar'})))
+    assert error.value.status_code == expected
+    assert not provider['gets'] and not provider['posts']
+
+
+def test_existing_owner_v4_is_not_modified_or_registered_twice(provider, monkeypatch):
+    monkeypatch.setattr(z, 'session', lambda _: {'csrf': 'safe-csrf'})
+    provider['templates'] = [{'name': 'afaaq_transport_owner_inquiry_v4_ar', 'language': 'ar',
+                              'status': 'PENDING', 'components': [{'type': 'BODY', 'text': 'provider body'}]}]
+    asyncio.run(z.provision_templates(template_request({
+        'csrf': 'safe-csrf', 'template_name': 'afaaq_transport_owner_inquiry_v4_ar'})))
+    assert not provider['posts']
+
+
+def test_channel_page_has_explicit_v4_only_submission_control(provider, monkeypatch):
+    monkeypatch.setattr(z, 'session', lambda _: {'csrf': 'safe-csrf'})
+    monkeypatch.setitem(sys.modules, 'app.freight_workflow', SimpleNamespace(_page=lambda title, body: body))
+    page = asyncio.run(z.channel_page(SimpleNamespace())).body.decode()
+    assert 'name=template_name value="afaaq_transport_owner_inquiry_v4_ar"' in page
+    assert 'تجهيز قالب التخليص الجمركي والنقل فقط (v4)' in page
+    assert 'معك آفاق طويق للتخليص الجمركي والنقل.' in page
+    assert not provider['posts']
 
 
 @pytest.mark.parametrize('status', [401, 403, 400, 404])

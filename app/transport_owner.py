@@ -1,13 +1,18 @@
 """Owner inquiry wording and deterministic, reference-free reply correlation."""
 import re
 
+OWNER_INQUIRY_TEMPLATE = 'afaaq_transport_owner_inquiry_v4_ar'
+
 
 def inquiry(origin, destination):
-    """Real-owner preview and send body for the existing owner v2 template.
+    """Current real-owner body; changed branding needs its own approved v4."""
+    return legacy_v2_inquiry(origin, destination).replace(
+        'السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.',
+        'السلام عليكم، معك آفاق طويق للتخليص الجمركي والنقل.', 1)
 
-    Keep fixed wording identical to its registered payload. Runtime still
-    verifies the provider's current APPROVED body before a first-contact send.
-    """
+
+def legacy_v2_inquiry(origin, destination):
+    """Preserve the existing v2 registration payload without changing its body."""
     return ('السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n\n'
             f'بخصوص الحمولة من {origin} إلى {destination}، هل ما زالت متاحة؟\n\n'
             'نرجو توضيح:\n'
