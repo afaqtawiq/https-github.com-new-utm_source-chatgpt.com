@@ -124,12 +124,12 @@ def test_missing_receipt_is_uncertain(provider):
 
 @pytest.mark.parametrize('test_mode', [False, True])
 def test_short_owner_inquiry_requires_matching_new_approved_template(provider, test_mode):
-    from app.transport_owner import inquiry
+    from app.transport_owner import short_inquiry
     from app.transport_test import DISCLAIMER
     name = 'afaaq_transport_test_owner_inquiry_v1_ar' if test_mode else 'afaaq_transport_owner_inquiry_v3_ar'
     specs = z.required_templates()
     template = next(t for t in specs if t['name'] == name)
-    message = (DISCLAIMER + '\n' if test_mode else '') + inquiry('جدة', 'الشارقة')
+    message = (DISCLAIMER + '\n' if test_mode else '') + short_inquiry('جدة', 'الشارقة')
     legacy = next(t for t in specs if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
     provider['templates'] = [{**legacy,'status':'APPROVED'}, {**template,'status':'PENDING'}]
     with pytest.raises(z.WhatsAppBlocked): asyncio.run(z.send('+966500000001', message))
@@ -147,6 +147,65 @@ def test_legacy_owner_template_still_exact_matches(provider):
     asyncio.run(z.send('+966500000001', message))
     assert provider['posts'][0]['templateName'] == legacy['name']
     assert provider['posts'][0]['templateParams'] == ['رابغ','دبي']
+
+
+def test_real_owner_inquiry_uses_existing_v2_with_route_only_parameters(provider):
+    from app.transport_owner import inquiry
+    provider['templates'] = [{**t, 'status': 'APPROVED'} for t in z.required_templates()]
+    asyncio.run(z.send('+966500000001', inquiry('جدة', 'دبي')))
+    assert provider['posts'] == [{'accountId': 'account-test', 'participantId': '966500000001',
+        'templateName': 'afaaq_transport_owner_inquiry_v2_ar', 'templateLanguage': 'ar',
+        'templateParams': ['جدة', 'دبي']}]
+
+
+@pytest.mark.parametrize('problem', ['missing', 'pending', 'body_changed'])
+def test_real_owner_inquiry_never_substitutes_incomplete_or_unapproved_template(provider, problem):
+    from app.transport_owner import inquiry
+    specs = z.required_templates()
+    provider['templates'] = [{**t, 'status': 'APPROVED'} for t in specs
+                             if t['name'] != 'afaaq_transport_owner_inquiry_v2_ar']
+    if problem != 'missing':
+        template = next(t for t in specs if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+        template = {**template, 'status': 'PENDING' if problem == 'pending' else 'APPROVED'}
+        if problem == 'body_changed':
+            template['components'][0]['text'] = template['components'][0]['text'].replace('ووزنها الفعلي ', '')
+        provider['templates'].append(template)
+    with pytest.raises(z.WhatsAppBlocked):
+        asyncio.run(z.send('+966500000001', inquiry('جدة', 'دبي')))
+    assert not provider['posts']  # No send, automatic registration, or fallback.
+
+
+@pytest.mark.parametrize('problem', ['widened_v2', 'generic_alternative', 'extra_component', 'changed_fixed_whitespace'])
+def test_real_owner_template_requires_literal_v2_schema(provider, problem):
+    from app.transport_owner import inquiry
+    template = next(t for t in z.required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+    template['status'] = 'APPROVED'
+    if problem == 'widened_v2':
+        template['components'] = [{'type': 'BODY', 'text': 'السلام عليكم، {{1}}'}]
+    elif problem == 'generic_alternative':
+        template['name'] = 'afaaq_transport_generic_ar'
+        template['components'] = [{'type': 'BODY', 'text': '{{1}}'}]
+    elif problem == 'extra_component':
+        template['components'].append({'type': 'FOOTER', 'text': ''})
+    else:
+        template['components'][0]['text'] = ' '.join(template['components'][0]['text'].split())
+    # The old fuzzy matcher accepted all four and would submit a changed schema.
+    assert z.template_parameters(template, inquiry('رابغ', 'دبي')) is not None
+    provider['templates'] = [template]
+    with pytest.raises(z.WhatsAppBlocked):
+        asyncio.run(z.send('+966500000001', inquiry('رابغ', 'دبي')))
+    assert not provider['posts']
+
+
+def test_recent_recipient_window_preserves_complete_real_owner_inquiry(provider):
+    from app.transport_owner import inquiry
+    provider['conversations'] = [{'id': 'c1', 'accountId': 'account-test', 'platform': 'whatsapp',
+                                  'participantId': '966500000001'}]
+    provider['messages'] = [{'direction': 'incoming', 'senderId': '966500000001',
+                             'createdAt': datetime.now(timezone.utc).isoformat()}]
+    message = inquiry('جدة', 'دبي')
+    asyncio.run(z.send('+966500000001', message))
+    assert provider['posts'] == [{'accountId': 'account-test', 'message': message}]
 
 
 @pytest.mark.parametrize('status', [401, 403, 400, 404])

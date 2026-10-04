@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from app.bootstrap import app
 from app.storage import execute,one,rows,get_session,utcnow,db
 from app import customer_marketing as m
-from app import spacemail
+from app import spacemail, campaign_cadence
 from app.marketing_content import EMAIL,WEBSITE,PHONE
 from app.zernio_whatsapp import WhatsAppBlocked,template_parameters
 
@@ -105,28 +105,30 @@ async def daily_wa(recipient,*args,**kwargs):
     daily_calls.append(('whatsapp',recipient));return {'messages':[{'id':'daily-wa-'+str(len(daily_calls))}]}
 async def ready(*args):return True
 date1=datetime(2070,1,2,9,0,tzinfo=ZoneInfo('Asia/Riyadh'))
-with patch('app.bootstrap.mfa_state',return_value={'mfa_enabled':1}),patch('app.bootstrap.recent_stepup',return_value=True),patch('app.mfa_stepup.mfa_state',return_value={'mfa_enabled':1}),patch.object(m,'mailbox_connection',return_value={'status':'connected'}),patch.object(m,'official_send',daily_email),patch.object(m.wa,'send',daily_wa),patch.object(m,'approved_template',ready):
+clock=[date1]
+with patch.object(m,'utcnow',side_effect=lambda:clock[0]),patch.object(campaign_cadence,'utcnow',side_effect=lambda:clock[0]),patch('app.bootstrap.mfa_state',return_value={'mfa_enabled':1}),patch('app.bootstrap.recent_stepup',return_value=True),patch('app.mfa_stepup.mfa_state',return_value={'mfa_enabled':1}),patch.object(m,'mailbox_connection',return_value={'status':'connected'}),patch.object(m,'official_send',daily_email),patch.object(m.wa,'send',daily_wa),patch.object(m,'approved_template',ready):
     assert client.post(schedule_path,data={'csrf':csrf,'enabled':'1'}).status_code==400
     assert client.post(schedule_path,data={'csrf':csrf,'enabled':'1','confirmed':'yes'}).status_code==200
     asyncio.run(m.daily_tick(date1.replace(hour=8)))
     assert not daily_calls
     async def parallel_tick():await asyncio.gather(m.daily_tick(date1),m.daily_tick(date1))
     asyncio.run(parallel_tick())
-    assert len(daily_calls)==3,daily_calls  # 2 emails, 1 WhatsApp; opt-out excluded.
+    assert len(daily_calls)==2,daily_calls  # Two email follow-ups; opted-out and uncertain WhatsApp excluded.
     asyncio.run(m.daily_tick(date1.replace(hour=12)))
-    assert len(daily_calls)==3
+    assert len(daily_calls)==2
     execute('INSERT INTO accounts(name,email,phone,status,created_at,updated_at) VALUES(?,?,?,?,?,?)',('New daily company','new@example.com','','lead',utcnow(),utcnow()))
-    asyncio.run(m.daily_tick(date1.replace(day=3)))
-    assert len(daily_calls)==7  # the newly registered company joins the next day.
+    clock[0]=date1.replace(day=3)
+    asyncio.run(m.daily_tick(clock[0]))
+    assert len(daily_calls)==3  # the newly registered company joins the next day.
     assert len(rows('SELECT id FROM customer_campaigns WHERE campaign_key LIKE ?',('%2070-01-%',)))==2
     assert client.post(schedule_path,data={'csrf':csrf,'enabled':'0'}).status_code==200
     asyncio.run(m.daily_tick(date1.replace(day=4)))
-    assert len(daily_calls)==7
+    assert len(daily_calls)==3
     assert client.post(schedule_path,data={'csrf':csrf,'enabled':'1','confirmed':'yes'}).status_code==200
     with patch.object(m,'content_digest',return_value='changed-artwork'):
         asyncio.run(m.daily_tick(date1.replace(day=4)))
     assert not one('SELECT enabled FROM customer_campaign_schedule WHERE id=1')['enabled']
-    assert len(daily_calls)==7
+    assert len(daily_calls)==3
 from app.mail_delivery import MailRecipientRejected, MailConnectionFailed
 import smtplib
 from email.utils import format_datetime
@@ -138,6 +140,8 @@ with patch.object(spacemail,'password',return_value='fixture'),patch.object(spac
     try:spacemail.send(session['user_id'],'fixture@example.com','Subject','Plain')
     except MailRecipientRejected as exc:assert exc.permanent and 'private' not in str(exc)
     else:raise AssertionError('recipient rejection must be classified')
+for i in range(3):
+    execute('INSERT INTO accounts(name,email,status,created_at,updated_at) VALUES(?,?,?,?,?)',(f'Repair fixture {i}',f'repair-{i}@example.com','lead',utcnow(),utcnow()))
 repair_cid=m.prepare(session['user_id'],date1.replace(day=5).date())
 execute("UPDATE customer_campaign_channels SET status='sending' WHERE campaign_id=? AND channel='email'",(repair_cid,))
 repair_calls=[]
@@ -160,6 +164,6 @@ m.reconcile_bounces(session['user_id']);m.reconcile_bounces(session['user_id'])
 assert one("SELECT status FROM customer_campaign_recipients WHERE campaign_id=? AND recipient=?",(repair_cid,notice_recipient))['status']=='bounced'
 assert one("SELECT COUNT(*) n FROM marketing_suppressions WHERE channel='email' AND recipient=?",(notice_recipient,))['n']==1
 print('PASS: recipient refusal continues batch; pre-send failures classified; bounces reconciled and permanently failed addresses suppressed without resending.')
-print('PASS: daily Riyadh schedule, MFA approval, same-day non-duplication, parallel workers, next-day roster refresh, stop control, approved artwork fingerprint.')
+print('PASS: daily Riyadh schedule, MFA approval, same-day non-duplication, parallel workers, next-day new recipients only, bounded follow-up, stop control, approved artwork fingerprint.')
 print('PASS: customer roster deduplication, public PDF, immutable approval, MFA, HTML+PDF MIME, template gate, unsubscribe, receipts, uncertain-send non-retry.')
 with psycopg.connect(url,autocommit=True) as conn:conn.execute('DROP SCHEMA '+schema+' CASCADE')

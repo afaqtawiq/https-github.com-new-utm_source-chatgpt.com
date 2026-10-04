@@ -180,6 +180,37 @@ def test_disabled_external_actions_preserve_draft(modules):
     assert database.one('SELECT status FROM freight_negotiations')['status'] == 'contact_blocked'
 
 
+def test_real_owner_preview_manual_link_and_outbound_share_complete_v2_body(modules, monkeypatch):
+    from html import unescape
+    from app.transport_owner import inquiry
+    from app.zernio_whatsapp import required_templates, template_parameters
+    _, freight, database = modules
+    database.execute("UPDATE shipments SET origin='جدة',destination='دبي'")
+    monkeypatch.setattr(freight, 'session', lambda _: {'user_id': 1, 'role': 'admin', 'csrf': 'safe-csrf'})
+    message = inquiry('جدة', 'دبي')
+    before = database.one('SELECT * FROM freight_negotiations')
+    preview = freight.workflow_detail(1, types.SimpleNamespace()).body.decode()
+    assert message in unescape(preview)
+    link = unescape(re.search(r"href='(https://wa.me/[^']+)'", preview).group(1))
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)['text'] == [message]
+    assert database.one('SELECT * FROM freight_negotiations') == before
+    calls = []
+    async def send(recipient, body):
+        calls.append((recipient, body))
+        return {'messages': [{'id': 'local-owner-receipt'}]}
+    monkeypatch.setattr(freight, 'send_text_message', send)
+    monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
+    monkeypatch.setenv('FREIGHT_OWNER_CONTACT_CHANNEL', 'whatsapp')
+    asyncio.run(freight.contact_owner(1, approved=True))
+    asyncio.run(freight.contact_owner(1, approved=True))
+    assert calls == [('+966500000001', message)]
+    template = next(t for t in required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+    assert template_parameters(template, calls[0][1]) == ['جدة', 'دبي']
+    sent_preview = freight.workflow_detail(1, types.SimpleNamespace()).body.decode()
+    assert 'سبق إرسال الاستفسار؛ لم يُعد إرساله أو تغيير الرسالة السابقة.' in sent_preview
+    assert database.one('SELECT status FROM freight_negotiations')['status'] == 'awaiting_owner'
+
+
 def test_contact_idempotency_and_unknown_outcome(modules, monkeypatch):
     _, freight, database = modules
     monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')

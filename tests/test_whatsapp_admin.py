@@ -83,6 +83,8 @@ class Connection:
 
 @pytest.fixture
 def db(monkeypatch):
+    # Brochure persistence is covered with real PostgreSQL in its own acceptance suite.
+    monkeypatch.setitem(sys.modules, 'app.campaign_cadence', types.SimpleNamespace(record_whatsapp_reply=lambda *args: None))
     c = Connection()
     @contextmanager
     def context():

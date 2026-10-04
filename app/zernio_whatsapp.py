@@ -290,17 +290,17 @@ async def templates(c):
 
 
 def required_templates():
-    from app.transport_owner import inquiry
+    from app.transport_owner import inquiry, short_inquiry
     from app.transport_test import DISCLAIMER
     return [
         {'name': 'afaaq_transport_owner_inquiry_v3_ar', 'language': 'ar', 'category': 'MARKETING',
-         'components': [{'type': 'body', 'text': inquiry('{{1}}', '{{2}}'),
+         'components': [{'type': 'body', 'text': short_inquiry('{{1}}', '{{2}}'),
                          'example': {'body_text': [['جدة', 'الشارقة']]}}]},
         {'name': 'afaaq_transport_test_owner_inquiry_v1_ar', 'language': 'ar', 'category': 'MARKETING',
-         'components': [{'type': 'body', 'text': DISCLAIMER + '\n' + inquiry('{{1}}', '{{2}}'),
+         'components': [{'type': 'body', 'text': DISCLAIMER + '\n' + short_inquiry('{{1}}', '{{2}}'),
                          'example': {'body_text': [['جدة', 'الشارقة']]}}]},
         {'name': 'afaaq_transport_owner_inquiry_v2_ar', 'language': 'ar', 'category': 'MARKETING',
-         'components': [{'type': 'body', 'text': 'السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n\nبخصوص الحمولة من {{1}} إلى {{2}}، هل ما زالت متاحة؟\n\nنرجو توضيح:\n• موقع التحميل في {{1}}: هل داخل الميناء أم خارجه؟\n• موقع التنزيل في {{2}}.\n• نوع البضاعة ووزنها الفعلي ونوع الشاحنة المطلوبة.\n• موعد التحميل.\n• السعر المعروض للنقل وطريقة وموعد الدفع.\n\nللتواصل مع آفاق طويق عبر واتساب فقط:\n+966530130435',
+         'components': [{'type': 'body', 'text': inquiry('{{1}}', '{{2}}'),
                          'example': {'body_text': [['رابغ', 'دبي']]}}]},
         {'name': 'afaaq_transport_driver_offer_v1_ar', 'language': 'ar', 'category': 'MARKETING',
          'components': [{'type': 'body', 'text': 'عرض حمولة من آفاق طويق — {{1}}\nالمسار: {{2}} → {{3}}\nالوزن: {{4}} طن\nسعر السائق: {{5}} ريال\nالتنزيل: {{6}}\nالدفع: {{7}}\nللرغبة اكتب: موافق {{1}}\nشكرًا لتعاونك.',
@@ -384,10 +384,25 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_'):
         else:
             options = await templates(c)
             selected = None
+            # A real-owner inquiry must use the preserved v2 schema. A broad
+            # approved placeholder must never swallow its fixed questions/footer.
+            from app.transport_owner import inquiry
+            owner_body = inquiry('{{1}}', '{{2}}')
+            owner_spec = {'components': [{'type': 'BODY', 'text': owner_body}]}
+            owner_params = template_parameters(owner_spec, message) if template_prefix == 'afaaq_transport_' else None
             for template in options:
                 if not template.get('name', '').startswith(template_prefix) or template.get('language') != 'ar':
                     continue
-                params = template_parameters(template, message)
+                if owner_params is not None:
+                    components = template.get('components') or []
+                    if (template.get('name') != 'afaaq_transport_owner_inquiry_v2_ar'
+                            or len(components) != 1
+                            or components[0].get('type', '').upper() != 'BODY'
+                            or components[0].get('text') != owner_body):
+                        continue
+                    params = owner_params
+                else:
+                    params = template_parameters(template, message)
                 if params is not None and template.get('status') == 'APPROVED':
                     selected = (template, params)
                     break

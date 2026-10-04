@@ -51,8 +51,8 @@ def test_broadcast_context(campaign, *, approved=False):
 def owner_inquiry(item):
     if not item.get('is_test'):
         raise HTTPException(409, 'هذا الإجراء مخصص لسجل اختبار معلن فقط')
-    from app.transport_owner import inquiry
-    return DISCLAIMER + '\n' + inquiry(item['origin'], item['destination'])
+    from app.transport_owner import short_inquiry
+    return DISCLAIMER + '\n' + short_inquiry(item['origin'], item['destination'])
 
 
 def owner_inquiry_digest(item):
