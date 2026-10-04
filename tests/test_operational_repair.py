@@ -180,7 +180,7 @@ def test_disabled_external_actions_preserve_draft(modules):
     assert database.one('SELECT status FROM freight_negotiations')['status'] == 'contact_blocked'
 
 
-def test_real_owner_preview_manual_link_and_outbound_share_complete_v2_body(modules, monkeypatch):
+def test_real_owner_preview_manual_link_and_outbound_share_complete_v4_body(modules, monkeypatch):
     from html import unescape
     from app.transport_owner import inquiry
     from app.zernio_whatsapp import required_templates, template_parameters
@@ -204,7 +204,7 @@ def test_real_owner_preview_manual_link_and_outbound_share_complete_v2_body(modu
     asyncio.run(freight.contact_owner(1, approved=True))
     asyncio.run(freight.contact_owner(1, approved=True))
     assert calls == [('+966500000001', message)]
-    template = next(t for t in required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+    template = next(t for t in required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v4_ar')
     assert template_parameters(template, calls[0][1]) == ['جدة', 'دبي']
     sent_preview = freight.workflow_detail(1, types.SimpleNamespace()).body.decode()
     assert 'سبق إرسال الاستفسار؛ لم يُعد إرساله أو تغيير الرسالة السابقة.' in sent_preview

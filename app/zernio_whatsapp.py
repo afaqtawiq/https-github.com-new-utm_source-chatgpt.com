@@ -290,9 +290,12 @@ async def templates(c):
 
 
 def required_templates():
-    from app.transport_owner import inquiry, short_inquiry
+    from app.transport_owner import OWNER_INQUIRY_TEMPLATE, inquiry, legacy_v2_inquiry, short_inquiry
     from app.transport_test import DISCLAIMER
     return [
+        {'name': OWNER_INQUIRY_TEMPLATE, 'language': 'ar', 'category': 'MARKETING',
+         'components': [{'type': 'body', 'text': inquiry('{{1}}', '{{2}}'),
+                         'example': {'body_text': [['جدة', 'دبي']]}}]},
         {'name': 'afaaq_transport_owner_inquiry_v3_ar', 'language': 'ar', 'category': 'MARKETING',
          'components': [{'type': 'body', 'text': short_inquiry('{{1}}', '{{2}}'),
                          'example': {'body_text': [['جدة', 'الشارقة']]}}]},
@@ -300,7 +303,7 @@ def required_templates():
          'components': [{'type': 'body', 'text': DISCLAIMER + '\n' + short_inquiry('{{1}}', '{{2}}'),
                          'example': {'body_text': [['جدة', 'الشارقة']]}}]},
         {'name': 'afaaq_transport_owner_inquiry_v2_ar', 'language': 'ar', 'category': 'MARKETING',
-         'components': [{'type': 'body', 'text': inquiry('{{1}}', '{{2}}'),
+         'components': [{'type': 'body', 'text': legacy_v2_inquiry('{{1}}', '{{2}}'),
                          'example': {'body_text': [['رابغ', 'دبي']]}}]},
         {'name': 'afaaq_transport_driver_offer_v1_ar', 'language': 'ar', 'category': 'MARKETING',
          'components': [{'type': 'body', 'text': 'عرض حمولة من آفاق طويق — {{1}}\nالمسار: {{2}} → {{3}}\nالوزن: {{4}} طن\nسعر السائق: {{5}} ريال\nالتنزيل: {{6}}\nالدفع: {{7}}\nللرغبة اكتب: موافق {{1}}\nشكرًا لتعاونك.',
@@ -384,9 +387,9 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_'):
         else:
             options = await templates(c)
             selected = None
-            # A real-owner inquiry must use the preserved v2 schema. A broad
+            # A real-owner inquiry must use the current v4 schema. A broad
             # approved placeholder must never swallow its fixed questions/footer.
-            from app.transport_owner import inquiry
+            from app.transport_owner import OWNER_INQUIRY_TEMPLATE, inquiry
             owner_body = inquiry('{{1}}', '{{2}}')
             owner_spec = {'components': [{'type': 'BODY', 'text': owner_body}]}
             owner_params = template_parameters(owner_spec, message) if template_prefix == 'afaaq_transport_' else None
@@ -395,7 +398,7 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_'):
                     continue
                 if owner_params is not None:
                     components = template.get('components') or []
-                    if (template.get('name') != 'afaaq_transport_owner_inquiry_v2_ar'
+                    if (template.get('name') != OWNER_INQUIRY_TEMPLATE
                             or len(components) != 1
                             or components[0].get('type', '').upper() != 'BODY'
                             or components[0].get('text') != owner_body):
@@ -460,6 +463,7 @@ def session(request):
 
 @router.get('/settings/whatsapp/channel', response_class=HTMLResponse)
 async def channel_page(request: Request):
+    from app.transport_owner import OWNER_INQUIRY_TEMPLATE
     s = session(request)
     error, listing = '', []
     try:
@@ -476,6 +480,8 @@ async def channel_page(request: Request):
     <p>{escape(error or 'تم التحقق من حساب Zernio وقراءة حالة القوالب.')}</p>
     <p>الإرسال الحر متاح عند وجود رسالة حديثة من المستلم. بدء التواصل يحتاج قالبًا مطابقًا ومعتمدًا. قبول الإرسال لا يعني التسليم.</p>
     <table><tr><th>القالب</th><th>حالة Meta</th></tr>{lines}</table>
+    <p>تعريف صاحب الحمولة الجديد: معك آفاق طويق للتخليص الجمركي والنقل. يلزم اعتماد Meta للقالب {OWNER_INQUIRY_TEMPLATE} قبل بدء التواصل بهذه الصيغة.</p>
+    <form method=post action=/settings/whatsapp/channel/templates><input type=hidden name=csrf value="{escape(s['csrf'])}"><input type=hidden name=template_name value="{OWNER_INQUIRY_TEMPLATE}"><button>تجهيز قالب التخليص الجمركي والنقل فقط (v4)</button></form>
     <form method=post action=/settings/whatsapp/channel/templates><input type=hidden name=csrf value="{escape(s['csrf'])}"><button>تجهيز قوالب أصحاب الحمولات والسائقين الناقصة</button></form>
     <p>هذا الإجراء يرفع القوالب للمراجعة فقط، ولا يرسل رسائل للعملاء أو السائقين.</p>
     <p><a href=/freight-workflow>الشحنات</a> · <a href=/readiness>جاهزية التشغيل</a></p></div>'''))
@@ -483,13 +489,21 @@ async def channel_page(request: Request):
 
 @router.post('/settings/whatsapp/channel/templates')
 async def provision_templates(request: Request):
+    from app.transport_owner import OWNER_INQUIRY_TEMPLATE
     s = session(request)
-    form = parse_qs((await request.body()).decode())
+    form = parse_qs((await request.body()).decode(), keep_blank_values=True)
     if form.get('csrf', [''])[0] != s['csrf']: raise HTTPException(403)
+    required = required_templates()
+    if 'template_name' in form:
+        # A malformed or unexpected selector must never fall back to bulk
+        # registration. The new scoped control may create only current v4.
+        if form['template_name'] != [OWNER_INQUIRY_TEMPLATE]:
+            raise HTTPException(400, 'اختيار قالب الاستفسار غير صالح؛ لم يتم تجهيز أي قالب')
+        required = [t for t in required if t['name'] == OWNER_INQUIRY_TEMPLATE]
     async with client() as c:
         await validate_account(c)
         listing = await templates(c)
-        for template in required_templates():
+        for template in required:
             if any(t.get('name') == template['name'] and t.get('language') == 'ar' for t in listing):
                 continue
             response = await c.post(BASE + '/whatsapp/templates', json={'accountId': account_id(), **template})

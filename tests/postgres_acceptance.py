@@ -27,7 +27,7 @@ from app.zernio_whatsapp import required_templates, template_parameters
 from app.freight_workflow import _owner_message
 specs = required_templates()
 assert all(c['type'] == 'body' for t in specs for c in t['components'])  # Zernio create schema is lowercase
-owner_template = next(t for t in specs if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+owner_template = next(t for t in specs if t['name'] == 'afaaq_transport_owner_inquiry_v4_ar')
 assert template_parameters(owner_template, _owner_message({'origin':'رابغ','destination':'دبي'})) == ['رابغ','دبي']
 
 
