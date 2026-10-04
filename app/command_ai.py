@@ -63,11 +63,16 @@ only for a clear current request to perform that action, with fields explicitly 
 Never invent a recipient, message, shipment reference, or permission."""
 
 
+def _staff_context():
+    from app.staff_intake import context_for_model
+    return context_for_model()
+
+
 def ask_claude(actions, text):
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None
-    body = {'model': MODEL, 'max_tokens': 600, 'thinking': {'type': 'disabled'}, 'system': SYSTEM + '\n\n' + actions,
+    body = {'model': MODEL, 'max_tokens': 600, 'thinking': {'type': 'disabled'}, 'system': SYSTEM + '\n\n' + actions + _staff_context(),
             'messages': [{'role': 'user', 'content': text[:1500]}]}
     try:
         with httpx.Client(timeout=25) as client:
@@ -202,7 +207,7 @@ def answer_question(question):
               'or prior conversation. You only see this message and the knowledge below, not another assistant\'s '
               'memory or other conversations. For shipment status ask for its reference instead of guessing. '
               'Use ONLY the knowledge below for company/customs facts, rates, requirements and official links; '
-              'when absent, say you need to verify. Send supplied links exactly as written.\n\n' + KNOWLEDGE)
+              'when absent, say you need to verify. Send supplied links exactly as written.\n\n' + KNOWLEDGE + _staff_context())
     body = {'model': MODEL, 'max_tokens': 1200, 'thinking': {'type': 'disabled'}, 'system': system,
             'messages': [{'role': 'user', 'content': str(question)[:2000]}]}
     try:

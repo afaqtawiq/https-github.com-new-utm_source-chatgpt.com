@@ -1,0 +1,19 @@
+{
+  "rate_table": {
+    "document_kind": "rate_table", "is_single_load": false,
+    "summary": "جدول أسعار نقل داخلي تجريبي: ميناء جدة إلى الرياض 3100 ريال، وإلى الدمام 6200 ريال. الحد الأقصى 27 طن. لا يتضمن قطر.",
+    "origin": "ميناء جدة / ميناء تجريبي", "destination": "متعدد: الرياض، الدمام، جدة",
+    "owner_phone": "+966500000008", "weight_tons": 27, "price_sar": 6200, "confidence": 0.98
+  },
+  "single_load": {
+    "document_kind": "load_listing", "is_single_load": true,
+    "summary": "طلب حمولة تجريبي واحد من الرياض إلى جدة بوزن 20 طن",
+    "origin": "الرياض", "destination": "جدة", "owner_phone": "+966500000008",
+    "weight_tons": 20, "price_sar": 2200, "confidence": 0.95
+  },
+  "bill_of_lading": {
+    "document_kind": "shipping_document", "is_single_load": false,
+    "summary": "بوليصة شحن تجريبية للمراجعة، وليست طلب نقل جديد",
+    "origin": "ميناء تجريبي", "destination": "جدة", "confidence": 0.99
+  }
+}
