@@ -7,7 +7,7 @@ import re
 
 CURRENCIES = {'SAR': 2, 'AED': 2, 'QAR': 2, 'USD': 2, 'EUR': 2, 'GBP': 2,
               'OMR': 3, 'BHD': 3, 'KWD': 3, 'JPY': 0}
-KINDS = {'claim': ('receivable', 1), 'payable': ('payable', 1), 'expense': ('payable', 1),
+KINDS = {'opening_receivable': ('receivable', 1), 'claim': ('receivable', 1), 'payable': ('payable', 1), 'expense': ('payable', 1),
          'receipt': ('receivable', -1), 'payment': ('payable', -1),
          'receivable_adjustment': ('receivable', -1), 'payable_adjustment': ('payable', -1)}
 MAX_AMOUNT = Decimal('999999999999.99999999')
@@ -70,6 +70,11 @@ def parse_document(form):
         document_date = date.fromisoformat(document_date)
     else:
         document_date = None
+    cutoff_raw = clean(form.get('opening_cutoff'), 10)
+    opening_cutoff = date.fromisoformat(cutoff_raw) if cutoff_raw else None
+    opening_confirmation_ref = clean(form.get('opening_confirmation_ref'), 1000)
+    if kind != 'opening_receivable' and (opening_cutoff or opening_confirmation_ref):
+        raise ValueError('بيانات الرصيد الافتتاحي مخصصة لنوع الرصيد الافتتاحي فقط')
     basis = clean(form.get('amount_basis'), 10)
     if basis not in ('gross', 'net', 'unknown'):
         raise ValueError('حدد معنى المبلغ في المصدر')
@@ -89,6 +94,7 @@ def parse_document(form):
     return dict(owner_id=positive_id('owner_id'), counterparty_id=positive_id('counterparty_id'),
         kind=kind, currency=currency, source_amount=amount, source_amount_raw=clean(form.get('source_amount_raw') or amount_raw, 200, True),
         amount_minor=minor_units(amount, currency) if currency else None, document_date=document_date,
+        opening_cutoff=opening_cutoff, opening_confirmation_ref=opening_confirmation_ref,
         source_ref=clean(form.get('source_ref'), 300, True), source_locator=clean(form.get('source_locator'), 300, True),
         economic_ref=clean(form.get('economic_ref'), 200, True), source_role=source_role,
         source_date_raw=clean(form.get('source_date_raw'), 100), source_status_raw=clean(form.get('source_status_raw'), 200),
@@ -99,15 +105,27 @@ def parse_document(form):
 
 def validation_issues(document):
     issues = []
+    opening = document.get('kind') == 'opening_receivable'
     if not document.get('currency'):
         issues.append('العملة غير مؤكدة')
     if document.get('source_verification') == 'independently_verified' and not document.get('verification_ref'):
         issues.append('مرجع دليل التحقق المستقل غير موثق')
-    if document.get('source_cached_external') and document.get('source_verification') != 'independently_verified':
+    # An owner-approved net opening balance is a separate recorded decision, not
+    # independent verification of the cached workbook or its historical receipts.
+    if document.get('source_cached_external') and document.get('source_verification') != 'independently_verified' and not (opening and document.get('opening_confirmation_ref')):
         issues.append('قيم مخبأة تعتمد على روابط خارجية ولم تتحقق مستقلًا')
     if not document.get('document_date'):
         issues.append('تاريخ الحركة غير مؤكد')
-    if document.get('source_role') != 'detail':
+    if opening:
+        if not document.get('opening_cutoff') or document.get('opening_cutoff') != document.get('document_date'):
+            issues.append('يلزم تاريخ قطع مؤكد يطابق تاريخ الرصيد الافتتاحي')
+        if not document.get('opening_confirmation_ref'):
+            issues.append('يلزم مرجع موافقة صاحب الحساب على صافي الرصيد الافتتاحي وتاريخ القطع')
+        if document.get('source_role') != 'summary' or document.get('amount_basis') != 'net':
+            issues.append('الرصيد الافتتاحي صافي ملخص تجميعي بعد التسويات التاريخية')
+        if any(document.get(k) for k in ('invoice_ref','customs_ref','shipment_id')):
+            issues.append('الرصيد الافتتاحي ليس فاتورة أو إيراد شحنة جديدة؛ وثّق التفاصيل في دليل المصدر')
+    elif document.get('source_role') != 'detail':
         issues.append('المصدر ملخص تجميعي؛ لا يرحّل مع الحركات التفصيلية')
     if document.get('amount_minor') is not None and document['amount_minor'] <= 0:
         issues.append('المبلغ بعد التقريب أقل من أصغر وحدة للعملة')

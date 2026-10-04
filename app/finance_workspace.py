@@ -78,8 +78,8 @@ def statement(request: Request, owner_id: int, counterparty_id: int, currency: s
 def statement_csv(request: Request, owner_id: int, counterparty_id: int, currency: str, side: str='receivable'):
     auth(request)
     owner, party, entries, balance = invoke(service.statement_data, owner_id, counterparty_id, currency, side)
-    headers = ['owner','counterparty','currency','side','document_id','document_date','recorded_at','kind','phase','source_ref','source_locator','economic_ref','invoice_ref','customs_ref','source_amount_raw','amount_basis','debit','credit','balance']
-    data = [[owner['name'],party['name'],currency.upper(),side,e['id'],e['document_date'],e['created_at'],e['kind'],e['phase'],e['source_ref'],e['source_locator'],e['economic_ref'],e['invoice_ref'],e['customs_ref'],e['source_amount_raw'],e['amount_basis'],e['debit_display'],e['credit_display'],e['running_display']] for e in entries]
+    headers = ['owner','counterparty','currency','side','document_id','document_date','recorded_at','kind','phase','source_ref','source_locator','economic_ref','invoice_ref','customs_ref','source_amount_raw','amount_basis','debit','credit','balance','opening_cutoff','opening_confirmation_ref']
+    data = [[owner['name'],party['name'],currency.upper(),side,e['id'],e['document_date'],e['created_at'],e['kind'],e['phase'],e['source_ref'],e['source_locator'],e['economic_ref'],e['invoice_ref'],e['customs_ref'],e['source_amount_raw'],e['amount_basis'],e['debit_display'],e['credit_display'],e['running_display'],e['opening_cutoff'],e['opening_confirmation_ref']] for e in entries]
     return Response(core.csv_bytes(headers,data), media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="finance-statement.csv"','Cache-Control':'no-store'})
 
 
