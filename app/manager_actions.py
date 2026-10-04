@@ -7,8 +7,8 @@
    (whatsapp_admin.transcribe) and load screenshots (load_vision.fetch_image) now use it first
    and keep the old path as a fallback.
 
-2) "أرسل رسالة إلى ..." from the manager or a team member: the message is sent at once from the
-   Afaq WhatsApp number to a team member (by name or department) or to any phone number.
+2) Explicit manager messages can target team members or external phone numbers.
+   Non-manager team members can message verified internal team members only.
    Inside the 24-hour window it goes as normal text; outside it, the approved template
    afaaq_marketing_team_message_v1_ar carries the same text. Every send is written to the audit.
 """
@@ -120,7 +120,8 @@ def resolve(target):
     for m in team_members():
         names = [admin.normalize(str(m.get(k) or '')) for k in ('name', 'short', 'role')]
         if any(n and (n in wanted or wanted in n) for n in names):
-            return admin.phone(m['phone']), str(m.get('name') or m.get('short'))
+            from app.team import phone as team_phone
+            return team_phone(m['phone']), str(m.get('name') or m.get('short'))
     return '', target
 
 
@@ -145,7 +146,11 @@ def deliver(number, text):
 
 
 def send_message(c, parsed):
+    from app.team import ROLE, team
+    member = ROLE.get()
     number, label = resolve(parsed.get('to'))
+    if not member or (member.get('manager') is not True and number not in team()):
+        return 'إرسال الرسائل للعملاء أو السائقين يحتاج اعتماد المدير. أقدر أساعدك بتجهيز النص للمراجعة.'
     text = re.sub(r'\s+', ' ', str(parsed.get('text') or '')).strip()[:900]
     if not number:
         return 'لم أتعرف على المستلم ' + LQ + label + RQ + '. اكتب رقمه أو اسمه كما هو في فريق آفاق.'

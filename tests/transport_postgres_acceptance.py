@@ -126,7 +126,7 @@ def run(providers):
 
     def inbound(event, sender, text, *, account=ACCOUNT, conversation=None,
                 participant=None, sender_id=None, conversation_group=False,
-                message_group=False, direction='incoming', signature=True, metadata=None):
+                message_group=False, direction='incoming', signature=True, metadata=None, attachments=None):
         sender = sender.lstrip('+')
         payload = {
             'id': event, 'event': 'message.received',
@@ -141,6 +141,8 @@ def run(providers):
                 'sender': {'phoneNumber': sender, 'id': sender_id if sender_id is not None else sender},
             },
         }
+        if attachments is not None:
+            payload['message']['attachments'] = attachments
         if metadata is not None:
             payload['metadata'] = metadata
         body = json.dumps(payload, ensure_ascii=False).encode()
@@ -597,6 +599,8 @@ def run(providers):
         assert (one('SELECT COUNT(*) n FROM shipments')['n'], one('SELECT COUNT(*) n FROM drivers')['n']) == (records_before[0] + 1, records_before[1])
         assert not providers.unexpected, providers.unexpected
         print('PASS: read-only transport status, legacy fallback, signed natural greeting/query, duplicate idempotency and no chat-triggered sends.')
+        from staff_routing_acceptance import run_staff_routing
+        run_staff_routing(providers, inbound)
         from transport_disclosed_acceptance import run_disclosed
         run_disclosed(providers, inbound)
         from broadcast_recovery_acceptance import run_recovery

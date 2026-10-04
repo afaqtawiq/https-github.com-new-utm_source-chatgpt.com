@@ -406,7 +406,8 @@ def conversation_modules(monkeypatch):
     vision = types.ModuleType('app.load_vision')
     vision.fetch_image = lambda *_: None
     team = types.ModuleType('app.team')
-    team.ROLE = types.SimpleNamespace(get=lambda: None)
+    team.ROLE = types.SimpleNamespace(get=lambda: {'name': 'Test manager', 'manager': True})
+    team.team = lambda: {}
     for name, module in [('whatsapp_admin', isolated_admin), ('command_assistant', page), ('load_vision', vision), ('team', team)]:
         monkeypatch.setitem(sys.modules, 'app.' + name, module)
         monkeypatch.setattr(app, name, module, raising=False)

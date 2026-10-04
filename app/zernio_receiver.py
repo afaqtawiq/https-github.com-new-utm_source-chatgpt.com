@@ -16,6 +16,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from html import escape
 
 router = APIRouter()
+# Installed by the production team integration; runs before customer/driver routing.
+team_reply = None
 
 def valid_signature(raw, signature, secret):
     return bool(secret and signature and hmac.compare_digest(
@@ -70,7 +72,7 @@ def ensure_tables():
 
 @router.get("/webhooks/zernio")
 async def health():
-    return {"receiver":"zernio", "routing_version":"owner-freight-replies-v2", "requires_signature":True,
+    return {"receiver":"zernio", "routing_version":"staff-first-context-v3", "requires_signature":True,
             "owner_commands_configured":bool(os.getenv("WHATSAPP_COMMAND_OWNER") and os.getenv("WHATSAPP_COMMAND_ACCOUNT_ID")),
             "voice_commands_configured":bool(os.getenv("OPENAI_API_KEY")),
             "configured":bool(os.getenv("ZERNIO_API_KEY") and os.getenv("ZERNIO_WEBHOOK_SECRET"))}
@@ -120,6 +122,10 @@ async def receive(request: Request):
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
             claim = c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'sending') ON CONFLICT DO NOTHING RETURNING event_id",(event_id,conversation_id)).fetchone()
             if not claim: return None
+            if team_reply is not None:
+                internal = asyncio.run(team_reply(c, p))
+                if internal is not None:
+                    return 'owner', internal
             from app.transport_intake import is_transport_request
             text = str(message.get('text') or '')
             from app.zernio_whatsapp import account_id as transport_account, phone as transport_phone
