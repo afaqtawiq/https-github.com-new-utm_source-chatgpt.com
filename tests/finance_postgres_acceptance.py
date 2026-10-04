@@ -18,7 +18,7 @@ sys.path.insert(0,str(ROOT))
 def run():
     from fastapi.testclient import TestClient
     from app.bootstrap import app
-    from app import finance_schema, finance_service as service
+    from app import finance_core as core, finance_schema, finance_service as service
     from app.storage import db, one, rows, create_session, utcnow
     from psycopg.errors import RaiseException
     client=TestClient(app,base_url='http://testserver',follow_redirects=False)
@@ -81,6 +81,57 @@ def run():
         return post(f'/finance/documents/{doc_id}/post',form(confirmation='1'))
     def posted(kind='claim',amount='100.00',currency='SAR',**extra):
         doc_id,_=draft(kind,amount,currency,**extra);review(doc_id);post_doc(doc_id);return doc_id
+
+    def read_totals():
+        # Every totals read must leave source evidence, journal, allocations and
+        # audit untouched; totals must reconcile to all per-party balances.
+        tables=('finance_parties','finance_documents','finance_entries','finance_allocations','finance_audit','finance_entitlement_rules')
+        before={table:rows('SELECT * FROM '+table+' ORDER BY id') for table in tables}
+        dashboard=service.dashboard_data()
+        assert len(dashboard)==6
+        totals=dashboard[5]
+        indexed={(item['owner_id'],item['currency']):item for item in totals}
+        assert len(indexed)==len(totals),'duplicate owner/currency total'
+        grouped={}
+        for balance in dashboard[2]:
+            key=(balance['owner_id'],balance['currency'])
+            expected=grouped.setdefault(key,[0,0])
+            expected[0]+=int(balance['receivable_minor'])
+            expected[1]+=int(balance['payable_minor'])
+        assert set(indexed)==set(grouped)
+        debt_counts={(item['owner_id'],item['currency']):item['n'] for item in rows('''
+            SELECT owner_id,currency,COUNT(DISTINCT id) n FROM finance_documents
+            WHERE status='posted' AND kind IN ('payable','expense') GROUP BY owner_id,currency''')}
+        owner_names={item['id']:item['name'] for item in dashboard[0] if item['kind']=='owner'}
+        response=request('finance','GET','/api/v7/finance')
+        assert response.status_code==200 and response.headers['cache-control']=='no-store'
+        payload=response.json()
+        api_totals={(item['owner_id'],item['currency']):item for item in payload['totals']}
+        assert len(api_totals)==len(payload['totals']) and set(api_totals)==set(indexed)
+        assert payload['scope']=='operational_subledger' and payload['external_actions'] is False
+        for key,item in indexed.items():
+            receivable,payable=grouped[key]
+            assert item['owner_name']==owner_names[key[0]]
+            assert item['payable_document_count']==debt_counts.get(key,0)
+            assert type(item['payable_document_count']) is int
+            assert api_totals[key]['payable_document_count']==item['payable_document_count']
+            assert api_totals[key]['owner_name']==item['owner_name']
+            for field,value in (('receivable',receivable),('payable',payable),('net',receivable-payable)):
+                assert type(item[field+'_minor']) is int and item[field+'_minor']==value,(key,field,item)
+                assert item[field+'_display']==core.display_minor(value,key[1])
+                assert type(api_totals[key][field+'_minor']) is str
+                assert api_totals[key][field+'_minor']==str(value)
+                assert api_totals[key][field+'_display']==item[field+'_display']
+        page=request('finance','GET','/finance')
+        assert page.status_code==200 and page.headers['cache-control']=='no-store'
+        if indexed:
+            for label in ('إجمالي الأرصدة المستحقة','إجمالي الديون المسجلة','صافي الرصيد المسجل'):
+                assert label in page.text
+        for table,snapshot in before.items():
+            assert rows('SELECT * FROM '+table+' ORDER BY id')==snapshot,(table,'totals read changed ledger')
+        return indexed
+
+    assert read_totals()=={}
     unknown,unknown_data=draft(currency='',document_date='',source_date_raw='2026-01-??')
     d=one('SELECT * FROM finance_documents WHERE id=%s',(unknown,))
     assert d['document_date'] is None and d['currency']=='' and d['amount_minor'] is None and d['source_date_raw']=='2026-01-??'
@@ -105,6 +156,7 @@ def run():
     review(rounded,rounding_ack='1')
     post(f'/finance/documents/{rounded}/post',form('finance',confirmation='1'),'finance',403)
     post(f'/finance/documents/{rounded}/post',form(),code=400)
+    assert read_totals()=={},'draft and reviewed documents must not become recorded totals'
     post_doc(rounded);post_doc(rounded)
     d=one('SELECT * FROM finance_documents WHERE id=%s',(rounded,))
     assert str(d['source_amount'])=='100.00567891' and d['amount_minor']==10001 and d['rounding_ack']
@@ -126,6 +178,17 @@ def run():
     expenses=posted('expense','7.00')
     duplicate_expense,_=draft('expense',economic_ref=one('SELECT economic_ref FROM finance_documents WHERE id=%s',(payable,))['economic_ref'])
     review(duplicate_expense);post(f'/finance/documents/{duplicate_expense}/post',form(confirmation='1'),code=409)
+    draft('payable','999.00')
+    reviewed_expense,_=draft('expense','888.00');review(reviewed_expense)
+    initial_totals=read_totals()
+    assert set(initial_totals)=={(owner,'SAR'),(owner,'USD')}
+    sar=initial_totals[(owner,'SAR')]
+    assert (sar['receivable_minor'],sar['payable_minor'],sar['net_minor'],sar['payable_document_count'])==(12001,5200,6801,2)
+    assert (sar['receivable_display'],sar['payable_display'],sar['net_display'])==('120.01','52.00','68.01')
+    assert initial_totals[(owner,'USD')]['receivable_minor']==1000
+    assert initial_totals[(owner,'USD')]['payable_minor']==0
+    assert initial_totals[(owner,'USD')]['net_minor']==1000
+    assert initial_totals[(owner,'USD')]['payable_document_count']==0
     query=f'owner_id={owner}&counterparty_id={party}&currency=SAR'
     ownerrow,partyrow,entries,balance=service.statement_data(owner,party,'SAR','receivable')
     assert balance=='110.01',balance
@@ -146,6 +209,7 @@ def run():
     post('/finance/allocations',allocation);post('/finance/allocations',allocation)
     assert one('SELECT COUNT(*) n FROM finance_allocations')['n']==1
     assert rows('SELECT * FROM finance_entries ORDER BY id')==before_entries
+    assert read_totals()==initial_totals,'allocation is not another receipt or journal movement'
     post('/finance/allocations',dict(allocation,amount='31.00'),code=409)
     post('/finance/allocations',form(credit_id=credit,document_id=usd,amount='1.00'),code=400)
     post('/finance/allocations',form(credit_id=credit,document_id=foreign_party,amount='1.00'),code=400)
@@ -161,6 +225,7 @@ def run():
     with ThreadPoolExecutor(max_workers=3) as pool:statuses=list(pool.map(concurrent_allocate,range(3)))
     assert sorted(statuses)==[303,409,409],statuses
     assert one('SELECT SUM(amount_minor) n FROM finance_allocations WHERE credit_id=%s AND reversed_at IS NULL',(credit,))['n']==7000
+    assert read_totals()==initial_totals,'multiple allocations must not be deducted from totals'
     reason='Fixture error; source preserved'
     post(f'/finance/documents/{credit}/reverse',form(reason=reason),code=400)
     post(f'/finance/documents/{credit}/reverse',form(reason=reason,confirmation='1'))
@@ -171,6 +236,11 @@ def run():
     assert service.detail_data(claim)[0]['remaining_display']=='100.00'
     assert service.statement_data(owner,party,'SAR','receivable')[3]=='190.01'
     assert sum(e['phase']=='reversal' for e in service.statement_data(owner,party,'SAR','receivable')[2])==1
+    reversed_totals=read_totals()
+    assert reversed_totals[(owner,'SAR')]['receivable_minor']==20001
+    assert reversed_totals[(owner,'SAR')]['payable_minor']==5200
+    assert reversed_totals[(owner,'SAR')]['net_minor']==14801
+    assert reversed_totals[(owner,'SAR')]['payable_document_count']==2
     post('/finance/allocations',form(credit_id=credit,document_id=claim,amount='1.00'),code=409)
     post(f'/finance/documents/{unknown}/void',form(reason='Incomplete source replaced'))
     assert one('SELECT status FROM finance_documents WHERE id=%s',(unknown,))['status']=='void'
@@ -198,6 +268,40 @@ def run():
     assert one('SELECT COUNT(*) n FROM finance_entitlement_rules')['n']==1
     assert one('SELECT status FROM finance_entitlement_rules')['status']=='inactive'
     assert len(rows('SELECT * FROM finance_entries'))==len(before_entries)+1
+    # Counts refer to distinct active debt documents, never payments, adjustments
+    # or reversed posting/reversal rows. Negative debts are not clamped to zero.
+    for doc_id in (payable,expenses):
+        post(f'/finance/documents/{doc_id}/reverse',form(reason=reason,confirmation='1'))
+    no_debts=read_totals()[(owner,'SAR')]
+    assert (no_debts['receivable_minor'],no_debts['payable_minor'],no_debts['net_minor'],no_debts['payable_document_count'])==(20001,-2500,22501,0)
+    assert no_debts['payable_display']=='-25.00'
+    for doc_id in (payment,noncash):
+        post(f'/finance/documents/{doc_id}/reverse',form(reason=reason,confirmation='1'))
+    assert read_totals()[(owner,'SAR')]['payable_display']=='0.00'
+    # Equal display names must not merge owners; equal currencies must not merge
+    # ledgers. Payment-only and over-received pairs retain their negative sides.
+    owner2=make_party('Fixture Owner <script>alert(1)</script>','owner','owner-002')
+    posted('receipt','3.00',owner_id=owner2)
+    posted('payment','4.00',owner_id=owner2)
+    posted('claim','2.00',currency='USD',owner_id=owner2)
+    posted('claim','0.125',currency='KWD',owner_id=owner2)
+    posted('receipt','0.125',currency='KWD',owner_id=owner2)
+    posted('payable','12',currency='JPY',owner_id=owner2)
+    posted('payment','12',currency='JPY',owner_id=owner2)
+    separated=read_totals()
+    assert set(separated)=={(owner,'SAR'),(owner,'USD'),(owner2,'SAR'),(owner2,'USD'),(owner2,'KWD'),(owner2,'JPY')}
+    assert (separated[(owner2,'SAR')]['receivable_minor'],separated[(owner2,'SAR')]['payable_minor'],separated[(owner2,'SAR')]['net_minor'])==(-300,-400,100)
+    assert separated[(owner2,'SAR')]['payable_document_count']==0
+    assert separated[(owner2,'USD')]['net_display']=='2.00' and separated[(owner,'USD')]['net_display']=='10.00'
+    assert all(separated[(owner2,'KWD')][side+'_display']=='0.000' for side in ('receivable','payable','net'))
+    assert all(separated[(owner2,'JPY')][side+'_display']=='0' for side in ('receivable','payable','net'))
+    assert separated[(owner2,'JPY')]['payable_document_count']==1,'settled posted payable is still a registered debt document'
+    # The latest-document preview is capped at 200. Older journal balances must
+    # remain in totals even when every displayed document is an unposted draft.
+    for _ in range(201):draft(amount='1.00')
+    preview=service.dashboard_data()[1]
+    assert len(preview)==200 and all(item['status']=='draft' for item in preview)
+    assert read_totals()==separated,'totals must use the journal, not the latest 200 documents'
     # Re-runnable additive migration and exact preservation of operational tables.
     snapshot=rows('SELECT * FROM finance_documents ORDER BY id')
     finance_schema.init_storage();finance_schema.init_storage()
@@ -213,7 +317,7 @@ def run():
     with db() as c:c.execute('UPDATE users SET is_active=0 WHERE id=%s',(sessions['admin']['user_id'],))
     assert request('admin','GET','/finance').status_code in (303,403)
     client.close()
-    print('PASS: roles/CSRF/permission overrides, source precision, unknown blocking, duplicates, per-currency/side statements, partial allocation races/idempotence, immutable audit/reversal, XSS/CSV, inactive rules, additive migrations, no original overwrite; external sends 0.')
+    print('PASS: roles/CSRF/permission overrides, source precision, unknown blocking, duplicates, per-currency/side statements, owner/currency totals and exact API strings, debt counts, allocations/reversals/negative/zero balances, 200-document cap independence, immutable read-only totals, XSS/CSV, inactive rules, additive migrations, no original overwrite; external sends 0.')
 
 
 def main():

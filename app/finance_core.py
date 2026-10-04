@@ -7,7 +7,9 @@ import re
 
 CURRENCIES = {'SAR': 2, 'AED': 2, 'QAR': 2, 'USD': 2, 'EUR': 2, 'GBP': 2,
               'OMR': 3, 'BHD': 3, 'KWD': 3, 'JPY': 0}
-KINDS = {'opening_receivable': ('receivable', 1), 'claim': ('receivable', 1), 'payable': ('payable', 1), 'expense': ('payable', 1),
+OPENING_KINDS = frozenset(('opening_receivable', 'opening_payable'))
+KINDS = {'opening_receivable': ('receivable', 1), 'opening_payable': ('payable', 1),
+         'claim': ('receivable', 1), 'payable': ('payable', 1), 'expense': ('payable', 1),
          'receipt': ('receivable', -1), 'payment': ('payable', -1),
          'receivable_adjustment': ('receivable', -1), 'payable_adjustment': ('payable', -1)}
 MAX_AMOUNT = Decimal('999999999999.99999999')
@@ -58,6 +60,44 @@ def exact_minor(value, currency):
     return minor
 
 
+def owner_balance_totals(balances):
+    """Aggregate posted journal balances, never source amounts or allocations.
+
+    Receipts/payments already reduce the signed balances. Allocations merely
+    link their evidence and must not be subtracted a second time. Keep every
+    owner and currency separate, including zero and credit (negative) balances.
+    """
+    def integer(value):
+        if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+            raise ValueError('Totals require exact integer minor units')
+        number = Decimal(value)
+        if not number.is_finite() or number != number.to_integral_value():
+            raise ValueError('Totals require exact integer minor units')
+        return int(number)
+
+    grouped = {}
+    for balance in balances:
+        owner_id = integer(balance['owner_id'])
+        if owner_id <= 0:
+            raise ValueError('Totals require a confirmed owner')
+        currency = currency_code(balance['currency'])
+        key = (owner_id, currency)
+        item = grouped.setdefault(key, dict(owner_id=owner_id, owner_name=balance['owner_name'],
+            currency=currency, receivable_minor=0, payable_minor=0, payable_document_count=0))
+        item['receivable_minor'] += integer(balance['receivable_minor'])
+        item['payable_minor'] += integer(balance['payable_minor'])
+        count = integer(balance['payable_document_count'])
+        if count < 0:
+            raise ValueError('Invalid payable document count')
+        item['payable_document_count'] += count
+    result = sorted(grouped.values(), key=lambda item: (item['owner_name'], item['owner_id'], item['currency']))
+    for item in result:
+        item['net_minor'] = item['receivable_minor'] - item['payable_minor']
+        for name in ('receivable', 'payable', 'net'):
+            item[name+'_display'] = display_minor(item[name+'_minor'], item['currency'])
+    return result
+
+
 def parse_document(form):
     kind = clean(form.get('kind'), 30, True)
     if kind not in KINDS:
@@ -73,7 +113,7 @@ def parse_document(form):
     cutoff_raw = clean(form.get('opening_cutoff'), 10)
     opening_cutoff = date.fromisoformat(cutoff_raw) if cutoff_raw else None
     opening_confirmation_ref = clean(form.get('opening_confirmation_ref'), 1000)
-    if kind != 'opening_receivable' and (opening_cutoff or opening_confirmation_ref):
+    if kind not in OPENING_KINDS and (opening_cutoff or opening_confirmation_ref):
         raise ValueError('بيانات الرصيد الافتتاحي مخصصة لنوع الرصيد الافتتاحي فقط')
     basis = clean(form.get('amount_basis'), 10)
     if basis not in ('gross', 'net', 'unknown'):
@@ -105,7 +145,7 @@ def parse_document(form):
 
 def validation_issues(document):
     issues = []
-    opening = document.get('kind') == 'opening_receivable'
+    opening = document.get('kind') in OPENING_KINDS
     if not document.get('currency'):
         issues.append('العملة غير مؤكدة')
     if document.get('source_verification') == 'independently_verified' and not document.get('verification_ref'):

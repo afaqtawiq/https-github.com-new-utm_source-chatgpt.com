@@ -203,7 +203,7 @@ def run():
     def draft(kind='opening_receivable', amount='321.98765432', currency='SAR', **extra):
         nonlocal sequence
         sequence += 1
-        opening = kind == 'opening_receivable'
+        opening = kind in ('opening_receivable', 'opening_payable')
         fields = dict(owner_id=owner, counterparty_id=counterparty, kind=kind, amount=amount,
                       currency=currency, document_date=cutoff if opening else '2034-04-01',
                       source_ref='synthetic-opening.xlsx', source_locator='Synthetic!A'+str(sequence),
@@ -233,7 +233,7 @@ def run():
 
     def posted(kind='claim', amount='10.00', **extra):
         doc_id, _ = draft(kind, amount, **extra)
-        acknowledgements = {'opening_ack': '1'} if kind == 'opening_receivable' else {}
+        acknowledgements = {'opening_ack': '1'} if kind in ('opening_receivable', 'opening_payable') else {}
         review(doc_id, **acknowledgements)
         post_doc(doc_id, **acknowledgements)
         return doc_id
@@ -247,6 +247,43 @@ def run():
         assert rows('SELECT * FROM finance_entries ORDER BY id') == entries
         assert rows('SELECT * FROM finance_audit ORDER BY id') == audit
 
+    def assert_total(owner_id, currency, receivable, payable, debt_documents):
+        # Openings are approved net balances on an explicit side. Read-only
+        # totals must preserve that side and never settle allocations twice.
+        before = {table: rows('SELECT * FROM '+table+' ORDER BY id') for table in legacy}
+        dashboard = service.dashboard_data()
+        assert len(dashboard) == 6
+        matching = [item for item in dashboard[5]
+                    if (item['owner_id'], item['currency']) == (owner_id, currency)]
+        assert len(matching) == 1, (owner_id, currency, dashboard[5])
+        total = matching[0]
+        assert total['owner_name'] == one('SELECT name FROM finance_parties WHERE id=%s', (owner_id,))['name']
+        assert type(total['payable_document_count']) is int and total['payable_document_count'] == debt_documents
+        api_response = request('finance', 'GET', '/api/v7/finance')
+        assert api_response.status_code == 200 and api_response.headers['cache-control'] == 'no-store'
+        api_total = next(item for item in api_response.json()['totals']
+                         if (item['owner_id'], item['currency']) == (owner_id, currency))
+        assert api_total['owner_name'] == total['owner_name']
+        assert api_total['payable_document_count'] == debt_documents
+        balances = [item for item in dashboard[2]
+                    if (item['owner_id'], item['currency']) == (owner_id, currency)]
+        for field, expected in (('receivable', receivable), ('payable', payable), ('net', receivable-payable)):
+            assert type(total[field+'_minor']) is int and total[field+'_minor'] == expected, (field, total)
+            assert total[field+'_display'] == core.display_minor(expected, currency)
+            assert type(api_total[field+'_minor']) is str and api_total[field+'_minor'] == str(expected)
+            assert api_total[field+'_display'] == total[field+'_display']
+            if field != 'net':
+                assert sum(item[field+'_minor'] for item in balances) == expected
+        for table, snapshot in before.items():
+            assert rows('SELECT * FROM '+table+' ORDER BY id') == snapshot, (table, 'totals read changed source or ledger')
+        return total
+
+    legacy_owner = legacy['finance_parties'][0]['id']
+    assert_total(legacy_owner, 'SAR', 10013, 0, 0)
+    assert_total(legacy_owner, 'USD', 0, 0, 0)
+    assert not any(item['owner_id'] == legacy_owner and item['currency'] == 'EUR'
+                   for item in service.dashboard_data()[5]), 'reviewed legacy payable entered totals'
+
     for path in ('/finance', '/api/v7/finance',
                  f'/finance/statement?owner_id={owner}&counterparty_id={counterparty}&currency=SAR',
                  f'/finance/statement.csv?owner_id={owner}&counterparty_id={counterparty}&currency=SAR'):
@@ -258,18 +295,19 @@ def run():
 
     # Malformed cutoff syntax is rejected at intake; incomplete facts may remain
     # as immutable drafts but never pass review or affect balances.
-    for invalid in ('2034/03/31', '2034-02-30'):
-        post('/finance/documents', form('finance', kind='opening_receivable', amount='10',
-             currency='SAR', opening_cutoff=invalid, source_role='summary', amount_basis='net'), 'finance', 400)
-    for extra in ({'opening_cutoff': ''}, {'opening_confirmation_ref': ''},
-                  {'opening_confirmation_ref': '   '}, {'document_date': '2034-03-30'},
-                  {'document_date': ''}, {'currency': ''}, {'source_role': 'detail'},
-                  {'amount_basis': 'gross'}, {'amount_basis': 'unknown'},
-                  {'invoice_ref': 'synthetic-invoice'}, {'customs_ref': 'synthetic-customs'},
-                  {'shipment_id': shipment}, {'source_verification': 'independently_verified', 'verification_ref': ''}):
-        invalid_id, _ = draft(amount='10.00', **extra)
-        unchanged_after_rejection(invalid_id, lambda: review(invalid_id, code=400, opening_ack='1'))
-        post_doc(invalid_id, code=409, opening_ack='1')
+    for opening_kind in ('opening_receivable', 'opening_payable'):
+        for invalid in ('2034/03/31', '2034-02-30'):
+            post('/finance/documents', form('finance', kind=opening_kind, amount='10',
+                 currency='SAR', opening_cutoff=invalid, source_role='summary', amount_basis='net'), 'finance', 400)
+        for extra in ({'opening_cutoff': ''}, {'opening_confirmation_ref': ''},
+                      {'opening_confirmation_ref': '   '}, {'document_date': '2034-03-30'},
+                      {'document_date': ''}, {'currency': ''}, {'source_role': 'detail'},
+                      {'amount_basis': 'gross'}, {'amount_basis': 'unknown'},
+                      {'invoice_ref': 'synthetic-invoice'}, {'customs_ref': 'synthetic-customs'},
+                      {'shipment_id': shipment}, {'source_verification': 'independently_verified', 'verification_ref': ''}):
+            invalid_id, _ = draft(opening_kind, amount='10.00', **extra)
+            unchanged_after_rejection(invalid_id, lambda: review(invalid_id, code=400, opening_ack='1'))
+            post_doc(invalid_id, code=409, opening_ack='1')
     ordinary_cached, _ = draft('claim', '10.00', source_cached_external='1', source_verification='recorded')
     review(ordinary_cached, code=400)
     ordinary_summary, _ = draft('claim', '10.00', source_role='summary')
@@ -296,6 +334,7 @@ def run():
     unchanged_after_rejection(opening, lambda: review(opening, code=400, opening_ack='1'))
     review(opening, opening_ack='1', rounding_ack='1', reason='Synthetic net and cutoff confirmed')
     review(opening, opening_ack='1', rounding_ack='1')
+    assert not any(item['owner_id'] == owner for item in service.dashboard_data()[5]), 'reviewed opening entered totals'
     post_doc(opening, role='finance', code=403, opening_ack='1')
     post(f'/finance/documents/{opening}/post', form(opening_ack='1'), code=400)
     unchanged_after_rejection(opening, lambda: post_doc(opening, code=400))
@@ -316,6 +355,12 @@ def run():
     assert len(entry) == 1 and entry[0]['signed_minor'] == 32199 and entry[0]['side'] == 'receivable'
     assert service.statement_data(owner, counterparty, 'SAR', 'receivable')[3] == '321.99'
     assert service.statement_data(owner, counterparty, 'SAR', 'payable')[3] == '0.00'
+    opening_total = assert_total(owner, 'SAR', 32199, 0, 0)
+    assert (opening_total['receivable_display'], opening_total['payable_display'], opening_total['net_display']) == ('321.99', '0.00', '321.99')
+    opening_dashboard = request('finance', 'GET', '/finance')
+    assert opening_dashboard.status_code == 200
+    for label in ('إجمالي الأرصدة المستحقة', 'إجمالي الديون المسجلة', 'صافي الرصيد المسجل'):
+        assert label in opening_dashboard.text
     opening_audit = rows("SELECT * FROM finance_audit WHERE entity_type='document' AND entity_id=%s ORDER BY id", (opening,))
     assert [row['action'] for row in opening_audit] == ['document_created', 'document_reviewed', 'document_posted']
     for row in opening_audit:
@@ -339,19 +384,24 @@ def run():
     # and other counterparties remain independent of this receivable cutoff.
     payable = posted('payable', '73.00', document_date='2034-03-01')
     posted('claim', '5.00', currency='USD', document_date='2034-03-01')
-    posted('claim', '6.00', owner_id=party('owner'), document_date='2034-03-01')
+    another_owner = party('owner')
+    posted('claim', '6.00', owner_id=another_owner, document_date='2034-03-01')
     posted('claim', '7.00', counterparty_id=party(), document_date='2034-03-01')
     receipt = posted('receipt', '40.00')
     claim = posted('claim', '80.00')
     adjustment = posted('receivable_adjustment', '10.00')
     assert service.statement_data(owner, counterparty, 'SAR', 'receivable')[3] == '351.99'
     assert service.statement_data(owner, counterparty, 'SAR', 'payable')[3] == '73.00'
+    before_allocation_total = assert_total(owner, 'SAR', 35899, 7300, 1)
+    assert_total(owner, 'USD', 500, 0, 0)
+    assert_total(another_owner, 'SAR', 600, 0, 0)
     before_allocation = rows('SELECT * FROM finance_entries ORDER BY id')
     allocation = form(credit_id=receipt, document_id=opening, amount='25.00')
     post('/finance/allocations', allocation)
     post('/finance/allocations', allocation)
     assert one('SELECT COUNT(*) n FROM finance_allocations WHERE document_id=%s', (opening,))['n'] == 1
     assert rows('SELECT * FROM finance_entries ORDER BY id') == before_allocation
+    assert assert_total(owner, 'SAR', 35899, 7300, 1) == before_allocation_total
     assert service.detail_data(opening)[0]['remaining_display'] == '296.99'
     assert service.detail_data(receipt)[0]['remaining_display'] == '15.00'
     assert any(item['id'] == opening for item in service.detail_data(receipt)[3])
@@ -391,9 +441,10 @@ def run():
 
     # Opening cannot be undone while any later receivable document is active,
     # even if a remaining document is a noncash adjustment rather than a claim.
-    for subsequent in (claim, receipt, adjustment):
+    for subsequent, expected_receivable in ((claim, 27899), (receipt, 31899), (adjustment, 32899)):
         unchanged_after_rejection(opening, lambda: reverse(opening, code=409))
         reverse(subsequent)
+        assert_total(owner, 'SAR', expected_receivable, 7300, 1)
     assert one('SELECT COUNT(*) n FROM finance_allocations WHERE document_id=%s AND reversed_at IS NULL', (opening,))['n'] == 0
     assert service.detail_data(opening)[0]['remaining_display'] == '321.99'
     reverse(opening)
@@ -401,6 +452,8 @@ def run():
     assert service.statement_data(owner, counterparty, 'SAR', 'receivable')[3] == '0.00'
     assert one('SELECT status FROM finance_documents WHERE id=%s', (payable,))['status'] == 'posted'
     assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (opening,))['n'] == 2
+    reversed_total = assert_total(owner, 'SAR', 700, 7300, 1)
+    assert reversed_total['net_display'] == '-66.00'
     corrected_data = dict(opening_data, idempotency_key=str(uuid.uuid4()), amount='322.01',
                           source_amount_raw='322.01 synthetic corrected authorized net',
                           opening_confirmation_ref='Synthetic corrected owner approval OPEN-002')
@@ -412,26 +465,180 @@ def run():
     assert corrected_saved['supersedes_id'] == opening
     assert corrected_saved['source_ref'] == saved['source_ref'] and corrected_saved['source_locator'] == saved['source_locator']
     assert service.statement_data(owner, counterparty, 'SAR', 'receivable')[3] == '322.01'
+    assert_total(owner, 'SAR', 32901, 7300, 1)
     after_reverse = one('SELECT * FROM finance_documents WHERE id=%s', (opening,))
     for field in ('kind', 'source_amount', 'source_amount_raw', 'source_ref', 'source_locator', 'source_status_raw',
                   'source_date_raw', 'source_verification', 'source_cached_external', 'verification_ref',
                   'opening_cutoff', 'opening_confirmation_ref', 'opening_review_ack', 'reviewed_by', 'reviewed_at'):
         assert after_reverse[field] == saved[field], field
     assert rows('SELECT * FROM finance_audit WHERE id=ANY(%s) ORDER BY id', ([row['id'] for row in opening_audit],)) == opening_audit
-    print('PASS: explicit review/admin approval, exact net source, cached provenance, cutoff/history guards, correct receivable-only balances, partial allocation, statement HTML/CSV, reversal and corrected opening.')
+    print('PASS: explicit review/admin approval, exact net source, cached provenance, cutoff/history guards, opening-only and owner/currency totals, exact API strings, partial allocation without double settlement, read-only source/journal preservation, statement HTML/CSV, reversal and corrected opening.')
 
-    # Any existing posted receivable history prevents a fresh opening. Rechecking
-    # at post catches the case where opening review happened before that history.
+    # Payable openings use the same evidence and approvals, but increase debt.
+    # Keep this owner isolated so the committed receivable totals cases above
+    # continue to assert exactly their original amounts and currency boundaries.
+    payable_owner, payable_pair = party('owner'), party()
+    payable_scope = dict(owner_id=payable_owner, counterparty_id=payable_pair)
+    payable_kinds = ('payable', 'expense', 'payment', 'payable_adjustment')
+    prereviewed_payables = []
+    for kind in payable_kinds:
+        old_id, _ = draft(kind, '9.00', document_date=cutoff, **payable_scope)
+        review(old_id)
+        prereviewed_payables.append(old_id)
+    opening_payable, payable_data = draft('opening_payable', '210.12500000',
+        source_amount_raw='-210.12500000 synthetic original credit balance', **payable_scope)
+    assert post('/finance/documents', payable_data, 'finance').headers['location'].endswith('/'+str(opening_payable))
+    for changed in ({'opening_cutoff': '2034-03-30'}, {'opening_confirmation_ref': 'Different synthetic approval'},
+                    {'source_amount_raw': '210.12500000 sign removed'}):
+        post('/finance/documents', dict(payable_data, **changed), 'finance', 409)
+    unchanged_after_rejection(opening_payable, lambda: review(opening_payable, code=400, rounding_ack='1'))
+    unchanged_after_rejection(opening_payable, lambda: review(opening_payable, code=400, opening_ack='1'))
+    review(opening_payable, opening_ack='1', rounding_ack='1')
+    review(opening_payable, opening_ack='1', rounding_ack='1')
+    assert not any(item['owner_id'] == payable_owner for item in service.dashboard_data()[5])
+    post_doc(opening_payable, role='finance', code=403, opening_ack='1')
+    unchanged_after_rejection(opening_payable, lambda: post_doc(opening_payable, code=400))
+    post_doc(opening_payable, opening_ack='1')
+    post_doc(opening_payable, opening_ack='1')
+    payable_saved = one('SELECT * FROM finance_documents WHERE id=%s', (opening_payable,))
+    assert payable_saved['source_amount'] == Decimal('210.12500000') and payable_saved['amount_minor'] == 21013
+    assert payable_saved['source_amount_raw'] == payable_data['source_amount_raw']
+    assert payable_saved['source_verification'] == 'recorded' and payable_saved['verification_ref'] == ''
+    assert payable_saved['source_cached_external'] and payable_saved['opening_review_ack'] and payable_saved['rounding_ack']
+    assert str(payable_saved['document_date']) == str(payable_saved['opening_cutoff']) == cutoff
+    assert payable_saved['opening_confirmation_ref'] == approval_ref
+    assert payable_saved['kind'] == 'opening_payable' and payable_saved['source_role'] == 'summary'
+    assert payable_saved['amount_basis'] == 'net' and not payable_saved['invoice_ref'] and not payable_saved['customs_ref']
+    assert payable_saved['shipment_id'] is None and core.KINDS['opening_payable'] == ('payable', 1)
+    payable_entries = rows('SELECT * FROM finance_entries WHERE document_id=%s', (opening_payable,))
+    assert len(payable_entries) == 1 and payable_entries[0]['side'] == 'payable' and payable_entries[0]['signed_minor'] == 21013
+    payable_audit = rows("SELECT * FROM finance_audit WHERE entity_type='document' AND entity_id=%s ORDER BY id", (opening_payable,))
+    assert [row['action'] for row in payable_audit] == ['document_created', 'document_reviewed', 'document_posted']
+    for row in payable_audit:
+        detail = json.loads(row['detail'])
+        assert detail['opening_cutoff'] == cutoff and detail['opening_confirmation_ref'] == approval_ref
+    assert json.loads(payable_audit[0]['detail'])['source_amount_raw'] == payable_data['source_amount_raw']
+    assert json.loads(payable_audit[0]['detail'])['source_verification'] == 'recorded'
+    assert json.loads(payable_audit[1]['detail'])['opening_review_ack'] is True
+    assert_total(payable_owner, 'SAR', 0, 21013, 1)
+
+    for old_id in prereviewed_payables:
+        unchanged_after_rejection(old_id, lambda: post_doc(old_id, code=409))
+    for kind in payable_kinds:
+        for old_date in ('2034-03-30', cutoff):
+            old_id, _ = draft(kind, '9.00', document_date=old_date, **payable_scope)
+            unchanged_after_rejection(old_id, lambda: review(old_id, code=409))
+    duplicate_payable, _ = draft('opening_payable', '10.00', **payable_scope)
+    unchanged_after_rejection(duplicate_payable, lambda: review(duplicate_payable, code=409, opening_ack='1'))
+
+    # A payable cutoff never blocks receivable history. Once reversed, that
+    # history does not prohibit a separate receivable opening on the same pair.
     for kind in ('claim', 'receipt', 'receivable_adjustment'):
-        pair = party()
-        candidate, _ = draft(amount='90.00', counterparty_id=pair)
-        review(candidate, opening_ack='1')
-        existing = posted(kind, '12.00', counterparty_id=pair)
-        unchanged_after_rejection(candidate, lambda: post_doc(candidate, code=409, opening_ack='1'))
-        later_candidate, _ = draft(amount='90.00', counterparty_id=pair)
-        review(later_candidate, code=409, opening_ack='1')
-        reverse(existing)
-        post_doc(candidate, opening_ack='1')
+        independent = posted(kind, '7.00', document_date=cutoff, **payable_scope)
+        assert service.statement_data(payable_owner, payable_pair, 'SAR', 'payable')[3] == '210.13'
+        reverse(independent)
+    coexist_receivable = posted('opening_receivable', '65.00', **payable_scope)
+    assert_total(payable_owner, 'SAR', 6500, 21013, 1)
+    independent_currency = posted('payable', '5.00', currency='USD', document_date=cutoff, **payable_scope)
+    assert_total(payable_owner, 'USD', 0, 500, 1)
+    assert one('SELECT status FROM finance_documents WHERE id=%s', (independent_currency,))['status'] == 'posted'
+    later_payable = posted('payable', '25.00', **payable_scope)
+    later_expense = posted('expense', '15.00', **payable_scope)
+    later_payment = posted('payment', '40.00', **payable_scope)
+    payable_adjustment = posted('payable_adjustment', '10.00', **payable_scope)
+    payable_before_allocation = assert_total(payable_owner, 'SAR', 6500, 20013, 3)
+    entries_before_payable_allocation = rows('SELECT * FROM finance_entries ORDER BY id')
+    payment_allocation = form(credit_id=later_payment, document_id=opening_payable, amount='25.00')
+    post('/finance/allocations', payment_allocation)
+    post('/finance/allocations', payment_allocation)
+    post('/finance/allocations', form(credit_id=payable_adjustment, document_id=opening_payable, amount='5.00'))
+    assert one('SELECT COUNT(*) n FROM finance_allocations WHERE document_id=%s', (opening_payable,))['n'] == 2
+    assert rows('SELECT * FROM finance_entries ORDER BY id') == entries_before_payable_allocation
+    assert assert_total(payable_owner, 'SAR', 6500, 20013, 3) == payable_before_allocation
+    assert service.detail_data(opening_payable)[0]['remaining_display'] == '180.13'
+    assert service.detail_data(later_payment)[0]['remaining_display'] == '15.00'
+    assert service.detail_data(payable_adjustment)[0]['remaining_display'] == '5.00'
+    assert any(item['id'] == opening_payable for item in service.detail_data(later_payment)[3])
+    assert {later_payment, payable_adjustment}.issubset({item['id'] for item in service.detail_data(opening_payable)[3]})
+    post('/finance/allocations', dict(payment_allocation, amount='26.00'), code=409)
+    post('/finance/allocations', form(credit_id=later_payment, document_id=opening_payable, amount='16.00'), code=409)
+    post('/finance/allocations', form(credit_id=later_payment, document_id=coexist_receivable, amount='1.00'), code=400)
+    payment_page = request('admin', 'GET', f'/finance/documents/{later_payment}').text
+    assert f'value="{opening_payable}"' in payment_page
+    payable_page = request('admin', 'GET', f'/finance/documents/{opening_payable}').text
+    assert f'name="document_id" value="{opening_payable}"' in payable_page and f'value="{later_payment}"' in payable_page
+
+    payable_query = urlencode(dict(**payable_scope, currency='SAR', side='payable'))
+    payable_statement = request('finance', 'GET', '/finance/statement?'+payable_query)
+    assert payable_statement.status_code == 200 and cutoff in payable_statement.text
+    assert '<script>synthetic</script>' not in payable_statement.text
+    payable_export = request('finance', 'GET', '/finance/statement.csv?'+payable_query)
+    assert payable_export.status_code == 200 and payable_export.headers['cache-control'] == 'no-store'
+    payable_export_rows = list(csv.DictReader(io.StringIO(payable_export.content.decode('utf-8-sig'))))
+    payable_opening_row = next(row for row in payable_export_rows if row['document_id'] == str(opening_payable))
+    payment_row = next(row for row in payable_export_rows if row['document_id'] == str(later_payment))
+    assert payable_opening_row['kind'] == 'opening_payable' and payable_opening_row['opening_cutoff'] == cutoff
+    assert payable_opening_row['opening_confirmation_ref'] == "'"+approval_ref
+    assert payable_opening_row['source_amount_raw'] == "'"+payable_data['source_amount_raw']
+    assert payable_opening_row['debit'] == '0.00' and payable_opening_row['credit'] == '210.13'
+    assert payment_row['debit'] == '40.00' and payment_row['credit'] == '0.00'
+    assert payable_export_rows[-1]['balance'] == '200.13'
+    payable_api = next(item for item in request('finance', 'GET', '/api/v7/finance').json()['documents'] if item['id'] == opening_payable)
+    assert payable_api['kind'] == 'opening_payable' and payable_api['side'] == 'payable'
+    assert payable_api['source_amount'] == '210.12500000' and payable_api['source_amount_raw'] == payable_data['source_amount_raw']
+
+    for subsequent, expected_payable, debt_count in ((later_payable, 17513, 2), (later_expense, 16013, 1),
+                                                    (later_payment, 20013, 1), (payable_adjustment, 21013, 1)):
+        unchanged_after_rejection(opening_payable, lambda: reverse(opening_payable, code=409))
+        reverse(subsequent)
+        assert_total(payable_owner, 'SAR', 6500, expected_payable, debt_count)
+    assert one('SELECT COUNT(*) n FROM finance_allocations WHERE document_id=%s AND reversed_at IS NULL', (opening_payable,))['n'] == 0
+    assert service.detail_data(opening_payable)[0]['remaining_display'] == '210.13'
+    reverse(opening_payable)
+    reverse(opening_payable)
+    assert one('SELECT status FROM finance_documents WHERE id=%s', (coexist_receivable,))['status'] == 'posted'
+    assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (opening_payable,))['n'] == 2
+    assert_total(payable_owner, 'SAR', 6500, 0, 0)
+    payable_reversal = service.statement_data(payable_owner, payable_pair, 'SAR', 'payable')[2][-1]
+    assert payable_reversal['debit_display'] == '210.13' and payable_reversal['credit_display'] == '0.00'
+    corrected_payable_data = dict(payable_data, idempotency_key=str(uuid.uuid4()), amount='211.00',
+        source_amount_raw='-211.00 synthetic corrected credit balance',
+        opening_confirmation_ref='Synthetic corrected liability approval OPEN-P-002')
+    corrected_payable_response = post('/finance/documents', corrected_payable_data, 'finance')
+    corrected_payable = int(corrected_payable_response.headers['location'].rsplit('/', 1)[1])
+    review(corrected_payable, opening_ack='1')
+    post_doc(corrected_payable, opening_ack='1')
+    corrected_payable_saved = one('SELECT * FROM finance_documents WHERE id=%s', (corrected_payable,))
+    assert corrected_payable_saved['supersedes_id'] == opening_payable
+    assert corrected_payable_saved['source_ref'] == payable_saved['source_ref'] and corrected_payable_saved['source_locator'] == payable_saved['source_locator']
+    assert corrected_payable_saved['source_amount'] == Decimal('211.00')
+    assert corrected_payable_saved['source_amount_raw'] == corrected_payable_data['source_amount_raw']
+    assert_total(payable_owner, 'SAR', 6500, 21100, 1)
+    reverse(coexist_receivable)  # The still-posted payable opening is independent.
+    assert_total(payable_owner, 'SAR', 0, 21100, 1)
+    payable_after_reverse = one('SELECT * FROM finance_documents WHERE id=%s', (opening_payable,))
+    for field in ('kind', 'source_amount', 'source_amount_raw', 'source_ref', 'source_locator', 'source_status_raw',
+                  'source_date_raw', 'source_verification', 'source_cached_external', 'verification_ref',
+                  'opening_cutoff', 'opening_confirmation_ref', 'opening_review_ack', 'reviewed_by', 'reviewed_at'):
+        assert payable_after_reverse[field] == payable_saved[field], field
+    assert rows('SELECT * FROM finance_audit WHERE id=ANY(%s) ORDER BY id', ([row['id'] for row in payable_audit],)) == payable_audit
+    print('PASS: payable opening preserves signed source evidence, adds debt, uses credit/debit statement polarity, coexists by side, blocks historical liabilities/settlements, allocates without double reduction, and corrects without rewriting history.')
+
+    # Any posted history on the SAME side prevents a fresh opening. Rechecking
+    # at post catches the case where opening review happened before that history.
+    side_cases = (('opening_receivable', 'receivable', ('claim', 'receipt', 'receivable_adjustment')),
+                  ('opening_payable', 'payable', payable_kinds))
+    for opening_kind, side, historical_kinds in side_cases:
+        for kind in historical_kinds:
+            pair = party()
+            candidate, _ = draft(opening_kind, amount='90.00', counterparty_id=pair)
+            review(candidate, opening_ack='1')
+            existing = posted(kind, '12.00', counterparty_id=pair)
+            unchanged_after_rejection(candidate, lambda: post_doc(candidate, code=409, opening_ack='1'))
+            later_candidate, _ = draft(opening_kind, amount='90.00', counterparty_id=pair)
+            review(later_candidate, code=409, opening_ack='1')
+            reverse(existing)
+            post_doc(candidate, opening_ack='1')
 
     def concurrent_posts(ids, acknowledgements):
         barrier = Barrier(len(ids))
@@ -448,30 +655,43 @@ def run():
         with ThreadPoolExecutor(max_workers=len(ids)) as pool:
             return list(pool.map(submit, range(len(ids))))
 
-    pair = party()
-    duplicates = [draft(amount='90.00', counterparty_id=pair)[0] for _ in range(3)]
-    for item in duplicates:
-        review(item, opening_ack='1')
-    statuses = concurrent_posts(duplicates, [{'opening_ack': '1'}]*3)
-    assert sorted(statuses) == [303, 409, 409], statuses
-    assert one("SELECT COUNT(*) n FROM finance_documents WHERE counterparty_id=%s AND status='posted'", (pair,))['n'] == 1
-    assert one('SELECT COUNT(*) n FROM finance_entries e JOIN finance_documents d ON d.id=e.document_id WHERE d.counterparty_id=%s', (pair,))['n'] == 1
-    winner = duplicates[statuses.index(303)]
-    assert concurrent_posts([winner]*3, [{'opening_ack': '1'}]*3) == [303, 303, 303]
-    assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (winner,))['n'] == 1
-    assert one("SELECT COUNT(*) n FROM finance_audit WHERE entity_type='document' AND entity_id=%s AND action='document_posted'", (winner,))['n'] == 1
-
-    for kind in ('claim', 'receipt', 'receivable_adjustment'):
+    for opening_kind, side, historical_kinds in side_cases:
         pair = party()
-        candidate, _ = draft(amount='90.00', counterparty_id=pair)
-        historical, _ = draft(kind, '12.00', counterparty_id=pair, document_date=cutoff)
-        review(candidate, opening_ack='1')
-        review(historical)
-        statuses = concurrent_posts([candidate, historical], [{'opening_ack': '1'}, {}])
-        assert sorted(statuses) == [303, 409], (kind, statuses)
+        duplicates = [draft(opening_kind, amount='90.00', counterparty_id=pair)[0] for _ in range(3)]
+        for item in duplicates:
+            review(item, opening_ack='1')
+        statuses = concurrent_posts(duplicates, [{'opening_ack': '1'}]*3)
+        assert sorted(statuses) == [303, 409, 409], (opening_kind, statuses)
         assert one("SELECT COUNT(*) n FROM finance_documents WHERE counterparty_id=%s AND status='posted'", (pair,))['n'] == 1
-        expected = '90.00' if statuses[0] == 303 else '12.00' if kind == 'claim' else '-12.00'
-        assert service.statement_data(owner, pair, 'SAR', 'receivable')[3] == expected
+        assert one('SELECT COUNT(*) n FROM finance_entries e JOIN finance_documents d ON d.id=e.document_id WHERE d.counterparty_id=%s', (pair,))['n'] == 1
+        winner = duplicates[statuses.index(303)]
+        assert concurrent_posts([winner]*3, [{'opening_ack': '1'}]*3) == [303, 303, 303]
+        assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (winner,))['n'] == 1
+        assert one("SELECT COUNT(*) n FROM finance_audit WHERE entity_type='document' AND entity_id=%s AND action='document_posted'", (winner,))['n'] == 1
+
+        for kind in historical_kinds:
+            pair = party()
+            candidate, _ = draft(opening_kind, amount='90.00', counterparty_id=pair)
+            historical, _ = draft(kind, '12.00', counterparty_id=pair, document_date=cutoff)
+            review(candidate, opening_ack='1')
+            review(historical)
+            statuses = concurrent_posts([candidate, historical], [{'opening_ack': '1'}, {}])
+            assert sorted(statuses) == [303, 409], (kind, statuses)
+            assert one("SELECT COUNT(*) n FROM finance_documents WHERE counterparty_id=%s AND status='posted'", (pair,))['n'] == 1
+            expected = '90.00' if statuses[0] == 303 else '12.00' if core.KINDS[kind][1] > 0 else '-12.00'
+            assert service.statement_data(owner, pair, 'SAR', side)[3] == expected
+
+    # The uniqueness gate includes side, so concurrent openings for the same
+    # pair and currency on different sides must both succeed exactly once.
+    pair = party()
+    both_sides = [draft(kind, '14.00', counterparty_id=pair)[0]
+                  for kind in ('opening_receivable', 'opening_payable')]
+    for item in both_sides:
+        review(item, opening_ack='1')
+    assert concurrent_posts(both_sides, [{'opening_ack': '1'}]*2) == [303, 303]
+    assert one("SELECT COUNT(*) n FROM finance_documents WHERE counterparty_id=%s AND status='posted'", (pair,))['n'] == 2
+    for side in ('receivable', 'payable'):
+        assert service.statement_data(owner, pair, 'SAR', side)[3] == '14.00'
 
     # The same transaction-scoped advisory lock actually serializes review, post,
     # and reverse; a second connection holding that key must block each action.
@@ -492,27 +712,30 @@ def run():
                 assert entered.wait(timeout=15), 'mutation never attempted the shared transaction lock'
                 assert not result.done(), 'mutation bypassed the held global lock'
             result.result(timeout=30)
-    lock_doc, _ = draft(amount='11.00', counterparty_id=party())
-    under_global_lock(lambda: review(lock_doc, opening_ack='1'))
-    under_global_lock(lambda: post_doc(lock_doc, opening_ack='1'))
-    under_global_lock(lambda: reverse(lock_doc))
+    for opening_kind in ('opening_receivable', 'opening_payable'):
+        lock_doc, _ = draft(opening_kind, amount='11.00', counterparty_id=party())
+        under_global_lock(lambda: review(lock_doc, opening_ack='1'))
+        under_global_lock(lambda: post_doc(lock_doc, opening_ack='1'))
+        under_global_lock(lambda: reverse(lock_doc))
     print('PASS: concurrent duplicate openings/idempotent retries, competing historical postings, and shared transaction lock on review/post/reverse.')
 
-    for sql, args in (
-        ('UPDATE finance_documents SET opening_cutoff=%s WHERE id=%s', ('2034-04-01', corrected)),
-        ('UPDATE finance_documents SET opening_confirmation_ref=%s WHERE id=%s', ('tampered synthetic approval', corrected)),
-        ('UPDATE finance_documents SET source_amount=%s WHERE id=%s', (Decimal('1.00'), corrected)),
-        ('UPDATE finance_documents SET source_verification=%s WHERE id=%s', ('independently_verified', corrected)),
-        ('DELETE FROM finance_documents WHERE id=%s', (corrected,)),
-        ('DELETE FROM finance_entries WHERE document_id=%s', (corrected,)),
-        ("UPDATE finance_audit SET detail='tampered synthetic audit' WHERE entity_id=%s", (corrected,)),
-    ):
-        try:
-            with db() as c:
-                c.execute(sql, args)
-            raise AssertionError('Immutable opening evidence accepted mutation: '+sql)
-        except RaiseException:
-            pass
+    for immutable_opening in (corrected, corrected_payable):
+        for sql, args in (
+            ('UPDATE finance_documents SET opening_cutoff=%s WHERE id=%s', ('2034-04-01', immutable_opening)),
+            ('UPDATE finance_documents SET opening_confirmation_ref=%s WHERE id=%s', ('tampered synthetic approval', immutable_opening)),
+            ('UPDATE finance_documents SET source_amount=%s WHERE id=%s', (Decimal('1.00'), immutable_opening)),
+            ('UPDATE finance_documents SET source_amount_raw=%s WHERE id=%s', ('1.00 sign and source altered', immutable_opening)),
+            ('UPDATE finance_documents SET source_verification=%s WHERE id=%s', ('independently_verified', immutable_opening)),
+            ('DELETE FROM finance_documents WHERE id=%s', (immutable_opening,)),
+            ('DELETE FROM finance_entries WHERE document_id=%s', (immutable_opening,)),
+            ("UPDATE finance_audit SET detail='tampered synthetic audit' WHERE entity_id=%s", (immutable_opening,)),
+        ):
+            try:
+                with db() as c:
+                    c.execute(sql, args)
+                raise AssertionError('Immutable opening evidence accepted mutation: '+sql)
+            except RaiseException:
+                pass
 
     snapshots = {table: rows('SELECT * FROM '+table+' ORDER BY id') for table in legacy}
     finance_schema.init_storage()

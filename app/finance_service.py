@@ -74,7 +74,7 @@ def create_party(form, actor):
 
 def create_document(form, actor):
     payload = core.parse_document(form)
-    if payload['kind'] != 'opening_receivable':
+    if payload['kind'] not in core.OPENING_KINDS:
         # Preserve fingerprints of ordinary requests created before this
         # additive upgrade so an interrupted form can still replay safely.
         payload.pop('opening_cutoff')
@@ -121,19 +121,18 @@ def guard_opening_period(c, item):
 
     No automatic conversion of old detail, gross claims or settlements. A single
     approved net opening establishes an inclusive historical cutoff for this
-    exact owner/counterparty/currency receivable account only.
+    exact owner/counterparty/currency AND receivable/payable side only.
     """
-    if core.KINDS[item['kind']][0] != 'receivable':
-        return
+    side = core.KINDS[item['kind']][0]
     existing = c.execute('''SELECT id,kind,opening_cutoff FROM finance_documents
         WHERE owner_id=%s AND counterparty_id=%s AND currency=%s AND status='posted' AND id<>%s''',
         (item['owner_id'],item['counterparty_id'],item['currency'],item['id'])).fetchall()
-    if item['kind'] == 'opening_receivable':
-        if any(core.KINDS[d['kind']][0] == 'receivable' for d in existing):
-            fail('يجب اعتماد الرصيد الافتتاحي قبل حركات الذمم المدينة؛ يوجد رصيد افتتاحي أو حركات مرحّلة للحساب', 409)
+    if item['kind'] in core.OPENING_KINDS:
+        if any(core.KINDS[d['kind']][0] == side for d in existing):
+            fail('يجب اعتماد الرصيد الافتتاحي قبل حركات الجانب المحدد من الذمم؛ يوجد رصيد افتتاحي أو حركات مرحّلة للحساب', 409)
     else:
         for prior in existing:
-            if prior['kind'] == 'opening_receivable' and item['document_date'] <= prior['opening_cutoff']:
+            if prior['kind'] in core.OPENING_KINDS and core.KINDS[prior['kind']][0] == side and item['document_date'] <= prior['opening_cutoff']:
                 fail('الحركة ضمن الفترة المشمولة بالرصيد الافتتاحي؛ يمنع إعادة تسجيل المطالبات أو التسويات التاريخية', 409)
 
 
@@ -153,8 +152,8 @@ def review_document(doc_id, actor, form):
         if issues:
             fail('؛ '.join(issues))
         guard_opening_period(c, item)
-        opening_ack = item['kind'] == 'opening_receivable' and form.get('opening_ack') == '1'
-        if item['kind'] == 'opening_receivable' and not opening_ack:
+        opening_ack = item['kind'] in core.OPENING_KINDS and form.get('opening_ack') == '1'
+        if item['kind'] in core.OPENING_KINDS and not opening_ack:
             fail('أكد صافي الرصيد الافتتاحي وتاريخ القطع وشمول التسويات السابقة وعدم تكرارها')
         if rounding_required(item) and form.get('rounding_ack') != '1':
             fail('أكد فرق تقريب المصدر إلى أصغر وحدة للعملة؛ الأصل محفوظ')
@@ -180,7 +179,7 @@ def post_document(doc_id, actor, form):
             if issues:
                 fail('؛ '.join(issues))
             guard_opening_period(c, item)
-            if item['kind'] == 'opening_receivable' and (not item['opening_review_ack'] or form.get('opening_ack') != '1'):
+            if item['kind'] in core.OPENING_KINDS and (not item['opening_review_ack'] or form.get('opening_ack') != '1'):
                 fail('يلزم اعتماد صريح لصافي الرصيد الافتتاحي والفترة التاريخية المشمولة')
             if rounding_required(item) and not item['rounding_ack']:
                 fail('تقريب المصدر غير معتمد')
@@ -212,10 +211,10 @@ def reverse_document(doc_id, actor, form):
             return
         if item['status'] != 'posted':
             fail('العكس متاح للحركات المرحّلة فقط', 409)
-        if item['kind'] == 'opening_receivable':
+        if item['kind'] in core.OPENING_KINDS:
             later = c.execute("SELECT kind FROM finance_documents WHERE owner_id=%s AND counterparty_id=%s AND currency=%s AND status='posted' AND id<>%s",(item['owner_id'],item['counterparty_id'],item['currency'],doc_id)).fetchall()
-            if any(core.KINDS[d['kind']][0] == 'receivable' for d in later):
-                fail('راجع واعكس حركات الذمم المدينة اللاحقة أولًا قبل تصحيح الرصيد الافتتاحي', 409)
+            if any(core.KINDS[d['kind']][0] == core.KINDS[item['kind']][0] for d in later):
+                fail('راجع واعكس الحركات اللاحقة من جانب الذمم نفسه أولًا قبل تصحيح الرصيد الافتتاحي', 409)
         side, sign = core.KINDS[item['kind']]
         c.execute('INSERT INTO finance_entries(document_id,phase,side,signed_minor,actor_id,created_at) VALUES(%s,%s,%s,%s,%s,%s)',
                   (doc_id, 'reversal', side, -sign * item['amount_minor'], actor, utcnow()))
@@ -266,7 +265,7 @@ def create_allocation(form, actor):
         side, sign = core.KINDS[credit['kind']]
         if sign != -1 or core.KINDS[debit['kind']] != (side, 1):
             fail('يجب تخصيص تسوية إلى مطالبة أو التزام من نفس الجانب')
-        if debit['kind'] == 'opening_receivable' and credit['document_date'] <= debit['opening_cutoff']:
+        if debit['kind'] in core.OPENING_KINDS and credit['document_date'] <= debit['opening_cutoff']:
             fail('لا يخصص للرصيد الافتتاحي قبض أو تسوية ضمن الفترة التاريخية المشمولة', 409)
         if amount > credit['amount_minor'] - allocated(c, credit_id) or amount > debit['amount_minor'] - allocated(c, doc_id):
             fail('المبلغ يتجاوز الرصيد غير المخصص', 409)
@@ -330,15 +329,17 @@ def dashboard_data():
         documents = [enrich(c,d) for d in c.execute(DOCUMENT_SELECT+' ORDER BY d.id DESC LIMIT 200').fetchall()]
         summary = c.execute('''SELECT o.name owner_name,p.name counterparty_name,d.owner_id,d.counterparty_id,d.currency,
           COALESCE(SUM(e.signed_minor) FILTER(WHERE e.side='receivable'),0) receivable_minor,
-          COALESCE(SUM(e.signed_minor) FILTER(WHERE e.side='payable'),0) payable_minor
+          COALESCE(SUM(e.signed_minor) FILTER(WHERE e.side='payable'),0) payable_minor,
+          COUNT(DISTINCT d.id) FILTER(WHERE d.status='posted' AND d.kind IN ('opening_payable','payable','expense')) payable_document_count
           FROM finance_entries e JOIN finance_documents d ON d.id=e.document_id
           JOIN finance_parties o ON o.id=d.owner_id JOIN finance_parties p ON p.id=d.counterparty_id
+          WHERE d.status IN ('posted','reversed')
           GROUP BY d.owner_id,d.counterparty_id,o.name,p.name,d.currency ORDER BY o.name,p.name,d.currency''').fetchall()
         for item in summary:
             for side in ('receivable','payable'):
                 item[side+'_display'] = core.display_minor(item[side+'_minor'], item['currency'])
         rules = c.execute('SELECT r.*,p.name owner_name FROM finance_entitlement_rules r JOIN finance_parties p ON p.id=r.owner_id ORDER BY r.id DESC').fetchall()
-        return parties, documents, summary, audit_rows(c), rules
+        return parties, documents, summary, audit_rows(c), rules, core.owner_balance_totals(summary)
 
 
 def detail_data(doc_id):
