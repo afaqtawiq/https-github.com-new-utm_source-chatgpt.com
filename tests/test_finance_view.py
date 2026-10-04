@@ -265,3 +265,136 @@ def test_accessible_unique_ids_and_no_external_assets(renderer):
     assert 'script' not in page.tags and 'img' not in page.tags and 'link' not in page.tags
     assert 'https://' not in output and 'http://' not in output
     assert not page.posts if renderer == 'statement' else True
+
+
+def opening_document(**extra):
+    return document(**{
+        'kind': 'opening_receivable', 'source_role': 'summary', 'amount_basis': 'net',
+        'opening_cutoff': '2026-01-01', 'document_date': '2026-01-01',
+        'opening_confirmation_ref': 'synthetic-owner-net-balance-approval',
+        'opening_review_ack': False, **extra,
+    })
+
+
+def test_opening_creation_fields_are_optional_blank_and_not_workflow_inputs():
+    output = dashboard()
+    f = fields(Page(output).form('/finance/documents'))
+    assert 'opening_receivable' in {o['value'] for o in f['kind']['options']}
+    assert f['opening_cutoff']['type'] == 'date'
+    assert f['opening_cutoff']['value'] == ''
+    assert 'required' not in f['opening_cutoff']
+    assert 'required' not in f['opening_confirmation_ref']
+    assert 'opening_review_ack' not in f and 'opening_ack' not in f
+    assert 'تفاصيل الرصيد الافتتاحي المدين فقط' in output
+    assert 'مرجع موافقة صريحة من المستخدم أو صاحب الحساب' in output
+    assert '(summary)' in output and '(net)' in output
+    assert 'تاريخ المستند مساويًا لتاريخ القطع' in output
+    assert 'اترك روابط الشحنة والفاتورة والبيان الجمركي فارغة' in output
+    assert 'احتفظ بنص المبلغ الأصلي ودقته العشرية' in output
+    assert 'إقرار التقريب مستقل' in output
+    assert 'ولا تعاد إضافة الحركات التاريخية المشمولة فيه' in output
+
+
+@pytest.mark.parametrize('status,action', [('draft', 'review'), ('reviewed', 'post')])
+@pytest.mark.parametrize('rounding', [True, False])
+def test_opening_requires_separate_explicit_review_and_post_ack(status, action, rounding):
+    output = view.render_document(session(), opening_document(status=status, rounding_required=rounding), [], [], [])
+    f = fields(Page(output).form('/finance/documents/8/'+action))
+    assert f['opening_ack']['type'] == 'checkbox'
+    assert f['opening_ack']['value'] == '1' and 'required' in f['opening_ack']
+    assert 'checked' not in f['opening_ack']
+    assert f['confirmation']['value'] == '1' and 'required' in f['confirmation']
+    assert 'opening_review_ack' not in f
+    assert ('rounding_ack' in f) == (rounding and action == 'review')
+    assert 'المطالبات والتسويات التاريخية' in output
+    ordinary = fields(Page(view.render_document(session(), document(status=status), [], [], [])).form('/finance/documents/8/'+action))
+    assert 'opening_ack' not in ordinary
+
+
+@pytest.mark.parametrize('ack', [False, True])
+def test_opening_detail_displays_immutable_cutoff_evidence_and_workflow_ack(ack):
+    d = opening_document(opening_review_ack=ack)
+    output = view.render_document(session(), d, [], [], [])
+    assert 'تاريخ قطع الرصيد الافتتاحي' in output and d['opening_cutoff'] in output
+    assert d['opening_confirmation_ref'] in output
+    assert ('تم الإقرار أثناء المراجعة' if ack else 'بانتظار إقرار المراجعة') in output
+    assert 'تاريخ القطع ومرجع الاعتماد محفوظان دون تعديل لاحق' in output
+    assert d['source_amount_raw'] in output and d['source_amount'] in output
+    assert d['rounded_amount_display'] in output
+    for form in Page(output).forms:
+        assert not {'opening_cutoff', 'opening_confirmation_ref', 'opening_review_ack'} & set(fields(form))
+
+
+@pytest.mark.parametrize('cached', [False, True])
+def test_opening_owner_approval_does_not_claim_independent_verification(cached):
+    output = view.render_document(session(), opening_document(source_cached_external=cached), [], [], [])
+    assert 'مسجل من المصدر فقط' in output
+    assert 'تم التحقق بدليل مستقل' not in output
+    assert 'ملخص تجميعي لصافي الرصيد الافتتاحي' in output
+    assert 'ملخص تجميعي: دليل فقط' not in output
+    if cached:
+        assert 'يستند الرصيد الافتتاحي إلى مرجع الاعتماد الصريح' in output
+        assert 'ولا يعد ذلك تحققًا مستقلًا' in output
+        assert 'نعم؛ يلزم تحقق مستقل' not in output
+    else:
+        assert 'غير معلّم كمصدر خارجي مخزن' in output
+
+
+def test_cached_opening_without_approval_reference_displays_missing_requirement():
+    output = view.render_document(session(), opening_document(source_cached_external=True, opening_confirmation_ref=''), [], [], [])
+    assert 'يلزم مرجع اعتماد صريح لصافي الرصيد الافتتاحي' in output
+    assert 'يستند الرصيد الافتتاحي إلى مرجع الاعتماد الصريح' not in output
+    assert 'تم التحقق بدليل مستقل' not in output
+
+
+@pytest.mark.parametrize('renderer', ['dashboard', 'document', 'statement'])
+def test_opening_labels_remain_distinct_and_evidence_is_escaped(renderer):
+    bad = '\"><script>synthetic</script><img src=x>'
+    d = opening_document(opening_cutoff=bad, opening_confirmation_ref=bad)
+    if renderer == 'dashboard':
+        output = dashboard(session('viewer'), [d])
+    elif renderer == 'document':
+        output = view.render_document(session(), d, [], [], [])
+    else:
+        output = view.render_statement(session(), parties()[0], parties()[1], 'SAR', [d], '12.50')
+    assert 'رصيد افتتاحي مدين' in output
+    assert 'ليس إيرادًا جديدًا أو إثبات قبض' in output
+    assert bad not in output and '&lt;script&gt;' in output
+    page = Page(output)
+    assert 'script' not in page.tags and 'img' not in page.tags
+    assert len(page.ids) == len(set(page.ids))
+    assert set(page.labels) <= set(page.ids)
+
+
+@pytest.mark.parametrize('credit_kind', ['receipt', 'receivable_adjustment'])
+@pytest.mark.parametrize('opening_is_current', [True, False])
+def test_opening_allocation_accepts_later_actual_credit_in_both_directions(credit_kind, opening_is_current):
+    opening = opening_document(status='posted', opening_review_ack=True)
+    credit = document(id=9, kind=credit_kind, status='posted', document_date='2026-01-02')
+    current, candidate = (opening, credit) if opening_is_current else (credit, opening)
+    output = view.render_document(session(), current, [], [], [candidate])
+    f = fields(Page(output).form('/finance/allocations'))
+    fixed, choice = ('document_id', 'credit_id') if opening_is_current else ('credit_id', 'document_id')
+    assert f[fixed]['value'] == str(current['id'])
+    assert f[choice]['options'][1]['value'] == str(candidate['id'])
+    assert 'رصيد افتتاحي مدين' in output
+
+
+@pytest.mark.parametrize('credit_date', ['2025-12-31', '2026-01-01', '', None])
+@pytest.mark.parametrize('opening_is_current', [True, False])
+def test_opening_allocation_hides_missing_or_pre_cutoff_credit_dates(credit_date, opening_is_current):
+    opening = opening_document(status='posted')
+    credit = document(id=9, kind='receipt', status='posted', document_date=credit_date)
+    current, candidate = (opening, credit) if opening_is_current else (credit, opening)
+    output = view.render_document(session(), current, [], [], [candidate])
+    assert '/finance/allocations' not in {f['action'] for f in Page(output).posts}
+
+
+@pytest.mark.parametrize('changes', [
+    {'kind': 'payment'}, {'kind': 'payable_adjustment'}, {'kind': 'claim'},
+    {'currency': 'USD'}, {'owner_id': 10}, {'counterparty_id': 11}, {'status': 'reviewed'},
+])
+def test_opening_allocation_hides_incompatible_or_different_ledger_credit(changes):
+    candidate = document(**{'id': 9, 'kind': 'receipt', 'status': 'posted', **changes})
+    output = view.render_document(session(), opening_document(status='posted'), [], [], [candidate])
+    assert '/finance/allocations' not in {f['action'] for f in Page(output).posts}

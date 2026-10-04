@@ -74,6 +74,11 @@ def create_party(form, actor):
 
 def create_document(form, actor):
     payload = core.parse_document(form)
+    if payload['kind'] != 'opening_receivable':
+        # Preserve fingerprints of ordinary requests created before this
+        # additive upgrade so an interrupted form can still replay safely.
+        payload.pop('opening_cutoff')
+        payload.pop('opening_confirmation_ref')
     key = token(form.get('idempotency_key'))
     digest = fingerprint(payload)
     try:
@@ -111,6 +116,27 @@ def rounding_required(item):
     return bool(item['currency'] and Decimal(core.display_minor(item['amount_minor'], item['currency'])) != item['source_amount'])
 
 
+def guard_opening_period(c, item):
+    """Called under the transaction lock at both review and posting.
+
+    No automatic conversion of old detail, gross claims or settlements. A single
+    approved net opening establishes an inclusive historical cutoff for this
+    exact owner/counterparty/currency receivable account only.
+    """
+    if core.KINDS[item['kind']][0] != 'receivable':
+        return
+    existing = c.execute('''SELECT id,kind,opening_cutoff FROM finance_documents
+        WHERE owner_id=%s AND counterparty_id=%s AND currency=%s AND status='posted' AND id<>%s''',
+        (item['owner_id'],item['counterparty_id'],item['currency'],item['id'])).fetchall()
+    if item['kind'] == 'opening_receivable':
+        if any(core.KINDS[d['kind']][0] == 'receivable' for d in existing):
+            fail('يجب اعتماد الرصيد الافتتاحي قبل حركات الذمم المدينة؛ يوجد رصيد افتتاحي أو حركات مرحّلة للحساب', 409)
+    else:
+        for prior in existing:
+            if prior['kind'] == 'opening_receivable' and item['document_date'] <= prior['opening_cutoff']:
+                fail('الحركة ضمن الفترة المشمولة بالرصيد الافتتاحي؛ يمنع إعادة تسجيل المطالبات أو التسويات التاريخية', 409)
+
+
 def review_document(doc_id, actor, form):
     reason = core.clean(form.get('reason'), 1000)
     if form.get('confirmation') != '1':
@@ -126,11 +152,15 @@ def review_document(doc_id, actor, form):
         issues = core.validation_issues(item)
         if issues:
             fail('؛ '.join(issues))
+        guard_opening_period(c, item)
+        opening_ack = item['kind'] == 'opening_receivable' and form.get('opening_ack') == '1'
+        if item['kind'] == 'opening_receivable' and not opening_ack:
+            fail('أكد صافي الرصيد الافتتاحي وتاريخ القطع وشمول التسويات السابقة وعدم تكرارها')
         if rounding_required(item) and form.get('rounding_ack') != '1':
             fail('أكد فرق تقريب المصدر إلى أصغر وحدة للعملة؛ الأصل محفوظ')
-        c.execute("UPDATE finance_documents SET status='reviewed',reviewed_by=%s,reviewed_at=%s,rounding_ack=%s WHERE id=%s",
-                  (actor, utcnow(), form.get('rounding_ack') == '1', doc_id))
-        audit(c, actor, 'document_reviewed', 'document', doc_id, {'source_amount': item['source_amount'], 'amount_minor': item['amount_minor'], 'currency': item['currency'], 'rounding_ack': form.get('rounding_ack') == '1', 'reason': reason})
+        c.execute("UPDATE finance_documents SET status='reviewed',reviewed_by=%s,reviewed_at=%s,rounding_ack=%s,opening_review_ack=%s WHERE id=%s",
+                  (actor, utcnow(), form.get('rounding_ack') == '1', opening_ack, doc_id))
+        audit(c, actor, 'document_reviewed', 'document', doc_id, {'source_amount': item['source_amount'], 'amount_minor': item['amount_minor'], 'currency': item['currency'], 'rounding_ack': form.get('rounding_ack') == '1', 'opening_cutoff':item['opening_cutoff'], 'opening_confirmation_ref':item['opening_confirmation_ref'], 'opening_review_ack':opening_ack, 'reason': reason})
 
 
 def post_document(doc_id, actor, form):
@@ -149,6 +179,9 @@ def post_document(doc_id, actor, form):
             issues = core.validation_issues(item)
             if issues:
                 fail('؛ '.join(issues))
+            guard_opening_period(c, item)
+            if item['kind'] == 'opening_receivable' and (not item['opening_review_ack'] or form.get('opening_ack') != '1'):
+                fail('يلزم اعتماد صريح لصافي الرصيد الافتتاحي والفترة التاريخية المشمولة')
             if rounding_required(item) and not item['rounding_ack']:
                 fail('تقريب المصدر غير معتمد')
             side, sign = core.KINDS[item['kind']]
@@ -161,7 +194,7 @@ def post_document(doc_id, actor, form):
             c.execute("UPDATE finance_documents SET status='posted',posted_by=%s,posted_at=%s WHERE id=%s", (actor,utcnow(),doc_id))
             c.execute('INSERT INTO finance_entries(document_id,phase,side,signed_minor,actor_id,created_at) VALUES(%s,%s,%s,%s,%s,%s)',
                       (doc_id, 'posting', side, sign * item['amount_minor'], actor, utcnow()))
-            audit(c, actor, 'document_posted', 'document', doc_id, {'side':side, 'signed_minor':sign * item['amount_minor'], 'currency':item['currency'], 'reason':reason})
+            audit(c, actor, 'document_posted', 'document', doc_id, {'side':side, 'signed_minor':sign * item['amount_minor'], 'currency':item['currency'], 'kind':item['kind'], 'opening_cutoff':item['opening_cutoff'], 'opening_confirmation_ref':item['opening_confirmation_ref'], 'reason':reason})
     except UniqueViolation:
         fail('الحركة مرحّلة مسبقًا؛ راجع مرجع الحركة', 409)
 
@@ -179,6 +212,10 @@ def reverse_document(doc_id, actor, form):
             return
         if item['status'] != 'posted':
             fail('العكس متاح للحركات المرحّلة فقط', 409)
+        if item['kind'] == 'opening_receivable':
+            later = c.execute("SELECT kind FROM finance_documents WHERE owner_id=%s AND counterparty_id=%s AND currency=%s AND status='posted' AND id<>%s",(item['owner_id'],item['counterparty_id'],item['currency'],doc_id)).fetchall()
+            if any(core.KINDS[d['kind']][0] == 'receivable' for d in later):
+                fail('راجع واعكس حركات الذمم المدينة اللاحقة أولًا قبل تصحيح الرصيد الافتتاحي', 409)
         side, sign = core.KINDS[item['kind']]
         c.execute('INSERT INTO finance_entries(document_id,phase,side,signed_minor,actor_id,created_at) VALUES(%s,%s,%s,%s,%s,%s)',
                   (doc_id, 'reversal', side, -sign * item['amount_minor'], actor, utcnow()))
@@ -229,6 +266,8 @@ def create_allocation(form, actor):
         side, sign = core.KINDS[credit['kind']]
         if sign != -1 or core.KINDS[debit['kind']] != (side, 1):
             fail('يجب تخصيص تسوية إلى مطالبة أو التزام من نفس الجانب')
+        if debit['kind'] == 'opening_receivable' and credit['document_date'] <= debit['opening_cutoff']:
+            fail('لا يخصص للرصيد الافتتاحي قبض أو تسوية ضمن الفترة التاريخية المشمولة', 409)
         if amount > credit['amount_minor'] - allocated(c, credit_id) or amount > debit['amount_minor'] - allocated(c, doc_id):
             fail('المبلغ يتجاوز الرصيد غير المخصص', 409)
         item = c.execute('''INSERT INTO finance_allocations(credit_id,document_id,amount_minor,idempotency_key,payload_hash,created_by,created_at)
@@ -312,9 +351,10 @@ def detail_data(doc_id):
         for allocation in allocations:
             allocation['amount_display'] = core.display_minor(allocation['amount_minor'],item['currency'])
         candidates = []
-        if item['direction']=='credit' and item['status']=='posted':
+        if item['status']=='posted':
+            opposite = (item['side'], -core.KINDS[item['kind']][1])
             for candidate in c.execute(DOCUMENT_SELECT+" WHERE d.owner_id=%s AND d.counterparty_id=%s AND d.currency=%s AND d.status='posted' ORDER BY d.id", (item['owner_id'],item['counterparty_id'],item['currency'])).fetchall():
-                if core.KINDS[candidate['kind']] == (item['side'],1) and allocated(c,candidate['id']) < candidate['amount_minor']:
+                if core.KINDS[candidate['kind']] == opposite and allocated(c,candidate['id']) < candidate['amount_minor']:
                     candidates.append(enrich(c,candidate))
         return item, allocations, audit_rows(c,doc_id), candidates
 
@@ -327,7 +367,7 @@ def statement_data(owner_id, counterparty_id, currency, side):
         owner, party = identity(c, owner_id, counterparty_id)
         # Posting order is stable; reversal uses its own timestamp, never backdates history.
         entries = c.execute('''SELECT e.*,d.document_date,d.kind,d.source_ref,d.source_locator,d.invoice_ref,d.customs_ref,
-            d.economic_ref,d.source_amount_raw,d.amount_basis,d.status FROM finance_entries e
+            d.economic_ref,d.source_amount_raw,d.amount_basis,d.status,d.opening_cutoff,d.opening_confirmation_ref FROM finance_entries e
             JOIN finance_documents d ON d.id=e.document_id WHERE d.owner_id=%s AND d.counterparty_id=%s AND d.currency=%s AND e.side=%s
             ORDER BY e.id''', (owner_id,counterparty_id,currency,side)).fetchall()
         running = 0

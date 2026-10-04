@@ -66,3 +66,37 @@ def test_independent_verification_requires_reference():
     assert core.validation_issues(core.parse_document(f))
     f['verification_ref']='Synthetic bank receipt page 1'
     assert core.validation_issues(core.parse_document(f))==[]
+
+
+def opening_form(**extra):
+    data=form()
+    data.update(kind='opening_receivable',source_role='summary',amount_basis='net',
+        opening_cutoff='2026-01-02',opening_confirmation_ref='Synthetic owner approval, confirmed net balance and cutoff')
+    data.update(extra)
+    return data
+
+
+def test_opening_preserves_precision_and_is_not_new_claim_or_receipt():
+    item=core.parse_document(opening_form(source_cached_external='1'))
+    assert core.KINDS[item['kind']]==('receivable',1)
+    assert item['kind'] not in ('claim','receipt')
+    assert item['source_amount']==Decimal('123.45678901') and item['amount_minor']==12346
+    assert item['source_role']=='summary' and item['source_verification']=='recorded'
+    assert item['source_cached_external'] and core.validation_issues(item)==[]
+
+
+@pytest.mark.parametrize('extra',[
+    {'opening_cutoff':''},{'opening_cutoff':'2026-01-03'},{'opening_confirmation_ref':''},
+    {'source_role':'detail'},{'amount_basis':'gross'},{'invoice_ref':'invoice-1'},
+    {'customs_ref':'declaration-1'},{'shipment_id':'1'},
+    {'source_verification':'independently_verified','verification_ref':''},
+])
+def test_opening_requires_explicit_cutoff_net_summary_and_approval(extra):
+    assert core.validation_issues(core.parse_document(opening_form(**extra)))
+
+
+def test_normal_document_cannot_carry_opening_override():
+    data=form();data['opening_confirmation_ref']='Cannot bypass cached evidence check'
+    with pytest.raises(ValueError):core.parse_document(data)
+    data=form();data['opening_cutoff']='2026-01-02'
+    with pytest.raises(ValueError):core.parse_document(data)
