@@ -160,3 +160,9 @@ app.include_router(fasah_workspace_router)
 # Manual, separately verified prospect introductions. No worker or scheduler.
 from app.prospect_outreach import router as prospect_outreach_router
 app.include_router(prospect_outreach_router)
+
+# Manual operational subledger; no financial import, bank connector or background worker.
+from app.finance_schema import init_storage as init_finance_storage
+init_finance_storage()
+from app.finance_workspace import router as finance_workspace_router
+app.include_router(finance_workspace_router)
