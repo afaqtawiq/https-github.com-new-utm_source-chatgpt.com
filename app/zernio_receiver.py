@@ -131,6 +131,9 @@ async def receive(request: Request):
                 and not conversation.get('isGroup') and not message.get('isGroup')
                 and transport_phone(conversation.get('participantId')) == contact
                 and (not identity.get('id') or transport_phone(identity['id']) == contact))
+            if private_transport:
+                from app.campaign_cadence import record_whatsapp_reply
+                record_whatsapp_reply(c, '+' + contact, event_id, text)
             if private_transport and not sender:
                 from app.driver_test_context import reply_for_driver_test
                 from app.transport_owner import quoted_receipt

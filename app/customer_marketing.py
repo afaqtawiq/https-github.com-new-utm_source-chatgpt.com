@@ -1,9 +1,7 @@
 """Explicitly approved customer campaigns with immutable content and send receipts."""
 import asyncio
 import hashlib
-import json
 import os
-import secrets
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -49,6 +47,11 @@ def init():
             status TEXT NOT NULL DEFAULT 'pending', provider_message_id TEXT, last_error TEXT,
             claimed_at TIMESTAMPTZ, sent_at TIMESTAMPTZ,
             UNIQUE(campaign_id,channel,recipient))''')
+        c.execute('ALTER TABLE customer_campaign_recipients ADD COLUMN IF NOT EXISTS cadence_stage TEXT')
+        c.execute('ALTER TABLE customer_campaign_recipients ADD COLUMN IF NOT EXISTS sender_user_id BIGINT REFERENCES users(id)')
+        c.execute('''CREATE TABLE IF NOT EXISTS customer_campaign_replies(
+            channel TEXT NOT NULL, recipient TEXT NOT NULL, event_id TEXT NOT NULL,
+            received_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(channel,event_id))''')
         c.execute('''CREATE TABLE IF NOT EXISTS marketing_suppressions(
             channel TEXT NOT NULL, recipient TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY(channel,recipient))''')
@@ -85,31 +88,10 @@ def roster():
         UNION ALL SELECT 'directory:' || id::text,company_name,phone,email,'' FROM customer_directory''')
 
 
-def prepare(user_id, day=None):
-    day = day or datetime.now(RIYADH).date()
-    daily_key = KEY + '-' + day.isoformat()
-    listing = select_recipients(roster(), [(r['channel'],r['recipient']) for r in rows('SELECT * FROM marketing_suppressions')])
-    url, base = origin() + PDF_PATH, origin() + '/marketing/unsubscribe/'
-    with db() as c:
-        c.execute('SELECT pg_advisory_xact_lock(73002030)')
-        existing = c.execute('SELECT id FROM customer_campaigns WHERE campaign_key=%s',(daily_key,)).fetchone()
-        if existing: return existing['id']
-        campaign = c.execute('''INSERT INTO customer_campaigns(campaign_key,title,subject,plain_template,html_template,
-            brochure_url,unsubscribe_base,created_by,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''',
-            (daily_key,'بروشور خدمات ميناء جدة — '+day.isoformat(),SUBJECT,message_text(url,'__UNSUBSCRIBE__'),
-             message_html(url,'__UNSUBSCRIBE__'),url,base,user_id,utcnow())).fetchone()['id']
-        for channel in ('email','whatsapp'):
-            c.execute('INSERT INTO customer_campaign_channels(campaign_id,channel,updated_at) VALUES(%s,%s,%s)',(campaign,channel,utcnow()))
-        saved_count = 0
-        for item in listing:
-            if item['channel']=='email':
-                from app.prospect_outreach import campaign_duplicate
-                if campaign_duplicate(c,item['recipient']):continue
-            saved_count += 1
-            c.execute('''INSERT INTO customer_campaign_recipients(campaign_id,channel,recipient,company_name,sources,unsubscribe_token)
-                VALUES(%s,%s,%s,%s,%s,%s)''',(campaign,item['channel'],item['recipient'],item['company_name'],json.dumps(item['sources']),secrets.token_urlsafe(24)))
-    log(user_id,'customer_campaign_prepared','customer_campaign',campaign,f'{saved_count} channel recipients; no messages sent')
-    return campaign
+def prepare(user_id, day=None, *, now=None):
+    # No entrypoint-specific monkey patch: every route/worker uses the same guard.
+    from app.campaign_cadence import prepare as bounded_prepare
+    return bounded_prepare(user_id, day, now=now)
 
 
 def counts(campaign):
@@ -164,13 +146,13 @@ def home(request: Request):
     ec=sum(r['channel']=='email' for r in audience);wc=sum(r['channel']=='whatsapp' for r in audience)
     schedule=one('SELECT * FROM customer_campaign_schedule WHERE id=1')
     enabled=bool(schedule and schedule['enabled'])
-    schedule_box=f'''<div class=card><h2>الإرسال اليومي للشركات</h2><p>الحالة: {'مفعّل' if enabled else 'متوقف'} · يوميًا الساعة 9 صباحًا بتوقيت السعودية.</p>
-        <p>البروشور المعتمد عبر البريد وواتساب إلى الشركات المسجلة، مرة واحدة لكل عنوان في اليوم، مع استبعاد من أوقف الرسائل. يبدأ واتساب عند اعتماد قالب Meta.</p>
+    schedule_box=f'''<div class=card><h2>البروشور: رسالة أولى ومتابعة واحدة</h2><p>الحالة: {'مفعّل' if enabled else 'متوقف'} · فحص المستحقين يوميًا الساعة 9 صباحًا بتوقيت السعودية.</p>
+        <p>البروشور المعتمد عبر البريد وواتساب إلى الشركات المسجلة: رسالة أولى ثم متابعة واحدة فقط بعد مرور 7 أيام كاملة من قبول المزود، ثم يتوقف التسلسل لكل مستلم وقناة. تُستبعد طلبات الإيقاف والردود المرتبطة المؤكدة والمحاولات غير المحسومة. يبدأ واتساب عند اعتماد قالب Meta.</p>
         <p>{esc(schedule.get('last_error') if schedule else '')}</p>
         <form method=post action=/customer-campaigns/schedule><input type=hidden name=csrf value="{esc(s['csrf'])}">
         <input type=hidden name=enabled value="{'0' if enabled else '1'}">
-        {'' if enabled else '<label><input style="width:auto" type=checkbox name=confirmed value=yes required> أعتمد إرسال هذا البروشور يوميًا عبر البريد وواتساب إلى الشركات المسجلة الحالية والجديدة</label>'}
-        <button class=btn>{'إيقاف الإرسال اليومي' if enabled else 'تفعيل الإرسال اليومي'}</button></form>
+        {'' if enabled else '<label><input style="width:auto" type=checkbox name=confirmed value=yes required> أعتمد رسالة بروشور أولى ومتابعة واحدة فقط بعد 7 أيام عبر البريد وواتساب للشركات المسجلة الحالية والجديدة</label>'}
+        <button class=btn>{'إيقاف إرسال البروشور' if enabled else 'تفعيل الرسالة والمتابعة الواحدة'}</button></form>
         <p><a href=/mfa/step-up?next=/customer-campaigns>التحقق الأمني لتفعيل الجدولة</a></p></div>'''
     cards=''.join(f'<p><a href="/customer-campaigns/{x["id"]}">{esc(x["title"])}</a> · {esc(x["created_at"])}</p>' for x in rows('SELECT id,title,created_at FROM customer_campaigns ORDER BY id DESC'))
     return HTMLResponse(shell('حملات العملاء',f'''<div class=nav><a href=/dashboard>الرئيسية</a><a href=/accounts>العملاء</a></div>
@@ -205,7 +187,7 @@ def detail(cid:int,request:Request):
     records=''.join('<tr>'+''.join('<td>'+esc(r[k])+'</td>' for k in ('company_name','channel','recipient','status','last_error'))+'</tr>' for r in listing)
     preview=campaign['plain_template'].replace('__UNSUBSCRIBE__','رابط إيقاف خاص بكل مستلم')
     return HTMLResponse(shell(campaign['title'],f'''<div class=nav><a href=/customer-campaigns>الحملات</a><a href=/settings/email/spacemail>البريد الرسمي</a><a href=/settings/whatsapp/channel>قناة واتساب</a></div>
-        <h1>{esc(campaign['title'])}</h1><div class=card><b>{esc(stat)}</b><p>sent تعني قبول مزود الإرسال؛ لا تعني وصول الرسالة أو قراءتها.</p><a class=btn href="{PDF_PATH}" target=_blank>البروشور المرفق PDF</a><p><a href="/customer-campaigns/{cid}/preview" target=_blank>معاينة البريد بتصميم البروشور</a></p><pre style="white-space:pre-wrap">{esc(preview)}</pre></div>
+        <h1>{esc(campaign['title'])}</h1><div class=card><b>{esc(stat)}</b><p>sent تعني قبول مزود الإرسال؛ لا تعني وصول الرسالة أو قراءتها.</p><a class=btn href="{PDF_PATH}" target=_blank>البروشور المرفق PDF</a><p><a href="/customer-campaigns/{cid}/preview" target=_blank>معاينة البريد بتصميم البروشور</a></p><p>تعاد مراجعة كل مستلم عند الإرسال: رسالة أولى ومتابعة واحدة بعد 7 أيام كاملة فقط. cadence_skipped تعني استبعادًا دون إرسال.</p><pre style="white-space:pre-wrap">{esc(preview)}</pre></div>
         <form method=post action="/customer-campaigns/{cid}/template"><input type=hidden name=csrf value="{esc(s['csrf'])}"><button class=btn>تجهيز قالب واتساب لبروشور ميناء جدة</button></form>
         <p><a href="/mfa/step-up?next=/customer-campaigns/{cid}">التحقق الأمني للإرسال</a></p>{actions}
         <div class="card scroll"><table><tr><th>الشركة</th><th>القناة</th><th>المستلم</th><th>الحالة</th><th>الملاحظة</th></tr>{records}</table></div>'''))
@@ -268,28 +250,27 @@ async def deliver(cid,channel,user_id):
     for _ in range(2000):
         state=one('SELECT status FROM customer_campaign_channels WHERE campaign_id=? AND channel=?',(cid,channel))
         if not state or state['status']!='sending':return
+        from app.campaign_cadence import claim, check_dispatch, CadenceStopped
         with db() as c:
-            c.execute("UPDATE customer_campaign_recipients r SET status='suppressed' WHERE campaign_id=%s AND channel=%s AND status='pending' AND EXISTS(SELECT 1 FROM marketing_suppressions s WHERE s.channel=r.channel AND s.recipient=r.recipient)",(cid,channel))
-            item=c.execute("""UPDATE customer_campaign_recipients SET status='sending',claimed_at=%s WHERE id=(
-                SELECT id FROM customer_campaign_recipients WHERE campaign_id=%s AND channel=%s AND status='pending'
-                ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *""",(utcnow(),cid,channel)).fetchone()
-            if item and channel=='email':
-                from app.prospect_outreach import campaign_duplicate
-                if campaign_duplicate(c,item['recipient']):
-                    c.execute("UPDATE customer_campaign_recipients SET status='excluded_prospect',last_error=%s WHERE id=%s",('Manual prospect introduction already exists; excluded from customer campaign',item['id']))
-                    continue
+            item=claim(c,cid,channel,utcnow(),user_id)
         if not item:break
         url=campaign['unsubscribe_base']+item['unsubscribe_token']
         body=campaign['plain_template'].replace('__UNSUBSCRIBE__',url)
         try:
+            check_dispatch(item)
             if channel=='email':
-                mid=await run_in_threadpool(official_send,user_id,item['recipient'],campaign['subject'],body,
+                mid=await run_in_threadpool(official_send,user_id,item['dispatch_recipient'],campaign['subject'],body,
                     ('Afaaq_Jeddah_Brochure.pdf','application/pdf',PDF.read_bytes()),
-                    html_body=campaign['html_template'].replace('__UNSUBSCRIBE__',url))
+                    html_body=campaign['html_template'].replace('__UNSUBSCRIBE__',url),
+                    dispatch_check=lambda:check_dispatch(item))
             else:
-                result=await wa.send(item['recipient'],body,template_prefix='afaaq_marketing_')
+                with wa.dispatch_guard(lambda:check_dispatch(item)):
+                    result=await wa.send(item['dispatch_recipient'],body,template_prefix='afaaq_marketing_')
                 mid=result['messages'][0]['id']
             if not mid:raise RuntimeError('Missing provider receipt')
+        except CadenceStopped as exc:
+            execute("UPDATE customer_campaign_recipients SET status='cadence_skipped',last_error=? WHERE id=? AND status='sending'",(str(exc),item['id']))
+            continue
         except Exception as exc:
             if channel=='email' and isinstance(exc,MailRecipientRejected):
                 error=str(exc)
@@ -306,9 +287,11 @@ async def deliver(cid,channel,user_id):
             execute("UPDATE customer_campaign_channels SET status='paused',last_error=?,updated_at=? WHERE campaign_id=? AND channel=?",(error,utcnow(),cid,channel))
             return
         execute("UPDATE customer_campaign_recipients SET status='sent',provider_message_id=?,sent_at=?,last_error=NULL WHERE id=?",(mid,utcnow(),item['id']))
+    if one("SELECT COUNT(*) AS n FROM customer_campaign_recipients WHERE campaign_id=? AND channel=? AND status='sending'",(cid,channel))['n']:
+        return  # Another worker owns an in-flight row; never finish its channel.
     issues=one("SELECT COUNT(*) AS n FROM customer_campaign_recipients WHERE campaign_id=? AND channel=? AND status IN ('uncertain','sending','rejected','bounced')",(cid,channel))['n']
     execute("UPDATE customer_campaign_channels SET status=?,updated_at=? WHERE campaign_id=? AND channel=? AND status='sending'",('completed_with_issues' if issues else 'completed',utcnow(),cid,channel))
-    log(user_id,'customer_campaign_channel_finished','customer_campaign',cid,channel+'; provider receipts recorded')
+    log(user_id,'customer_campaign_channel_finished','customer_campaign',cid,channel+'; queue checked; per-recipient statuses retain receipts and exclusions')
 
 
 @router.post('/customer-campaigns/{cid}/send/{channel}')
@@ -349,15 +332,15 @@ async def schedule_campaign(request:Request):
     s,data=await checked_form(request)
     if not all(has_permission(s,p) for p in ('send_email','send_whatsapp')):raise HTTPException(403)
     enabled=data.get('enabled')=='1'
-    if enabled and data.get('confirmed')!='yes':raise HTTPException(400,'اعتمد الإرسال اليومي أولًا.')
+    if enabled and data.get('confirmed')!='yes':raise HTTPException(400,'اعتمد الرسالة الأولى والمتابعة الواحدة بعد 7 أيام أولًا.')
     execute('''INSERT INTO customer_campaign_schedule(id,enabled,approved_by,approved_at,content_digest)
         VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,
         approved_by=excluded.approved_by,approved_at=excluded.approved_at,
         content_digest=excluded.content_digest,last_error=NULL''',(enabled,s['user_id'],utcnow(),content_digest()))
     if not enabled:
-        execute("UPDATE customer_campaign_channels SET status='paused',last_error=? WHERE status='sending' AND campaign_id IN (SELECT id FROM customer_campaigns WHERE campaign_key LIKE ?)",('أوقف المسؤول الإرسال اليومي.',KEY+'-%'))
+        execute("UPDATE customer_campaign_channels SET status='paused',last_error=? WHERE status='sending' AND campaign_id IN (SELECT id FROM customer_campaigns WHERE campaign_key LIKE ? OR brochure_url LIKE ?)",('أوقف المسؤول إرسال البروشور.', 'jeddah-port-introduction-%','%'+PDF_PATH))
     log(s['user_id'],'customer_campaign_schedule','customer_campaign',None,
-        ('Enabled' if enabled else 'Disabled')+' daily 09:00 Asia/Riyadh; email and WhatsApp; current and newly registered customers; approved artwork fingerprint')
+        ('Enabled' if enabled else 'Disabled')+' initial + at most one follow-up >=7 days; eligibility check daily 09:00 Asia/Riyadh; email and WhatsApp; current and newly registered customers; approved artwork fingerprint')
     return RedirectResponse('/customer-campaigns',303)
 
 
@@ -375,7 +358,7 @@ async def daily_tick(now=None):
         execute('UPDATE customer_campaign_schedule SET enabled=FALSE,last_error=? WHERE id=1',('توقفت الجدولة بسبب تغير صلاحية حساب الاعتماد.',));return
     if schedule['content_digest']!=content_digest():
         execute('UPDATE customer_campaign_schedule SET enabled=FALSE,last_error=? WHERE id=1',('تغير محتوى البروشور؛ راجعه وأعد تفعيل الجدولة.',));return
-    cid=prepare(user['id'],now.date())
+    cid=prepare(user['id'],now.date(),now=now)
     campaign=one('SELECT * FROM customer_campaigns WHERE id=?',(cid,))
     for channel in ('email','whatsapp'):
         state=one('SELECT * FROM customer_campaign_channels WHERE campaign_id=? AND channel=?',(cid,channel))

@@ -110,7 +110,7 @@ def validate(secret):
 
 
 @observe('إرسال البريد الرسمي', 'قبل خادم البريد الرسالة — التسليم غير مؤكد')
-def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, references=None, automatic=False, html_body=None):
+def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, references=None, automatic=False, html_body=None, dispatch_check=None):
     if os.getenv('ENABLE_EXTERNAL_ACTIONS', '0') != '1':
         raise RuntimeError('External actions are disabled')
     msg = EmailMessage()
@@ -136,6 +136,13 @@ def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, re
         client = smtp_login(password(uid))
     except Exception:
         raise MailConnectionFailed() from None
+    try:
+        if dispatch_check is not None:
+            dispatch_check()
+    except Exception:
+        with suppress(Exception):
+            client.close()
+        raise
     try:
         refused = client.send_message(msg)
         if refused:

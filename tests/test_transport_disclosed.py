@@ -77,11 +77,34 @@ def test_digest_is_order_independent_but_not_audience_independent(campaign):
 
 
 def test_short_owner_inquiry_has_only_approved_questions_and_no_reference():
-    from app.transport_owner import inquiry
+    from app.transport_owner import short_inquiry
     from app.transport_test import owner_inquiry
     body = 'السلام عليكم، معك آفاق طويق. بخصوص حمولة جدة إلى الشارقة: كم السعر؟ وما طريقة الدفع؟ والتحميل من داخل الميناء أم خارجه؟'
-    assert inquiry('جدة', 'الشارقة') == body
+    assert short_inquiry('جدة', 'الشارقة') == body
     assert owner_inquiry({'is_test':True,'reference':'NQ-29','origin':'جدة','destination':'الشارقة'}) == DISCLAIMER + '\n' + body
+
+
+def test_real_owner_inquiry_preserves_existing_v2_body_and_all_required_questions():
+    from app.transport_owner import inquiry
+    from app.zernio_whatsapp import required_templates
+    # Frozen pre-existing v2 payload: adding requirements must not mutate a
+    # provider-approved identity or put new fixed questions into route variables.
+    template_body = ('السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n\n'
+                     'بخصوص الحمولة من {{1}} إلى {{2}}، هل ما زالت متاحة؟\n\n'
+                     'نرجو توضيح:\n'
+                     '• موقع التحميل في {{1}}: هل داخل الميناء أم خارجه؟\n'
+                     '• موقع التنزيل في {{2}}.\n'
+                     '• نوع البضاعة ووزنها الفعلي ونوع الشاحنة المطلوبة.\n'
+                     '• موعد التحميل.\n'
+                     '• السعر المعروض للنقل وطريقة وموعد الدفع.\n\n'
+                     'للتواصل مع آفاق طويق عبر واتساب فقط:\n'
+                     '+966530130435')
+    template = next(t for t in required_templates() if t['name'] == 'afaaq_transport_owner_inquiry_v2_ar')
+    assert template['components'][0]['text'] == template_body
+    body = inquiry('جدة', 'دبي')
+    assert body == template_body.replace('{{1}}', 'جدة').replace('{{2}}', 'دبي')
+    assert template_parameters(template, body) == ['جدة', 'دبي']
+    assert 'NQ-' not in body and DISCLAIMER not in body
 
 
 @pytest.fixture

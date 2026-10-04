@@ -3,6 +3,25 @@ import re
 
 
 def inquiry(origin, destination):
+    """Real-owner preview and send body for the existing owner v2 template.
+
+    Keep fixed wording identical to its registered payload. Runtime still
+    verifies the provider's current APPROVED body before a first-contact send.
+    """
+    return ('السلام عليكم، معك آفاق طويق للنقل والخدمات اللوجستية.\n\n'
+            f'بخصوص الحمولة من {origin} إلى {destination}، هل ما زالت متاحة؟\n\n'
+            'نرجو توضيح:\n'
+            f'• موقع التحميل في {origin}: هل داخل الميناء أم خارجه؟\n'
+            f'• موقع التنزيل في {destination}.\n'
+            '• نوع البضاعة ووزنها الفعلي ونوع الشاحنة المطلوبة.\n'
+            '• موعد التحميل.\n'
+            '• السعر المعروض للنقل وطريقة وموعد الدفع.\n\n'
+            'للتواصل مع آفاق طويق عبر واتساب فقط:\n'
+            '+966530130435')
+
+
+def short_inquiry(origin, destination):
+    """Preserve the separately reviewed short/test template wording."""
     return (f'السلام عليكم، معك آفاق طويق. بخصوص حمولة {origin} إلى {destination}: '
             'كم السعر؟ وما طريقة الدفع؟ والتحميل من داخل الميناء أم خارجه؟')
 
