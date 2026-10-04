@@ -148,6 +148,7 @@ def parse_command(raw):
     navigation = {
         "الرئيسية": "/dashboard", "افتح الرئيسية": "/dashboard", "اعرض الرئيسية": "/dashboard",
         "افتح العملاء": "/accounts", "اعرض العملاء": "/accounts", "العملاء": "/accounts",
+        "افتح شركات النقل": "/carriers", "اعرض شركات النقل": "/carriers", "شركات النقل": "/carriers",
         "افتح السائقين": "/drivers", "اعرض السائقين": "/drivers", "السائقين": "/drivers",
         "افتح الفرص": "/opportunities", "اعرض الفرص": "/opportunities", "الفرص": "/opportunities",
         "افتح العشر فرص": "/opportunities", "اعرض العشر فرص": "/opportunities",

@@ -304,7 +304,7 @@ wa.run_command = run_command
 # ------------------------------------------------------------------ /commands web page
 
 _original_parse = page.parse_command
-NAV = {'/dashboard', '/accounts', '/drivers', '/opportunities', '/approvals', '/shipments', '/shipping-agents',
+NAV = {'/dashboard', '/accounts', '/carriers', '/drivers', '/opportunities', '/approvals', '/shipments', '/shipping-agents',
        '/saber', '/content-center', '/discovery', '/sales-copilot', '/pipeline', '/activity',
        '/customer-campaigns', '/naqliat', '/freight-workflow', '/commands'}
 
