@@ -56,7 +56,7 @@ def test_csv_formula_injection(value):
     assert lines[1][0]=="'"+value and lines[2][0]=='0'
 
 
-@pytest.mark.parametrize('kind,expected',[('claim',('receivable',1)),('receipt',('receivable',-1)),('payable',('payable',1)),('expense',('payable',1)),('payment',('payable',-1)),('receivable_adjustment',('receivable',-1)),('payable_adjustment',('payable',-1))])
+@pytest.mark.parametrize('kind,expected',[('opening_receivable',('receivable',1)),('opening_payable',('payable',1)),('claim',('receivable',1)),('receipt',('receivable',-1)),('payable',('payable',1)),('expense',('payable',1)),('payment',('payable',-1)),('receivable_adjustment',('receivable',-1)),('payable_adjustment',('payable',-1))])
 def test_sides_no_profit_or_tax_inference(kind,expected):
     assert core.KINDS[kind]==expected
 
@@ -76,23 +76,38 @@ def opening_form(**extra):
     return data
 
 
-def test_opening_preserves_precision_and_is_not_new_claim_or_receipt():
-    item=core.parse_document(opening_form(source_cached_external='1'))
-    assert core.KINDS[item['kind']]==('receivable',1)
-    assert item['kind'] not in ('claim','receipt')
+@pytest.mark.parametrize('kind,side',[('opening_receivable','receivable'),('opening_payable','payable')])
+def test_opening_preserves_precision_and_is_not_new_claim_or_receipt(kind,side):
+    item=core.parse_document(opening_form(kind=kind,source_cached_external='1'))
+    assert core.KINDS[item['kind']]==(side,1)
+    assert item['kind'] not in ('claim','receipt','payable','payment','expense')
     assert item['source_amount']==Decimal('123.45678901') and item['amount_minor']==12346
     assert item['source_role']=='summary' and item['source_verification']=='recorded'
     assert item['source_cached_external'] and core.validation_issues(item)==[]
 
 
+@pytest.mark.parametrize('kind',['opening_receivable','opening_payable'])
 @pytest.mark.parametrize('extra',[
     {'opening_cutoff':''},{'opening_cutoff':'2026-01-03'},{'opening_confirmation_ref':''},
     {'source_role':'detail'},{'amount_basis':'gross'},{'invoice_ref':'invoice-1'},
     {'customs_ref':'declaration-1'},{'shipment_id':'1'},
     {'source_verification':'independently_verified','verification_ref':''},
 ])
-def test_opening_requires_explicit_cutoff_net_summary_and_approval(extra):
-    assert core.validation_issues(core.parse_document(opening_form(**extra)))
+def test_opening_requires_explicit_cutoff_net_summary_and_approval(kind,extra):
+    assert core.validation_issues(core.parse_document(opening_form(kind=kind,**extra)))
+
+
+def test_opening_payable_keeps_negative_source_evidence_but_posts_positive_liability():
+    raw='-123.45678901 synthetic original credit balance'
+    item=core.parse_document(opening_form(kind='opening_payable',source_amount_raw=raw,
+        source_cached_external='1'))
+    assert item['source_amount']==Decimal('123.45678901') and item['source_amount_raw']==raw
+    assert item['amount_minor']==12346 and core.KINDS[item['kind']]==('payable',1)
+    assert item['source_verification']=='recorded' and item['verification_ref']==''
+    assert core.validation_issues(item)==[]
+    for amount in ('-123.45678901','0'):
+        with pytest.raises(ValueError):
+            core.parse_document(opening_form(kind='opening_payable',amount=amount,source_amount_raw=raw))
 
 
 def test_normal_document_cannot_carry_opening_override():
@@ -100,3 +115,49 @@ def test_normal_document_cannot_carry_opening_override():
     with pytest.raises(ValueError):core.parse_document(data)
     data=form();data['opening_cutoff']='2026-01-02'
     with pytest.raises(ValueError):core.parse_document(data)
+
+
+def total_row(**extra):
+    result=dict(owner_id=1,owner_name='Synthetic owner',currency='SAR',receivable_minor=12345,
+        payable_minor=2000,payable_document_count=1)
+    result.update(extra)
+    return result
+
+
+def test_owner_totals_exact_receivables_minus_recorded_debts():
+    first=total_row()
+    second=dict(first,receivable_minor=Decimal('4321'),payable_minor=Decimal('345'),payable_document_count=2)
+    result=core.owner_balance_totals([first,second])
+    assert result==[dict(owner_id=1,owner_name='Synthetic owner',currency='SAR',receivable_minor=16666,
+        payable_minor=2345,net_minor=14321,payable_document_count=3,
+        receivable_display='166.66',payable_display='23.45',net_display='143.21')]
+    assert first==total_row(), 'Read-only summary changed its input'
+
+
+def test_owner_totals_never_mix_currencies_or_identical_owner_names():
+    first=total_row()
+    result=core.owner_balance_totals([first,dict(first,owner_id=2),dict(first,currency='KWD'),dict(first,currency='JPY')])
+    assert len(result)==4
+    keyed={(r['owner_id'],r['currency']):r for r in result}
+    assert keyed[(1,'SAR')]['net_display']=='103.45'
+    assert keyed[(2,'SAR')]['net_display']=='103.45'
+    assert keyed[(1,'KWD')]['net_display']=='10.345'
+    assert keyed[(1,'JPY')]['net_display']=='10345'
+
+
+@pytest.mark.parametrize('receivable,payable,expected',[(0,0,'0.00'),(-125,200,'-3.25'),(125,-200,'3.25'),(200,200,'0.00')])
+def test_owner_totals_preserve_zero_and_credit_balances(receivable,payable,expected):
+    row=dict(total_row(),receivable_minor=receivable,payable_minor=payable,payable_document_count=0)
+    item=core.owner_balance_totals([row])[0]
+    assert item['net_display']==expected and item['payable_document_count']==0
+
+
+def test_owner_totals_empty_and_no_dashboard_display_limit():
+    assert core.owner_balance_totals([])==[]
+    rows=[dict(total_row(),receivable_minor=1,payable_minor=0,payable_document_count=0) for _ in range(225)]
+    assert core.owner_balance_totals(rows)[0]['net_display']=='2.25'
+
+
+@pytest.mark.parametrize('field,value',[('receivable_minor',1.25),('payable_minor',Decimal('1.1')),('receivable_minor',True),('payable_document_count',-1),('currency',''),('currency','ZZZ'),('owner_id',0)])
+def test_owner_totals_reject_missing_or_inexact_scope_and_units(field,value):
+    with pytest.raises(ValueError):core.owner_balance_totals([dict(total_row(),**{field:value})])

@@ -87,9 +87,10 @@ def statement_csv(request: Request, owner_id: int, counterparty_id: int, currenc
 def api(request: Request, response: Response):
     response.headers['Cache-Control'] = 'no-store'
     auth(request)
-    parties, documents, summary, audit, rules = service.dashboard_data()
+    parties, documents, summary, audit, rules, totals = service.dashboard_data()
     # All monetary values returned as decimal strings / integer units, never binary floats.
     return {'parties':parties,'documents':documents,'balances':[dict(x,receivable_minor=str(x['receivable_minor']),payable_minor=str(x['payable_minor'])) for x in summary],
+            'totals':[dict(x, **{name+'_minor':str(x[name+'_minor']) for name in ('receivable','payable','net')}) for x in totals],
             'rules':[dict(x,rate=str(x['rate'])) for x in rules], 'scope':'operational_subledger', 'external_actions':False}
 
 
