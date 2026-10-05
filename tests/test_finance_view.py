@@ -280,7 +280,7 @@ def test_dashboard_role_gates(role):
 def test_detail_role_gates(role, status):
     output = view.render_document(session(role), document(status=status), [], [], [])
     actions = {f['action'].rsplit('/', 1)[-1] for f in Page(output).posts}
-    expected = {'admin': {'draft': {'review', 'void'}, 'reviewed': {'post', 'void'}, 'posted': {'reverse'}},
+    expected = {'admin': {'draft': {'review', 'void', 'claim-details'}, 'reviewed': {'post', 'void', 'claim-details'}, 'posted': {'reverse', 'claim-details'}},
                 'finance': {'draft': {'review'}}}
     assert actions == expected.get(role, {}).get(status, set())
 
@@ -298,7 +298,7 @@ def test_permissions_are_independent():
     assert not Page(view.render_document(edit_only, document(status='reviewed'), [], [], [])).posts
     approve_only = session(can_edit_finance=False, can_approve_finance=True)
     assert '/finance/documents' not in {f['action'] for f in Page(dashboard(approve_only)).posts}
-    assert {f['action'].rsplit('/', 1)[-1] for f in Page(view.render_document(approve_only, document(), [], [], [])).posts} == {'void'}
+    assert {f['action'].rsplit('/', 1)[-1] for f in Page(view.render_document(approve_only, document(), [], [], [])).posts} == {'void', 'claim-details'}
 
 
 def test_document_form_preserves_economic_and_source_evidence_fields():

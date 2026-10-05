@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from app.storage import get_session, one
 from app.fine_permissions import has_permission
 from app import finance_core as core, finance_service as service, finance_view as view
+from app import finance_claim_view as claim_view
 
 router = APIRouter()
 
@@ -65,6 +66,30 @@ def dashboard(request: Request):
 def detail(doc_id: int, request: Request):
     session = auth(request)
     return HTMLResponse(view.render_document(session, *service.detail_data(doc_id)), headers={'Cache-Control':'no-store'})
+
+
+@router.get('/finance/documents/{doc_id}/claim', response_class=HTMLResponse)
+def customer_claim(doc_id: int, request: Request):
+    auth(request)
+    return HTMLResponse(claim_view.render_customer_claim(*service.customer_claim_data(doc_id)),
+                        headers={'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
+
+
+@router.get('/finance/documents/{doc_id}/claim.pdf')
+def customer_claim_pdf(doc_id: int, request: Request):
+    auth(request)
+    from app.finance_claim_pdf import render_pdf
+    content = invoke(render_pdf, *service.customer_claim_data(doc_id))
+    return Response(content, media_type='application/pdf', headers={
+        'Content-Disposition':'attachment; filename="claim-'+str(doc_id)+'.pdf"',
+        'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
+
+
+@router.post('/finance/documents/{doc_id}/claim-details')
+async def claim_details(doc_id: int, request: Request):
+    session, form = await mutation(request, 'approve_finance')
+    invoke(service.attach_claim_details, doc_id, session['user_id'], form)
+    return RedirectResponse('/finance/documents/'+str(doc_id)+'#claim-details',303)
 
 
 @router.get('/finance/statement', response_class=HTMLResponse)
