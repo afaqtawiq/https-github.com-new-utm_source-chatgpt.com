@@ -8,3 +8,6 @@ qrcode[pil]==7.4.2
 openpyxl==3.1.5
 python-multipart==0.0.20
 Pillow==12.3.0
+reportlab==4.4.9
+arabic-reshaper==3.0.0
+python-bidi==0.6.6

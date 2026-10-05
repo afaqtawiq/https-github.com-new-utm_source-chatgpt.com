@@ -5,8 +5,10 @@ import uuid
 from decimal import Decimal
 from fastapi import HTTPException
 from psycopg.errors import UniqueViolation
+from psycopg.types.json import Jsonb
 from app.storage import db, utcnow
 from app import finance_core as core
+from app import finance_claim_core as claim_core
 from app.finance_schema import LOCK_KEY
 
 
@@ -135,6 +137,54 @@ def create_document(form, actor):
             return row['id']
     except UniqueViolation:
         fail('صف المصدر مسجل مسبقًا؛ لا تُكرر الحركة من نفس المصدر', 409)
+
+
+def attach_claim_details(doc_id, actor, form):
+    """Save approved presentation only, with replay and stale-form protection."""
+    key = token(form.get('idempotency_key'))
+    with db() as c:
+        lock(c)
+        item = document(c, doc_id)
+        payload = claim_core.parse_details(form, item)
+        digest = fingerprint(dict(document_id=doc_id, **payload))
+        prior = replay(c, 'finance_claim_details', key, digest)
+        if prior:
+            return prior['id']
+        current = c.execute('SELECT id FROM finance_claim_details WHERE document_id=%s ORDER BY id DESC LIMIT 1', (doc_id,)).fetchone()
+        if payload['previous_revision'] != (current['id'] if current else 0):
+            fail('تغير تفصيل المطالبة منذ فتح النموذج؛ حدّث الصفحة', 409)
+        identity(c, item['owner_id'], item['counterparty_id'])
+        values = dict(payload, components=Jsonb(payload['components']))
+        keys = list(values)
+        row = c.execute('INSERT INTO finance_claim_details(document_id,'+','.join(keys)+',idempotency_key,payload_hash,created_by,created_at) VALUES('
+            + ','.join(['%s'] * (len(keys)+5)) + ') RETURNING id',
+            (doc_id,)+tuple(values.values())+(key,digest,actor,utcnow())).fetchone()
+        audit(c, actor, 'claim_details_attached', 'document', doc_id,
+              dict(detail_revision=row['id'], **payload))
+        return row['id']
+
+
+def claim_details(c, doc_id):
+    row = c.execute('SELECT * FROM finance_claim_details WHERE document_id=%s ORDER BY id DESC LIMIT 1', (doc_id,)).fetchone()
+    return claim_core.present_details(row)
+
+
+def customer_claim_data(doc_id):
+    """Allowlisted customer data only; never original notes, audit or source paths."""
+    with db() as c:
+        item = c.execute(DOCUMENT_SELECT+' WHERE d.id=%s', (doc_id,)).fetchone()
+        if not item:
+            fail('الحركة غير موجودة', 404)
+        if item['kind'] != 'claim' or item['status'] != 'posted':
+            fail('عرض العميل متاح للمطالبة المرحّلة النشطة فقط', 409)
+        detail = claim_details(c, doc_id)
+        if not detail:
+            fail('سجل تفصيل المطالبة وراجعه أولًا', 409)
+        if detail['currency'] != item['currency'] or detail['claim_total_minor'] != item['amount_minor']:
+            fail('تفصيل المطالبة غير مطابق للمستند', 409)
+        safe_document = {key:item[key] for key in ('id','owner_name','counterparty_name','document_date','invoice_ref','customs_ref','currency')}
+        safe_detail = {key:detail[key] for key in ('id','goods_amount','goods_currency','exchange_rate','goods_value_display','claim_total_display','component_display','customs_total_display')}
+        return safe_document, safe_detail
 
 
 def document(c, doc_id):
@@ -380,6 +430,7 @@ def detail_data(doc_id):
         if not item:
             fail('الحركة غير موجودة',404)
         item = enrich(c,item)
+        item['claim_details'] = claim_details(c, doc_id) if item['kind'] == 'claim' else None
         allocations = c.execute('SELECT * FROM finance_allocations WHERE credit_id=%s OR document_id=%s ORDER BY id', (doc_id,doc_id)).fetchall()
         for allocation in allocations:
             allocation['amount_display'] = core.display_minor(allocation['amount_minor'],item['currency'])
