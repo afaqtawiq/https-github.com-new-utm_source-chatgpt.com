@@ -268,7 +268,7 @@ def test_summary_is_read_only_and_retains_all_existing_actions(role):
 def test_dashboard_role_gates(role):
     actions = {f['action'] for f in Page(dashboard(session(role))).posts}
     if role == 'admin':
-        assert actions == {'/finance/documents', '/finance/parties', '/finance/rules'}
+        assert actions == {'/finance/documents', '/finance/parties', '/finance/rules', '/finance/owners/1/display-name'}
     elif role == 'finance':
         assert actions == {'/finance/documents'}
     else:
@@ -648,3 +648,28 @@ def test_opening_allocations_remain_admin_only(opening_kind, credit_kind, restri
     current, candidate = (opening, credit) if opening_is_current else (credit, opening)
     output = view.render_document(restricted_session, current, [], [], [candidate])
     assert '/finance/allocations' not in {f['action'] for f in Page(output).posts}
+
+
+def test_owner_name_correction_is_narrow_guarded_and_accessible():
+    ps=parties()+[dict(parties()[0],id=3,confirmed=False)]
+    ps[0]['name_revision']=17
+    output=view.render_dashboard(session(),ps,[],[],[],[])
+    page=Page(output)
+    form=page.form('/finance/owners/1/display-name')
+    inputs=fields(form)
+    assert set(inputs)=={'csrf','idempotency_key','expected_revision','name','reason','confirmation'}
+    assert inputs['expected_revision']['value']=='17'
+    assert inputs['name']['value']==ps[0]['name']
+    assert inputs['name']['maxlength']=='200' and 'required' in inputs['name']
+    assert inputs['reason']['maxlength']=='1000' and 'required' in inputs['reason']
+    assert inputs['confirmation']['value']=='1' and 'required' in inputs['confirmation']
+    assert inputs['csrf']['value']=='fixture-csrf'
+    UUID(inputs['idempotency_key']['value'])
+    assert '/finance/owners/2/display-name' not in output
+    assert '/finance/owners/3/display-name' not in output
+    assert 'type="reset">إلغاء التغييرات</button>' in output
+    assert 'تبقى الهوية الأصلية ومراجع المصدر والأرصدة' in output
+    for s in (session('finance'),session('viewer'),session(can_approve_finance=False)):
+        assert '/display-name' not in view.render_dashboard(s,ps,[],[],[],[])
+    assert len(page.ids)==len(set(page.ids))
+    assert all(label in page.ids for label in page.labels)

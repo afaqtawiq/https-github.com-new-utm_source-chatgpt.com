@@ -108,6 +108,13 @@ async def create_document(request: Request):
     return RedirectResponse('/finance/documents/'+str(doc_id),303)
 
 
+@router.post('/finance/owners/{owner_id}/display-name')
+async def rename_owner(owner_id: int, request: Request):
+    session, form = await mutation(request, 'approve_finance')
+    invoke(service.rename_owner, owner_id, session['user_id'], form)
+    return RedirectResponse('/finance#parties',303)
+
+
 @router.post('/finance/documents/{doc_id}/review')
 async def review(doc_id: int, request: Request):
     session, form = await mutation(request)
