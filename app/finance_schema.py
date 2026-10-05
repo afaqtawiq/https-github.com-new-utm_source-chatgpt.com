@@ -82,6 +82,23 @@ def init_storage():
             id BIGSERIAL PRIMARY KEY, actor_id BIGINT NOT NULL REFERENCES users(id),
             action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id BIGINT NOT NULL,
             detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)''')
+        # Display-name corrections are append-only. The confirmed identity and
+        # every source, document, relationship and journal row stay immutable.
+        c.execute('''CREATE TABLE IF NOT EXISTS finance_owner_name_changes(
+            id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES finance_parties(id),
+            name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 200),
+            previous_name TEXT NOT NULL, previous_revision BIGINT NOT NULL,
+            reason TEXT NOT NULL CHECK(length(trim(reason)) BETWEEN 1 AND 1000),
+            idempotency_key UUID NOT NULL UNIQUE, payload_hash TEXT NOT NULL,
+            created_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL,
+            UNIQUE(owner_id,previous_revision))''')
+        c.execute('''CREATE OR REPLACE VIEW finance_party_display AS
+            SELECT p.id,COALESCE(n.name,p.name) name,p.kind,p.identity_ref,p.confirmed,
+                p.created_by,p.created_at,COALESCE(n.id,0) name_revision
+            FROM finance_parties p LEFT JOIN LATERAL (
+                SELECT id,name FROM finance_owner_name_changes
+                WHERE owner_id=p.id ORDER BY id DESC LIMIT 1
+            ) n ON p.kind='owner' ''')
         c.execute('''CREATE TABLE IF NOT EXISTS finance_entitlement_rules(
             id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES finance_parties(id),
             company_scope TEXT NOT NULL, rate NUMERIC(7,4) NOT NULL CHECK(rate>0 AND rate<=100),
@@ -94,7 +111,7 @@ def init_storage():
         c.execute('CREATE INDEX IF NOT EXISTS finance_entity_audit ON finance_audit(entity_type,entity_id,id DESC)')
         c.execute('''CREATE OR REPLACE FUNCTION finance_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN RAISE EXCEPTION 'Finance evidence and entries are immutable'; END; $$''')
-        for table in ('finance_entries', 'finance_audit', 'finance_parties', 'finance_entitlement_rules'):
+        for table in ('finance_entries', 'finance_audit', 'finance_parties', 'finance_entitlement_rules', 'finance_owner_name_changes'):
             c.execute('DROP TRIGGER IF EXISTS immutable_finance_row ON '+table)
             c.execute('CREATE TRIGGER immutable_finance_row BEFORE UPDATE OR DELETE ON '+table+' FOR EACH ROW EXECUTE FUNCTION finance_immutable()')
         c.execute('''CREATE OR REPLACE FUNCTION finance_preserve_document() RETURNS trigger LANGUAGE plpgsql AS $$

@@ -1,6 +1,7 @@
 """Disposable synthetic PostgreSQL finance acceptance. Blocks all external egress."""
 import csv
 import io
+import json
 import os
 from pathlib import Path
 import secrets
@@ -302,10 +303,83 @@ def run():
     preview=service.dashboard_data()[1]
     assert len(preview)==200 and all(item['status']=='draft' for item in preview)
     assert read_totals()==separated,'totals must use the journal, not the latest 200 documents'
+    # Correct only the display name of the existing owner. All original rows,
+    # monetary values, source evidence, links and prior audit events survive.
+    rename_path=f'/finance/owners/{owner}/display-name'
+    preserved_tables=('finance_parties','finance_documents','finance_entries','finance_allocations','finance_entitlement_rules')
+    preserved={t:rows('SELECT * FROM '+t+' ORDER BY id') for t in preserved_tables}
+    old_audit=rows('SELECT * FROM finance_audit ORDER BY id')
+    old_totals=read_totals()
+    original_name=one('SELECT name FROM finance_parties WHERE id=%s',(owner,))['name']
+    new_name='وكيل حساب اختباري <script>not executable</script>'
+    rename=form(name=new_name,expected_revision='0',reason='Synthetic approval: sector display name only',confirmation='1')
+    for role in ('finance','sales','viewer','transport','customs'):
+        post(rename_path,dict(rename,csrf=sessions[role]['csrf']),role,403)
+    assert request(None,'POST',rename_path,data=rename).status_code in (401,303)
+    post(rename_path,dict(rename,csrf='wrong'),code=403)
+    for extra in ({'name':''},{'name':'x'*201},{'name':'bad\x00name'},{'reason':''},{'reason':'x'*1001},
+                  {'confirmation':''},{'expected_revision':'-1'},{'expected_revision':'abc'},
+                  {'expected_revision':'١'},{'kind':'counterparty'},{'owner_id':owner2},
+                  {'identity_ref':'rewritten'},{'confirmed':'0'},{'amount':'1'},{'idempotency_key':'invalid'}):
+        post(rename_path,dict(rename,**extra),code=400)
+    post(rename_path,dict(rename,expected_revision='1'),code=409)
+    post(rename_path,dict(rename,name=original_name),code=400)
+    post(f'/finance/owners/{party}/display-name',rename,code=400)
+    post('/finance/owners/999999999/display-name',rename,code=400)
+    assert rows('SELECT * FROM finance_owner_name_changes')==[]
+    post(rename_path,rename);post(rename_path,rename)
+    changes=rows('SELECT * FROM finance_owner_name_changes')
+    assert len(changes)==1 and changes[0]['owner_id']==owner
+    assert changes[0]['previous_name']==original_name and changes[0]['name']==new_name
+    assert changes[0]['created_by']==sessions['admin']['user_id'] and changes[0]['reason']==rename['reason']
+    new_audit=rows('SELECT * FROM finance_audit ORDER BY id')
+    assert new_audit[:-1]==old_audit and len(new_audit)==len(old_audit)+1
+    event=new_audit[-1]
+    assert (event['action'],event['entity_type'],event['entity_id'])==('owner_display_name_changed','party',owner)
+    assert json.loads(event['detail'])==dict(previous_name=original_name,name=new_name,reason=rename['reason'],previous_revision=0)
+    resolved=one('SELECT * FROM finance_party_display WHERE id=%s',(owner,))
+    assert resolved['name']==new_name and resolved['name_revision']==changes[0]['id']
+    post(rename_path,dict(rename,name='Different payload'),code=409)
+    post(rename_path,dict(rename,idempotency_key=str(uuid.uuid4()),name='Stale form'),code=409)
+    for t,data in preserved.items():assert rows('SELECT * FROM '+t+' ORDER BY id')==data,t
+    new_totals=read_totals()
+    assert set(new_totals)==set(old_totals)
+    for key,old in old_totals.items():
+        assert new_totals[key]==dict(old,owner_name=new_name) if key[0]==owner else new_totals[key]==old
+    api_data=request('admin','GET','/api/v7/finance').json()
+    assert next(p for p in api_data['parties'] if p['id']==owner)['name']==new_name
+    assert all(d['owner_name']==new_name for d in api_data['documents'] if d['owner_id']==owner)
+    assert service.detail_data(claim)[0]['owner_name']==new_name
+    statement_path=f'/finance/statement?owner_id={owner}&counterparty_id={party}&currency=SAR'
+    for path in ('/finance',f'/finance/documents/{claim}',statement_path):
+        output=request('admin','GET',path).text
+        assert 'وكيل حساب اختباري &lt;script&gt;not executable&lt;/script&gt;' in output
+        assert new_name not in output,'name must be HTML escaped'
+    csv_rows=list(csv.reader(io.StringIO(request('admin','GET',statement_path.replace('/statement?','/statement.csv?')).content.decode('utf-8-sig'))))
+    assert len(csv_rows)>1 and all(row[0]==new_name for row in csv_rows[1:])
+    for sql in ("UPDATE finance_owner_name_changes SET name='overwrite'",
+                'DELETE FROM finance_owner_name_changes',"UPDATE finance_parties SET name='overwrite' WHERE id="+str(owner)):
+        try:
+            with db() as c:c.execute(sql)
+            raise AssertionError('Immutable financial name history accepted mutation')
+        except RaiseException:pass
+    # A second correction uses the latest revision; an old replay cannot undo it.
+    next_rename=form(name='Synthetic sector display',expected_revision=str(changes[0]['id']),reason='Synthetic second correction',confirmation='1')
+    post(rename_path,next_rename);post(rename_path,rename)
+    assert one('SELECT name FROM finance_party_display WHERE id=%s',(owner,))['name']==next_rename['name']
+    assert one('SELECT COUNT(*) n FROM finance_owner_name_changes')['n']==2
+    # Explicit denied admin approval applies to the new endpoint as well.
+    with db() as c:
+        c.execute('INSERT INTO role_permissions(role,permission,allowed,updated_at) VALUES(%s,%s,0,%s)',('admin','approve_finance',utcnow()))
+    post(rename_path,next_rename,code=403)
+    assert '/display-name' not in request('admin','GET','/finance').text
+    with db() as c:c.execute("DELETE FROM role_permissions WHERE role='admin' AND permission='approve_finance'")
     # Re-runnable additive migration and exact preservation of operational tables.
     snapshot=rows('SELECT * FROM finance_documents ORDER BY id')
     finance_schema.init_storage();finance_schema.init_storage()
     assert rows('SELECT * FROM finance_documents ORDER BY id')==snapshot
+    assert one('SELECT name FROM finance_party_display WHERE id=%s',(owner,))['name']==next_rename['name']
+    assert rows('SELECT * FROM finance_parties ORDER BY id')==preserved['finance_parties']
     for table,data in original.items():assert rows('SELECT * FROM '+table+' ORDER BY id')==data,table
     # Explicit deny overrides role; a grant never expands unsupported roles.
     with db() as c:

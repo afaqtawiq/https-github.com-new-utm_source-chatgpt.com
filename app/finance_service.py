@@ -37,12 +37,12 @@ def audit(c, actor, action, entity_type, entity_id, detail):
 
 
 def identity(c, owner_id, counterparty_id=None):
-    owner = c.execute('SELECT * FROM finance_parties WHERE id=%s', (owner_id,)).fetchone()
+    owner = c.execute('SELECT * FROM finance_party_display WHERE id=%s', (owner_id,)).fetchone()
     if not owner or owner['kind'] != 'owner' or not owner['confirmed']:
         fail('يلزم مالك حساب مستقل ومؤكد؛ لا يتم الدمج مع سجل العملاء')
     if counterparty_id is None:
         return owner
-    party = c.execute('SELECT * FROM finance_parties WHERE id=%s', (counterparty_id,)).fetchone()
+    party = c.execute('SELECT * FROM finance_party_display WHERE id=%s', (counterparty_id,)).fetchone()
     if not party or party['kind'] != 'counterparty' or not party['confirmed'] or owner_id == counterparty_id:
         fail('يلزم طرف مقابل مستقل ومؤكد')
     return owner, party
@@ -70,6 +70,38 @@ def create_party(form, actor):
             return row['id']
     except UniqueViolation:
         fail('مرجع الهوية مسجل مسبقًا؛ لا يتم دمج الجهات تلقائيًا', 409)
+
+
+def rename_owner(owner_id, actor, form):
+    """Correct a display name without changing the confirmed financial identity."""
+    allowed = {'csrf','idempotency_key','name','expected_revision','reason','confirmation'}
+    if set(form) - allowed:
+        fail('التعديل متاح لاسم العرض فقط')
+    name = core.clean(form.get('name'), 200, True)
+    reason = core.clean(form.get('reason'), 1000, True)
+    revision = core.clean(form.get('expected_revision'), 20, True)
+    if not revision.isascii() or not revision.isdigit():
+        fail('نسخة اسم العرض غير صالحة؛ حدّث الصفحة')
+    if form.get('confirmation') != '1':
+        fail('أكد تصحيح اسم العرض لنفس صاحب الحساب دون نقل الأرصدة')
+    key = token(form.get('idempotency_key'))
+    payload = {'owner_id':owner_id, 'name':name, 'reason':reason, 'previous_revision':int(revision)}
+    digest = fingerprint(payload)
+    with db() as c:
+        lock(c)
+        if replay(c, 'finance_owner_name_changes', key, digest):
+            return
+        owner = identity(c, owner_id)
+        if owner['name_revision'] != int(revision):
+            fail('تغير اسم العرض منذ فتح النموذج؛ حدّث الصفحة قبل التصحيح', 409)
+        if owner['name'] == name:
+            fail('اسم العرض مطابق للاسم الحالي؛ لا يوجد تغيير')
+        c.execute('''INSERT INTO finance_owner_name_changes
+            (owner_id,name,previous_name,previous_revision,reason,idempotency_key,payload_hash,created_by,created_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+            (owner_id,name,owner['name'],int(revision),reason,key,digest,actor,utcnow()))
+        audit(c, actor, 'owner_display_name_changed', 'party', owner_id,
+              {'previous_name':owner['name'], 'name':name, 'reason':reason, 'previous_revision':int(revision)})
 
 
 def create_document(form, actor):
@@ -315,7 +347,7 @@ def enrich(c, item):
 
 
 DOCUMENT_SELECT = '''SELECT d.*,o.name owner_name,p.name counterparty_name FROM finance_documents d
- JOIN finance_parties o ON o.id=d.owner_id JOIN finance_parties p ON p.id=d.counterparty_id'''
+ JOIN finance_party_display o ON o.id=d.owner_id JOIN finance_party_display p ON p.id=d.counterparty_id'''
 
 
 def audit_rows(c, doc_id=None):
@@ -325,20 +357,20 @@ def audit_rows(c, doc_id=None):
 
 def dashboard_data():
     with db() as c:
-        parties = c.execute('SELECT * FROM finance_parties ORDER BY kind,id').fetchall()
+        parties = c.execute('SELECT * FROM finance_party_display ORDER BY kind,id').fetchall()
         documents = [enrich(c,d) for d in c.execute(DOCUMENT_SELECT+' ORDER BY d.id DESC LIMIT 200').fetchall()]
         summary = c.execute('''SELECT o.name owner_name,p.name counterparty_name,d.owner_id,d.counterparty_id,d.currency,
           COALESCE(SUM(e.signed_minor) FILTER(WHERE e.side='receivable'),0) receivable_minor,
           COALESCE(SUM(e.signed_minor) FILTER(WHERE e.side='payable'),0) payable_minor,
           COUNT(DISTINCT d.id) FILTER(WHERE d.status='posted' AND d.kind IN ('opening_payable','payable','expense')) payable_document_count
           FROM finance_entries e JOIN finance_documents d ON d.id=e.document_id
-          JOIN finance_parties o ON o.id=d.owner_id JOIN finance_parties p ON p.id=d.counterparty_id
+          JOIN finance_party_display o ON o.id=d.owner_id JOIN finance_party_display p ON p.id=d.counterparty_id
           WHERE d.status IN ('posted','reversed')
           GROUP BY d.owner_id,d.counterparty_id,o.name,p.name,d.currency ORDER BY o.name,p.name,d.currency''').fetchall()
         for item in summary:
             for side in ('receivable','payable'):
                 item[side+'_display'] = core.display_minor(item[side+'_minor'], item['currency'])
-        rules = c.execute('SELECT r.*,p.name owner_name FROM finance_entitlement_rules r JOIN finance_parties p ON p.id=r.owner_id ORDER BY r.id DESC').fetchall()
+        rules = c.execute('SELECT r.*,p.name owner_name FROM finance_entitlement_rules r JOIN finance_party_display p ON p.id=r.owner_id ORDER BY r.id DESC').fetchall()
         return parties, documents, summary, audit_rows(c), rules, core.owner_balance_totals(summary)
 
 
