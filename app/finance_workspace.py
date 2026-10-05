@@ -22,6 +22,7 @@ def auth(request, *, permission='view_finance'):
     if not active or not active['is_active'] or active['must_change_password']:
         raise HTTPException(403, 'يلزم حساب نشط مكتمل الإعداد')
     session = dict(session)
+    session['can_view_profit'] = has_permission(session, 'view_profit')
     session['can_edit_finance'] = has_permission(session, 'edit_finance')
     session['can_approve_finance'] = session['role']=='admin' and has_permission(session, 'approve_finance')
     return session
@@ -59,13 +60,17 @@ def invoke(function, *args):
 @router.get('/finance', response_class=HTMLResponse)
 def dashboard(request: Request):
     session = auth(request)
-    return HTMLResponse(view.render_dashboard(session, *service.dashboard_data()), headers={'Cache-Control':'no-store'})
+    data=list(service.dashboard_data())
+    if not session['can_view_profit']:data[3]=[a for a in data[3] if not a['action'].startswith('closing_')]
+    return HTMLResponse(view.render_dashboard(session, *data), headers={'Cache-Control':'no-store'})
 
 
 @router.get('/finance/documents/{doc_id}', response_class=HTMLResponse)
 def detail(doc_id: int, request: Request):
     session = auth(request)
-    return HTMLResponse(view.render_document(session, *service.detail_data(doc_id)), headers={'Cache-Control':'no-store'})
+    data=list(service.detail_data(doc_id))
+    if not session['can_view_profit']:data[2]=[a for a in data[2] if not a['action'].startswith('closing_')]
+    return HTMLResponse(view.render_document(session, *data), headers={'Cache-Control':'no-store'})
 
 
 @router.get('/finance/documents/{doc_id}/claim', response_class=HTMLResponse)
@@ -180,3 +185,62 @@ async def rule(request: Request):
     session, form = await mutation(request, 'approve_finance')
     invoke(service.create_rule, form, session['user_id'])
     return RedirectResponse('/finance',303)
+
+
+@router.get('/finance/monthly-statement', response_class=HTMLResponse)
+def monthly_statement(request: Request, owner_id: int, counterparty_id: int, currency: str, start: str, end: str):
+    session=auth(request)
+    from app import finance_monthly_service, finance_monthly_view
+    report=invoke(finance_monthly_service.statement_data,owner_id,counterparty_id,currency,start,end)
+    return HTMLResponse(finance_monthly_view.render_statement(session,report),headers={'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
+
+
+@router.get('/finance/monthly-statement.pdf')
+def monthly_statement_pdf(request: Request, owner_id: int, counterparty_id: int, currency: str, start: str, end: str):
+    auth(request)
+    from app import finance_monthly_service, finance_monthly_pdf
+    report=invoke(finance_monthly_service.statement_data,owner_id,counterparty_id,currency,start,end)
+    return Response(invoke(finance_monthly_pdf.render_statement,report),media_type='application/pdf',headers={
+        'Content-Disposition':'attachment; filename="monthly-statement-'+report['start']+'-'+report['end']+'.pdf"',
+        'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
+
+
+@router.get('/finance/monthly-closing', response_class=HTMLResponse)
+def monthly_closing(request: Request, owner_id: int, month: str):
+    session=auth(request)
+    if not session['can_view_profit']:raise HTTPException(403,'صلاحية مشاهدة التكلفة والربحية مطلوبة')
+    from app import finance_closing_service, finance_monthly_view
+    report=invoke(finance_closing_service.report_data,owner_id,month)
+    return HTMLResponse(finance_monthly_view.render_closing(session,report),headers={'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
+
+
+@router.get('/finance/monthly-closing.pdf')
+def monthly_closing_pdf(request: Request, owner_id: int, month: str):
+    session=auth(request)
+    if not session['can_view_profit']:raise HTTPException(403,'صلاحية مشاهدة التكلفة والربحية مطلوبة')
+    from app import finance_closing_service, finance_monthly_pdf
+    report=invoke(finance_closing_service.report_data,owner_id,month)
+    return Response(invoke(finance_monthly_pdf.render_closing,report),media_type='application/pdf',headers={
+        'Content-Disposition':'attachment; filename="monthly-closing-'+report['month']+'.pdf"',
+        'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
+
+
+@router.post('/finance/documents/{doc_id}/closing-input')
+async def closing_input(doc_id: int, request: Request):
+    session,form=await mutation(request,'approve_finance')
+    if not session['can_view_profit']:raise HTTPException(403,'صلاحية مشاهدة التكلفة والربحية مطلوبة')
+    if not has_permission(session,'view_finance'):raise HTTPException(403,'صلاحية عرض المالية مطلوبة')
+    from app import finance_closing_service
+    invoke(finance_closing_service.save_input,doc_id,session['user_id'],form)
+    d=service.detail_data(doc_id)[0]
+    return RedirectResponse('/finance/monthly-closing?owner_id='+str(d['owner_id'])+'&month='+str(d['document_date'])[:7],303)
+
+
+@router.post('/finance/monthly-closing/{owner_id}/{month}/review')
+async def closing_review(owner_id: int, month: str, request: Request):
+    session,form=await mutation(request,'approve_finance')
+    if not session['can_view_profit']:raise HTTPException(403,'صلاحية مشاهدة التكلفة والربحية مطلوبة')
+    if not has_permission(session,'view_finance'):raise HTTPException(403,'صلاحية عرض المالية مطلوبة')
+    from app import finance_closing_service
+    invoke(finance_closing_service.save_review,owner_id,month,session['user_id'],form)
+    return RedirectResponse('/finance/monthly-closing?owner_id='+str(owner_id)+'&month='+month,303)
