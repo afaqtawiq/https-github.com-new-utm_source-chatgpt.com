@@ -98,6 +98,22 @@ def init_storage():
             created_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL,
             UNIQUE(document_id,previous_revision))''')
         c.execute('CREATE INDEX IF NOT EXISTS finance_claim_details_latest ON finance_claim_details(document_id,id DESC)')
+        # Reporting-only annotations; never create journal entries or payments.
+        c.execute("""CREATE TABLE IF NOT EXISTS finance_closing_inputs(
+            id BIGSERIAL PRIMARY KEY, document_id BIGINT NOT NULL REFERENCES finance_documents(id),
+            previous_revision BIGINT NOT NULL CHECK(previous_revision>=0), mapping JSONB NOT NULL CHECK(jsonb_typeof(mapping)='object'),
+            reason TEXT NOT NULL CHECK(length(trim(reason)) BETWEEN 1 AND 1000),
+            idempotency_key UUID NOT NULL UNIQUE, payload_hash TEXT NOT NULL,
+            created_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL,
+            UNIQUE(document_id,previous_revision))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS finance_closing_reviews(
+            id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES finance_parties(id),
+            month TEXT NOT NULL CHECK(month ~ '^[0-9]{4}-[0-9]{2}$'), snapshot_hash TEXT NOT NULL CHECK(length(snapshot_hash)=64), completeness JSONB NOT NULL CHECK(jsonb_typeof(completeness)='object'),
+            previous_revision BIGINT NOT NULL CHECK(previous_revision>=0),
+            idempotency_key UUID NOT NULL UNIQUE, payload_hash TEXT NOT NULL,
+            created_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL,
+            UNIQUE(owner_id,month,previous_revision))""")
+        c.execute('CREATE INDEX IF NOT EXISTS finance_closing_inputs_latest ON finance_closing_inputs(document_id,id DESC)')
         # Display-name corrections are append-only. The confirmed identity and
         # every source, document, relationship and journal row stay immutable.
         c.execute('''CREATE TABLE IF NOT EXISTS finance_owner_name_changes(
@@ -127,7 +143,7 @@ def init_storage():
         c.execute('CREATE INDEX IF NOT EXISTS finance_entity_audit ON finance_audit(entity_type,entity_id,id DESC)')
         c.execute('''CREATE OR REPLACE FUNCTION finance_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN RAISE EXCEPTION 'Finance evidence and entries are immutable'; END; $$''')
-        for table in ('finance_entries', 'finance_audit', 'finance_parties', 'finance_entitlement_rules', 'finance_owner_name_changes', 'finance_claim_details'):
+        for table in ('finance_entries', 'finance_audit', 'finance_parties', 'finance_entitlement_rules', 'finance_owner_name_changes', 'finance_claim_details', 'finance_closing_inputs', 'finance_closing_reviews'):
             c.execute('DROP TRIGGER IF EXISTS immutable_finance_row ON '+table)
             c.execute('CREATE TRIGGER immutable_finance_row BEFORE UPDATE OR DELETE ON '+table+' FOR EACH ROW EXECUTE FUNCTION finance_immutable()')
         c.execute('''CREATE OR REPLACE FUNCTION finance_preserve_document() RETURNS trigger LANGUAGE plpgsql AS $$
