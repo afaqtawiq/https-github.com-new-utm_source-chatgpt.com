@@ -80,8 +80,9 @@ def evidence_lines(evidence):
     return lines
 
 
-def current_status(shipment_status, negotiation_status, evidence):
+def current_status(shipment_status, negotiation_status, evidence, owner_evidence=None):
     """Actual shipment progress takes precedence over an older negotiation/offer."""
     if shipment_status and shipment_status not in {'new', 'carrier_offer', 'test_pending'}:
         return shipment_status
-    return evidence['effective_status'] if evidence else negotiation_status
+    from app.owner_delivery import current_status as owner_status
+    return evidence['effective_status'] if evidence else owner_status(negotiation_status, owner_evidence)

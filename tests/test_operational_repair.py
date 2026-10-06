@@ -40,8 +40,12 @@ class Database:
         CREATE TABLE shipments(id INTEGER PRIMARY KEY,reference TEXT,origin TEXT,destination TEXT,status TEXT,revenue REAL,cost REAL,updated_at TEXT,is_test INTEGER DEFAULT 0);
         CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER,naqliat_load_id INTEGER,
             record_kind TEXT NOT NULL DEFAULT 'shipment_request',owner_phone TEXT,status TEXT,contact_channel TEXT,provider_call_id TEXT,provider_message_id TEXT,
+            owner_message_provider TEXT,owner_message_account_id TEXT,owner_message_conversation_id TEXT,
             asking_price REAL,agreed_owner_price REAL,driver_offer_price REAL,weight_tons REAL,
             unloading_location TEXT,payment_method TEXT,loading_port_status TEXT,notes TEXT,last_error TEXT,contacted_at TEXT,agreed_at TEXT,updated_at TEXT,test_owner_contact_status TEXT DEFAULT 'not_sent',test_owner_approved_by INTEGER,test_owner_preview_digest TEXT);
+        CREATE TABLE freight_owner_receipts(id INTEGER PRIMARY KEY,negotiation_id INTEGER,
+            provider_message_id TEXT,owner_phone TEXT,contact_fingerprint TEXT,provider TEXT,account_id TEXT,conversation_id TEXT,
+            delivery_status TEXT,error_code INTEGER,reason TEXT,checked_at TEXT,checked_by INTEGER);
         CREATE TABLE drivers(id INTEGER PRIMARY KEY,driver_name TEXT,whatsapp_phone TEXT,availability TEXT,offer_consent INTEGER);
         CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,raw_command TEXT,message TEXT,status TEXT,recipient_count INTEGER,
             sent_count INTEGER DEFAULT 0,failed_count INTEGER DEFAULT 0,created_by INTEGER,created_at TEXT,updated_at TEXT,
@@ -49,7 +53,10 @@ class Database:
         CREATE TABLE driver_broadcast_recipients(id INTEGER PRIMARY KEY,broadcast_id INTEGER,driver_id INTEGER,driver_name TEXT,phone TEXT,
             status TEXT,provider_message_id TEXT,sent_at TEXT,last_error TEXT,replied_at TEXT,send_phase TEXT,preflight_diagnostic TEXT,post_attempted_at TEXT,provider_response_status INTEGER,provider_account_id TEXT,UNIQUE(broadcast_id,phone));
         CREATE TABLE driver_recovery_batches(id INTEGER PRIMARY KEY,broadcast_id INTEGER UNIQUE,account_id TEXT);
-        CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT,created_by INTEGER);
+        CREATE TABLE freight_owner_reply_bindings(shipment_event_id INTEGER PRIMARY KEY,negotiation_id INTEGER,
+                contact_fingerprint TEXT,provider_message_id TEXT,owner_phone TEXT,account_id TEXT,conversation_id TEXT,
+                inbound_event_id TEXT,inbound_message_id TEXT,binding_source TEXT,recorded_at TEXT);
+            CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT,created_by INTEGER);
         CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,driver_name TEXT,driver_phone TEXT,updated_at TEXT);
         INSERT INTO shipments VALUES(1,'NQ-16','الرياض','جدة','new',0,0,'',0);
         INSERT INTO freight_negotiations(id,shipment_id,owner_phone,status,agreed_owner_price,driver_offer_price,weight_tons,payment_method)

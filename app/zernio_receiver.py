@@ -164,13 +164,30 @@ async def receive(request: Request):
                 pending = c.execute("""SELECT s.id,s.reference,s.is_test,s.origin,s.destination,n.provider_message_id FROM shipments s
                     JOIN freight_negotiations n ON n.shipment_id=s.id
                     WHERE n.owner_phone=%s AND n.contact_channel='whatsapp'
-                    AND n.status='awaiting_owner' AND n.record_kind='shipment_request'""", ('+' + contact,)).fetchall()
+                    AND n.status='awaiting_owner' AND n.record_kind='shipment_request'
+                    AND COALESCE(n.owner_message_provider,'') IN ('','zernio')
+                    AND (COALESCE(n.owner_message_account_id,'')='' OR n.owner_message_account_id=%s)
+                    AND (COALESCE(n.owner_message_conversation_id,'')='' OR n.owner_message_conversation_id=%s)
+                    """, ('+' + contact, account_id, conversation_id)).fetchall()
                 if pending:
                     selected = select_pending(pending, text, quote_id)
                     if selected is None:
                         return 'afaaq', {'message': clarification(pending)}
-                    c.execute('''INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
-                        VALUES(%s,'owner_whatsapp_reply',%s,'awaiting_owner',NOW())''', (selected['id'], text[:4000]))
+                    # Match the established shipment -> negotiation lock order.
+                    # Inserting the event also takes a shipment FK lock; locking
+                    # only n first would deadlock with a concurrent manual edit.
+                    c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (selected['id'],)).fetchone()
+                    contact_record = c.execute('SELECT * FROM freight_negotiations WHERE shipment_id=%s FOR UPDATE', (selected['id'],)).fetchone()
+                    from app.owner_delivery import bind_reply, reply_identity_matches
+                    if (not reply_identity_matches(contact_record, account_id=account_id,
+                            conversation_id=conversation_id, owner_phone='+' + contact)
+                            or contact_record.get('provider_message_id') != selected.get('provider_message_id')):
+                        return 'afaaq', {'message': 'تغير سجل التواصل أثناء معالجة الرد؛ لم يُعتمد اتفاق. أرسل ردك على رسالة الشحنة المقصودة.'}
+                    saved_reply = c.execute('''INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at)
+                        VALUES(%s,'owner_whatsapp_reply',%s,'awaiting_owner',NOW()) RETURNING id''', (selected['id'], text[:4000])).fetchone()
+                    bind_reply(c, contact_record, saved_reply['id'], account_id=account_id,
+                        conversation_id=conversation_id, owner_phone='+' + contact,
+                        inbound_event_id=event_id, inbound_message_id=message.get('id'))
                     transport_action.update(kind='owner_reply', shipment_id=selected['id'],
                                             reference=selected['reference'], phone='+' + contact, text=text, quoted_message_id=quote_id)
                     if selected.get('is_test'):
