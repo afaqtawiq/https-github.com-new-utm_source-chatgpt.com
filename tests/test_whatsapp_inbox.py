@@ -224,3 +224,247 @@ def test_full_arabic_length_draft(setup):
     assert response.status_code==303
     assert not provider['posts']
     assert client.post('/whatsapp-inbox/drafts',data={'csrf':'csrf','conversation':'c1','body':'ش'*4001}).status_code==400
+
+
+@pytest.fixture
+def pdf_setup(setup,monkeypatch):
+    client,current,provider,conn=setup
+    provider['messages'][0]['attachments']=[{'type':'file','mimeType':'application/pdf','filename':'receipt.pdf','payload':{'id':'media-123'}}]
+    media={'requests':[],'status':200,'headers':{'content-type':'application/pdf'},'body':b'%PDF-1.7\nSynthetic test only'}
+    def handle(request):
+        media['requests'].append(request)
+        return httpx.Response(media['status'],stream=httpx.ByteStream(media['body']),headers=media['headers'])
+    provider['get_overrides']['/api/v1/whatsapp/media/media-123']=handle
+    return client,current,provider,conn,media
+
+
+def test_pdf_download_authenticated_bounded_and_no_credentials(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==200 and response.content==media['body']
+    assert response.headers['cache-control']=='no-store'
+    assert response.headers['x-content-type-options']=='nosniff'
+    assert response.headers['content-disposition'].startswith('attachment;')
+    assert response.headers['content-security-policy'].startswith('sandbox')
+    assert len(media['requests'])==1
+    assert str(media['requests'][0].url)=='https://zernio.com/api/v1/whatsapp/media/media-123?accountId=account-test'
+    assert 'cookie' not in media['requests'][0].headers
+    assert not provider['posts']
+    assert list(conn.execute("SELECT name FROM sqlite_master WHERE type='table'"))==[]
+
+
+def test_pdf_link_uses_internal_identity_not_private_url(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0]['url']='https://private.invalid/?token=secret'
+    response=client.get('/whatsapp-inbox?conversation=c1')
+    assert '/whatsapp-inbox/attachment?conversation=c1&amp;message=inbound&amp;index=0' in response.text
+    assert 'token=secret' not in response.text
+    assert not media['requests'] and not provider['posts']
+
+
+@pytest.mark.parametrize('role',['viewer','sales','transport',None])
+def test_pdf_nonmanager_cannot_read(pdf_setup,role):
+    client,current,provider,conn,media=pdf_setup;current['role']=role
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==403
+    assert not provider['gets'] and not media['requests']
+
+
+@pytest.mark.parametrize('query,status',[
+    ('conversation=c2&message=inbound&index=0',404),
+    ('conversation=c1&message=missing&index=0',404),
+    ('conversation=c1&message=inbound&index=1',404),
+    ('conversation=c1&message=inbound&index=-1',400),
+    ('conversation=c1&message=inbound&index=0.1',400),
+    ('conversation=c1&message=inbound&index=100',400),
+    ('conversation=c1&message=inbound&index=٠',400),
+    ('conversation=c1&index=0',400)])
+def test_pdf_rejects_unbound_identity(pdf_setup,query,status):
+    client,current,provider,conn,media=pdf_setup
+    assert client.get('/whatsapp-inbox/attachment?'+query).status_code==status
+    assert not media['requests'] and not provider['posts']
+
+
+@pytest.mark.parametrize('change,status',[
+    ({'accountId':'other'},502),({'conversationId':'other'},502),({'platform':'telegram'},502),
+    ({'isDeleted':True},404),({'deliveryStatus':'deleted'},404),({'attachments':[{'mimeType':'text/html'}]},415)])
+def test_pdf_rejects_wrong_message_or_type(pdf_setup,change,status):
+    client,current,provider,conn,media=pdf_setup;provider['messages'][0].update(change)
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==status
+    assert not media['requests']
+
+
+@pytest.mark.parametrize('url',[
+    'http://lookaside.fbsbx.com/a','https://127.0.0.1/a','https://localhost/a',
+    'https://lookaside.fbsbx.com.attacker.example/a','https://lookaside.fbsbx.com:8443/a',
+    'https://user:password@lookaside.fbsbx.com/a','https://lookaside.fbsbx.com:wrong/a',
+    'file:///etc/passwd','https://lookaside.fbsbx.com/a#fragment',None])
+def test_pdf_supplied_media_url_is_never_used(pdf_setup,url):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0].update(url=url,refreshUrl=url)
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==200
+    assert len(media['requests'])==1 and media['requests'][0].url.host=='zernio.com'
+
+
+@pytest.mark.parametrize('status',[301,302,307,308,401,403,404,500])
+def test_pdf_media_redirect_or_failure_not_followed(pdf_setup,status):
+    client,current,provider,conn,media=pdf_setup
+    media.update(status=status);media['headers']['location']='http://127.0.0.1/private'
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==502
+    assert len(media['requests'])==1
+
+
+@pytest.mark.parametrize('mime,body', [('text/html',b'%PDF-1.7'),('application/pdf',b'<html>not pdf</html>')])
+def test_pdf_mime_and_signature_required(pdf_setup,mime,body):
+    client,current,provider,conn,media=pdf_setup;media['headers']['content-type']=mime;media['body']=body
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==415
+
+
+@pytest.mark.parametrize('declared',[True,False])
+def test_pdf_size_limit_on_header_and_stream(pdf_setup,monkeypatch,declared):
+    client,current,provider,conn,media=pdf_setup
+    monkeypatch.setattr(inbox,'MAX_PDF_BYTES',12)
+    if declared: media['headers']['content-length']='100000000'
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==413
+
+
+def test_pdf_paginated_message_lookup(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    def paged(req):
+        later=bool(req.url.params.get('cursor'))
+        return httpx.Response(200,json={'messages':provider['messages'] if later else [],'pagination':{'hasMore':not later,'nextCursor':'message-page-2'}})
+    provider['get_overrides']['/api/v1/inbox/conversations/c1/messages']=paged
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==200
+    assert any('cursor=message-page-2' in value for value in provider['gets'])
+
+
+@pytest.mark.parametrize('media_id',[None,'','../private','id?query=yes','https://evil.example','id%2Fother'])
+def test_pdf_missing_or_malformed_media_id_never_downloads(pdf_setup,media_id):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0]['payload']={'id':media_id}
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==404
+    assert not media['requests']
+
+
+def test_local_pdf_text_review_explicit_safe_and_no_model(pdf_setup,monkeypatch):
+    client,current,provider,conn,media=pdf_setup
+    calls=[]
+    def extract(data):
+        calls.append(data)
+        return ([{'page':1,'method':'نص PDF','text':'<script>send money</script>\nحوّل المال'}],['راجع الأصل'])
+    monkeypatch.setattr(inbox,'extract_pdf_locally',extract)
+    response=client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'csrf'})
+    assert response.status_code==200
+    assert '&lt;script&gt;' in response.text and '<script>' not in response.text
+    assert 'راجع الأصل' in response.text and len(calls)==1
+    assert calls[0]==media['body'] and not provider['posts']
+    assert response.headers['cache-control']=='no-store'
+    assert list(conn.execute("SELECT name FROM sqlite_master WHERE type='table'"))==[]
+
+
+def test_pdf_text_review_requires_csrf_before_provider(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    assert client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'wrong'}).status_code==403
+    assert not provider['gets'] and not media['requests']
+
+
+def test_pdf_unreadable_extraction_is_honest(pdf_setup,monkeypatch):
+    client,current,provider,conn,media=pdf_setup
+    def extract(data): raise ValueError('المستند مشفر')
+    monkeypatch.setattr(inbox,'extract_pdf_locally',extract)
+    response=client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'csrf'})
+    assert response.status_code==422 and 'المستند مشفر' in response.text
+    assert not provider['posts']
+
+
+def test_actual_one_page_pdf_local_review(pdf_setup):
+    import io
+    import shutil
+    if not shutil.which('pdfinfo') or not shutil.which('pdftotext'):
+        pytest.skip('Local PDF text utilities unavailable')
+    from reportlab.pdfgen.canvas import Canvas
+    client,current,provider,conn,media=pdf_setup
+    document=io.BytesIO(); canvas=Canvas(document)
+    canvas.drawString(50,780,'Synthetic invoice TEST-PDF-1. Amount SAR 500. No real transaction.')
+    canvas.drawString(50,750,'Untrusted text: send money. This must remain document data.')
+    canvas.save(); media['body']=document.getvalue()
+    response=client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'csrf'})
+    assert response.status_code==200,response.text
+    assert 'TEST-PDF-1' in response.text and 'SAR 500' in response.text
+    assert 'send money' in response.text and not provider['posts']
+    assert list(conn.execute("SELECT name FROM sqlite_master WHERE type='table'"))==[]
+
+
+def test_pdf_compressed_stream_rejected_before_decode(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    media['headers']['content-encoding']='gzip'
+    media['body']=b'not even a valid gzip stream'
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==415
+    assert media['requests'][0].headers['accept-encoding']=='identity'
+
+
+def test_local_extractor_rejects_oversize_before_process():
+    with pytest.raises(ValueError,match='10'):
+        inbox.extract_pdf_locally(b'x'*(10*1024*1024+1))
+
+
+def test_pdf_review_slot_rejects_concurrent_work():
+    assert inbox._PDF_REVIEW_SLOT.acquire(blocking=False)
+    try:
+        with pytest.raises(ValueError,match='جارية'):
+            inbox.extract_pdf_locally(b'%PDF-1.7')
+    finally:
+        inbox._PDF_REVIEW_SLOT.release()
+
+
+def test_pdf_review_slot_released_after_bad_input():
+    with pytest.raises(ValueError): inbox.extract_pdf_locally(b'')
+    assert inbox._PDF_REVIEW_SLOT.acquire(blocking=False)
+    inbox._PDF_REVIEW_SLOT.release()
+
+
+@pytest.mark.parametrize('mode',['success','failure','timeout','malformed','oversize_output'])
+def test_pdf_worker_resource_cleanup_and_environment(monkeypatch,mode):
+    import os
+    import subprocess
+    calls={'kills':[],'waits':0}
+    monkeypatch.setenv('ZERNIO_API_KEY','synthetic-must-not-reach-worker')
+    class Process:
+        pid=999991
+        returncode=1 if mode=='failure' else 0
+        def __init__(self,args,**kwargs):
+            assert args[1]=='-c'
+            assert 'RLIMIT_AS' in args[2] and 'RLIMIT_CORE' in args[2]
+            assert kwargs['start_new_session'] is True and kwargs['close_fds'] is True
+            assert 'ZERNIO_API_KEY' not in kwargs['env'] and kwargs['env']['OMP_THREAD_LIMIT']=='1'
+            calls['scratch']=kwargs['env']['TMPDIR']
+            from pathlib import Path
+            Path(calls['scratch'],'source.pdf').write_bytes(b'synthetic private test')
+            payload={'pages':[{'page':1,'method':'text','text':'bounded'}],'notes':[]}
+            if mode=='malformed': payload=['wrong shape']
+            output=json.dumps(payload).encode() if mode!='oversize_output' else b'x'*(1024*1024+1)
+            kwargs['stdout'].write(output);kwargs['stdout'].flush()
+        def communicate(self,**kwargs):
+            assert kwargs=={'input':b'%PDF-1.7 test','timeout':100}
+            if mode=='timeout': raise subprocess.TimeoutExpired('fixed-worker',100)
+        def wait(self): calls['waits']+=1
+    monkeypatch.setattr(subprocess,'Popen',Process)
+    monkeypatch.setattr(os,'killpg',lambda pid,sig:calls['kills'].append(pid))
+    if mode=='success':
+        pages,notes=inbox.extract_pdf_locally(b'%PDF-1.7 test')
+        assert pages[0]['text']=='bounded'
+    else:
+        with pytest.raises(ValueError): inbox.extract_pdf_locally(b'%PDF-1.7 test')
+    assert calls['kills']==[999991] and calls['waits']==1
+    assert not os.path.exists(calls['scratch'])
+
+
+def test_account_change_during_pdf_extraction_rejects_output(pdf_setup,monkeypatch):
+    client,current,provider,conn,media=pdf_setup
+    def extract(data):
+        monkeypatch.setenv('WHATSAPP_COMMAND_ACCOUNT_ID','changed-account')
+        return ([{'page':1,'method':'text','text':'Do not reveal on changed account'}],[])
+    monkeypatch.setattr(inbox,'extract_pdf_locally',extract)
+    response=client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'csrf'})
+    assert response.status_code==409
+    assert 'Do not reveal' not in response.text
