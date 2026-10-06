@@ -9,7 +9,7 @@ import re
 import threading
 from contextlib import contextmanager
 from html import escape
-from urllib.parse import quote, urlencode, parse_qs
+from urllib.parse import quote, urlencode, parse_qs, urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -299,6 +299,52 @@ async def verified_attachment(c, cid, message_id, index):
     raise z.WhatsAppBlocked('Incomplete message lookup')
 
 
+def media_identifier(value):
+    if type(value) is int and value >= 0:
+        value = str(value)
+    return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,255}', value) else None
+
+
+def canonical_media_identifier(value, account):
+    """Extract identity only; never fetch a provider-supplied URL or its query."""
+    if not isinstance(value, str):
+        return None
+    try:
+        url = urlsplit(value)
+        base = urlsplit(z.BASE)
+        if (url.scheme != 'https' or url.hostname != base.hostname or url.port not in (None, 443)
+                or url.username or url.password or url.fragment):
+            return None
+        prefix = base.path + '/whatsapp/media/'
+        if not url.path.startswith(prefix):
+            return None
+        media_id = media_identifier(url.path[len(prefix):])
+        accounts = parse_qs(url.query, keep_blank_values=True).get('accountId')
+        if accounts is not None and accounts != [account]:
+            return None
+        return media_id
+    except ValueError:
+        return None
+
+
+async def resolve_media_identifier(c, attachment, cid, message_id, index, account):
+    metadata = attachment.get('payload') or {}
+    media_id = media_identifier(metadata.get('id')) if isinstance(metadata, dict) else None
+    if media_id:
+        return media_id
+    # Some stored REST attachments expose the canonical media proxy instead of
+    # payload.id. It is identity evidence from this already-verified attachment.
+    media_id = canonical_media_identifier(attachment.get('url'), account)
+    if media_id:
+        return media_id
+    path = '/inbox/conversations/' + quote(cid, safe='') + '/messages/' + quote(message_id, safe='') + '/attachments/' + str(index)
+    resolved = await z.read(c, path, {'accountId': account, 'format': 'json'})
+    media_id = canonical_media_identifier(resolved.get('url'), account)
+    if not media_id:
+        raise HTTPException(404, 'Verified WhatsApp media identifier is unavailable')
+    return media_id
+
+
 async def read_pdf(c, media_id, account):
     # The July 2026 WhatsApp media API streams bytes using the existing server
     # credential. Never request attachment.url/refreshUrl or forward auth to a CDN.
@@ -343,8 +389,7 @@ async def download_attachment(request: Request):
         async with z.client() as c:
             await z.validate_account(c)
             attachment = await verified_attachment(c, cid, message_id, index)
-            metadata = attachment.get('payload') or {}
-            media_id = metadata.get('id') if isinstance(metadata, dict) else None
+            media_id = await resolve_media_identifier(c, attachment, cid, message_id, index, account)
             if account != z.account_id():
                 raise HTTPException(409, 'Account changed')
             content = await read_pdf(c, media_id, account)

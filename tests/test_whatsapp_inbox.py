@@ -468,3 +468,51 @@ def test_account_change_during_pdf_extraction_rejects_output(pdf_setup,monkeypat
     response=client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'csrf'})
     assert response.status_code==409
     assert 'Do not reveal' not in response.text
+
+
+def test_numeric_provider_media_id_is_supported(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0]['payload']={'id':1234567890123456}
+    provider['get_overrides']['/api/v1/whatsapp/media/1234567890123456']=provider['get_overrides']['/api/v1/whatsapp/media/media-123']
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==200
+    assert '/whatsapp/media/1234567890123456?' in str(media['requests'][0].url)
+
+
+def test_canonical_attachment_proxy_supplies_verified_identity(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    item=provider['messages'][0]['attachments'][0]
+    item['payload']={};item['url']='https://zernio.com/api/v1/whatsapp/media/media-123?accountId=account-test'
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==200
+    assert not any('/attachments/' in url for url in provider['gets'])
+
+
+def test_official_resolver_fallback_uses_bound_message_only(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0]['payload']={}
+    path='/api/v1/inbox/conversations/c1/messages/inbound/attachments/0'
+    def resolve(req):
+        assert req.url.params['accountId']=='account-test' and req.url.params['format']=='json'
+        return httpx.Response(200,json={'url':'https://zernio.com/api/v1/whatsapp/media/media-123?accountId=account-test'})
+    provider['get_overrides'][path]=resolve
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==200
+    assert len(media['requests'])==1
+
+
+@pytest.mark.parametrize('url',[
+    'https://evil.example/api/v1/whatsapp/media/media-123',
+    'https://zernio.com.evil.example/api/v1/whatsapp/media/media-123',
+    'https://zernio.com/api/v1/whatsapp/media/media-123?accountId=other',
+    'https://zernio.com/api/v1/whatsapp/media/media-123?accountId=account-test&accountId=other',
+    'https://zernio.com/api/v1/whatsapp/media/../accounts',
+    'https://zernio.com/api/v1/whatsapp/media/media-123/extra',
+    'https://zernio.com/api/v1/whatsapp/media/media-123%2Fextra',
+    'http://zernio.com/api/v1/whatsapp/media/media-123',
+    'https://user:pass@zernio.com/api/v1/whatsapp/media/media-123',
+    'https://zernio.com:444/api/v1/whatsapp/media/media-123',
+])
+def test_resolved_media_identity_cannot_change_origin_or_account(pdf_setup,url):
+    client,current,provider,conn,media=pdf_setup
+    item=provider['messages'][0]['attachments'][0];item['payload']={};item['url']=url
+    provider['get_overrides']['/api/v1/inbox/conversations/c1/messages/inbound/attachments/0']=lambda req:httpx.Response(200,json={'url':url})
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==404
+    assert not media['requests']
