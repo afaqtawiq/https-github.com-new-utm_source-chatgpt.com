@@ -1271,7 +1271,7 @@ def test_verified_capability_denials_and_user_directed_clarification_pass(provid
 def test_denial_or_user_guidance_never_launders_positive_capability_claims(provider, answer):
     provider['answer'] = answer
     result = chat_reply('عندكم شحنات اليوم')
-    assert result.used_model and not result.ok and result.text == p.FALLBACK_REPLY
+    assert result.used_model and not result.ok and result.text == p.LIVE_LOG_UNAVAILABLE_REPLY
     assert result.reason.startswith('reply_action_')
     assert result.reason in p.REPLY_REJECTION_REASONS and len(provider['requests']) == 1
 
@@ -1302,3 +1302,64 @@ def test_action_subreasons_are_static_and_never_store_rejected_text(provider, an
     result = chat_reply('عندكم شحنات اليوم')
     assert not result.ok and result.used_model and result.reason == reason
     assert result.reason in p.REPLY_REJECTION_REASONS and answer not in result.reason
+
+
+@pytest.mark.parametrize('answer', [
+    'هل تقصد الشحنات التي استقبلتها آفاق اليوم؟',
+    'هل تقصد الشحنات التي استقبلها الفريق اليوم؟',
+    'يمكنك سؤال فريق التشغيل إن كانوا استلموا شحنات اليوم.',
+    'لدي معلومات عامة فقط ولا أستطيع الاطلاع على حركة الشحنات الحالية.',
+    'ليست لدي معلومات عن الشحنات المستلمة اليوم.',
+    'المعلومات الحالية غير متاحة لدي.',
+    'المعلومات المتاحة لدي لا تبين إن تم استقبال شحنة اليوم.',
+    'سأوضح لك المعلومات المتاحة في هذه المحادثة فقط.',
+    'سأشرح لك الفرق بين نقل شحنة والبحث عن حمولة.',
+    'سنحدد سؤالك أولًا؛ هل تبحث عن حمولة أم تريد نقل شحنة؟',
+    'لا أستطيع معرفة ما إذا تم استقبال شحنات اليوم.',
+    'ما عندي وصول للنظام عشان أعرف إذا استلمنا شحنات اليوم.',
+])
+def test_natural_grammar_does_not_imply_external_execution(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('هل تم استقبال اي شحنة اليوم')
+    assert result.ok and result.used_model and result.reason == 'model_answer'
+    assert result.text == answer and len(provider['requests']) == 1
+
+
+@pytest.mark.parametrize('answer', [
+    'لدي شحنات متاحة اليوم.', 'عندنا شحنات جاهزة.',
+    'سأوضح لك بعد أن أستعلم من النظام.',
+    'هل تقصد الوارد اليوم وأنا استلمت الشحنات؟',
+    'لا أعرف الوارد اليوم وقد استلمنا الشحنات.',
+    'هل تقصد الوارد اليوم واستلمنا الشحنات؟',
+    'إذا وافقت سأرسلها للمدير.', 'هل أراجع النظام لك؟',
+    'أؤكد وجود شحنات اليوم.', 'أتعهد بنقل الشحنة.',
+    'أنا ملتزمة بنقل الشحنة.',
+    'سننقل البضاعة غدا.', 'قمت بتوصيل البضاعة.',
+    'أتعهد بتوصيل الشحنة غدا.', 'سأرتب النقل غدا.',
+    'سيقوم الفريق بنقل البضاعة.', 'سيتم توصيل البضاعة.',
+    'نؤكد توصيل البضاعة غدا.', 'سنتولى النقل.',
+    'سنقوم بترتيب النقل.', 'أنا أنقل الحمولة.',
+    'نحن نتولى توصيل البضاعة.', 'نقلت البضاعة.', 'وصلنا البضاعة.',
+    'رتبنا النقل.', 'نوعدك بتوصيل الحمولة.', 'راح ننقل الحمولة.',
+    'سأشحن البضاعة.', 'وسنتولى توصيل البضاعة.',
+    'المسار واضح. سأجهز النقل.', 'الحمولة مذكورة، وسيتم ترتيب النقل.',
+])
+def test_natural_grammar_keeps_actual_execution_assertions_blocked(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('هل تم استقبال اي شحنة اليوم')
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+    assert result.text == p.LIVE_LOG_UNAVAILABLE_REPLY
+    assert len(provider['requests']) == 1
+
+
+def test_live_log_fallback_is_not_document_or_model_success(provider):
+    provider['answer'] = 'سأراجع النظام.'
+    result = chat_reply('هل تم استقبال اي شحنة اليوم')
+    assert result.used_model and not result.ok
+    assert result.reason == 'reply_action_perspective_future'
+    assert result.text == p.LIVE_LOG_UNAVAILABLE_REPLY
+    assert p._no_live_log_fallback('هل تم استقبال شحنة اليوم', using_document=True,
+                                 reason=result.reason) == p.FALLBACK_REPLY
+    assert p._no_live_log_fallback('هل تم استقبال شحنة اليوم', using_document=False,
+                                 reason='reply_privacy') == p.FALLBACK_REPLY
