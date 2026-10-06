@@ -480,11 +480,10 @@ def reserve_model(job_id, lease_token, *, db_factory=None, now=None):
         if job["context_source_job_id"] is not None and _time(job["document_checkpointed_at"]) <= cutoff:
             _terminal(connection, job, "blocked", now, {"reason": "document_context_expired"})
             return False
-        has_document = bool(job["document_sha256"] or job["document_text"])
-        if ((settings["mode"] == "owner_pilot" or has_document) and
-                (job["document_sha256"] not in settings["approved_sha256"] or
-                 job["document_status"] != "ok" or not job["document_text"])):
-            reason = "pilot_provenance_not_approved" if settings["mode"] == "owner_pilot" else "document_provenance_not_approved"
+        if not _model_input_permitted(job, settings):
+            has_document = bool(job["document_sha256"] or job["document_text"]) or job["context_source_job_id"] is not None
+            reason = (("pilot_provenance_not_approved" if settings["mode"] == "owner_pilot" else "document_provenance_not_approved")
+                      if has_document else "ordinary_text_not_eligible")
             _terminal(connection, job, "blocked", now, {"reason": reason})
             return False
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -567,10 +566,10 @@ def claim_send(*, account_id=None, db_factory=None, now=None):
         if not _enabled(settings, job) or job["authorization_generation"] != settings["authorization_generation"]:
             _terminal(connection, job, "blocked", now, {"reason": "mode_or_sender_not_enabled"})
             return None
-        if (job["model_started_at"] and (job["document_sha256"] or job["document_text"]) and
-                (job["document_sha256"] not in settings["approved_sha256"] or
-                 job["document_status"] != "ok" or not job["document_text"])):
-            reason = "pilot_provenance_not_approved" if settings["mode"] == "owner_pilot" else "document_provenance_not_approved"
+        if job["model_started_at"] and not _model_input_permitted(job, settings):
+            has_document = bool(job["document_sha256"] or job["document_text"]) or job["context_source_job_id"] is not None
+            reason = (("pilot_provenance_not_approved" if settings["mode"] == "owner_pilot" else "document_provenance_not_approved")
+                      if has_document else "ordinary_text_not_eligible")
             _terminal(connection, job, "blocked", now, {"reason": reason})
             return None
         token = secrets.token_hex(24)
@@ -641,16 +640,32 @@ def get_outbox(job_id, *, db_factory=None):
                                        (job_id,)).fetchone())
 
 
+def _model_input_permitted(job, settings):
+    """Distinguish approved document evidence from screened business-only text.
+
+    The text exception cannot reinterpret any document or inherited context as
+    ordinary text. It never supplies PDF/followup evidence for routine activation.
+    """
+    has_document = bool(job["document_text"] or job["document_sha256"]) or job["context_source_job_id"] is not None
+    if has_document:
+        return (job["document_status"] == "ok" and bool(job["document_text"]) and
+                job["document_sha256"] in settings["approved_sha256"])
+    payload = job.get("payload") or {}
+    question = payload.get("question")
+    return (job["document_status"] == "none" and _followup_payload(payload) and
+            payload.get("question_allowed") is True and payload.get("question_kind") == "operations" and
+            isinstance(question, str) and bool(question.strip()))
+
+
 def _guard_permitted(row, *, model):
     if not row or not _enabled(row, row):
         return False
-    has_document = bool(row["document_text"] or row["document_sha256"])
-    needs_provenance = ((model and (row["mode"] == "owner_pilot" or has_document)) or
-                        (not model and (row["document_text"] or
-                         (row["model_started_at"] and has_document))))
-    return not needs_provenance or (
-        row["document_status"] == "ok" and bool(row["document_text"]) and
-        row["document_sha256"] in row["approved_sha256"])
+    if model or row["model_started_at"]:
+        return _model_input_permitted(row, row)
+    # Local safe failure replies are permitted without a model reservation;
+    # rejected attachment hashes alone do not become document content.
+    return not row["document_text"] or (
+        row["document_status"] == "ok" and row["document_sha256"] in row["approved_sha256"])
 
 
 def model_authorized(job_id, lease_token, *, db_factory=None, now=None):
@@ -664,7 +679,7 @@ def model_authorized(job_id, lease_token, *, db_factory=None, now=None):
         return False
     with (db_factory or database)() as connection:
         row = _row(connection.execute("""SELECT j.sender,j.document_text,
-            j.document_sha256,j.document_status,j.model_started_at,
+            j.document_sha256,j.document_status,j.model_started_at,j.context_source_job_id,j.payload,
             s.mode,s.pilot_sender,s.approved_sha256
             FROM whatsapp_agent_jobs j
             JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
@@ -690,7 +705,7 @@ def send_authorized(job_id, send_token, *, db_factory=None, now=None):
         return False
     with (db_factory or database)() as connection:
         row = _row(connection.execute("""SELECT j.sender,j.document_text,
-            j.document_sha256,j.document_status,j.model_started_at,
+            j.document_sha256,j.document_status,j.model_started_at,j.context_source_job_id,j.payload,
             s.mode,s.pilot_sender,s.approved_sha256
             FROM whatsapp_agent_jobs j
             JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
