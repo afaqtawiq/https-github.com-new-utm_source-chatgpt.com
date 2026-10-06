@@ -185,6 +185,14 @@ async def processing(job):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
     text, digest, source_id = '', None, None
+    conversation_history = ()
+    conversation_scope = None
+    if data.get('question_allowed') and data.get('question_kind') in ('operations','conversation','document_question'):
+        conversation_scope = {key:job[key] for key in
+                              ('account_id','sender','conversation_id','authorization_generation')}
+        conversation_scope['before_job_id'] = jid
+        conversation_history = await run_in_threadpool(store.recent_exchanges,
+            account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid)
     if job.get('document_checkpointed_at'):
         text, digest, source_id = job.get('document_text') or '', job.get('document_sha256'), job.get('context_source_job_id')
         document_status = job.get('document_status')
@@ -216,8 +224,13 @@ async def processing(job):
                 diagnostics['provider_status'] = error.diagnostic.get('http_status')
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,diagnostics=diagnostics)
     else:
-        context = await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
-                                         conversation_id=job['conversation_id'],before_job_id=jid)
+        context = None
+        if data.get('question_allowed') and privacy.wants_recent_document(data.get('question','')):
+            context = await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
+                                             conversation_id=job['conversation_id'],before_job_id=jid)
+            if (context and data.get('question_kind') == 'conversation' and conversation_history
+                    and conversation_history[-1]['job_id'] > context['id']):
+                context = None
         if context:
             text, digest, source_id = context['document_text'],context['document_sha256'],context['id']
         document_status = 'ok' if text else 'none'
@@ -236,14 +249,18 @@ async def processing(job):
     elif document_status == 'quarantined':
         reply = 'وصل ملف PDF، وأوقفته للمراجعة المحلية قبل مشاركته مع نموذج الفهم. لم أعتمد محتواه أو أسجل منه أي حركة.'
     elif document_status == 'unavailable':
-        reply = 'وصلتني بيانات مرفق PDF، لكن لم أتمكن من قراءة ملفه من المزود. لم أستنتج محتواه؛ يلزم مراجعة المرفق الأصلي.'
+        reply = 'وصلتني بيانات المرفق، لكن لم أتمكن من قراءة محتواه في هذا المسار. لم أستنتج منه معلومات؛ يلزم مراجعته مباشرة.'
     elif not data.get('attachments') and data.get('question_kind') in ('greeting','thanks','ready'):
         reply = {'greeting':privacy.GREETING_REPLY,'thanks':privacy.THANKS_REPLY,
                  'ready':privacy.READY_REPLY}[data['question_kind']]
-    elif not text and data.get('question_kind') != 'operations':
+    elif not text and data.get('question_kind') not in ('operations','conversation','document_question'):
         reply = ('جاهزة للاختبار. أرسل ملف PDF التجريبي هنا، ثم اسألني عن محتواه.'
                  if settings['mode'] == 'owner_pilot' else 'أنا معك. أرسل المستند أو حدّد الاستفسار التشغيلي الذي تريد مراجعته.')
     else:
+        if text:
+            # The selected PDF is separately provenance-bound; older ordinary
+            # chat must not obscure the document referent or enter by accident.
+            conversation_history = ()
         if not await run_in_threadpool(store.reserve_model,jid,lease):
             return
         try:
@@ -252,7 +269,8 @@ async def processing(job):
                 if not allowed or z.account_id() != job['account_id']:
                     raise store.StateConflict('Model scope changed before request')
             result = await privacy.understand(data['question'],text,history=(),document_sha256=digest,
-                                             approved_hashes=settings['approved_sha256'],before_request=model_guard)
+                                             approved_hashes=settings['approved_sha256'],before_request=model_guard,
+                                             conversation_history=conversation_history,conversation_scope=conversation_scope)
             await run_in_threadpool(store.save_model,jid,lease,reply_text=result.text,
                                     diagnostics={'model_success':bool(result.ok and result.used_model),
                                                  'model_attempted':result.used_model,'model_reason':result.reason})

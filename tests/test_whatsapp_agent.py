@@ -17,6 +17,8 @@ from app import whatsapp_agent_store as store
 from app import whatsapp_agent_privacy as privacy
 from app import zernio_whatsapp as z
 
+REAL_UNDERSTAND=privacy.understand
+
 ACCOUNT='synthetic-account'
 OWNER='966500000001'
 CONVERSATION='synthetic-conversation'
@@ -139,7 +141,7 @@ def test_private_url_and_unsafe_caption_never_persist_or_reach_model(setup):
 @pytest.mark.parametrize('question,expected',[
     ('ارسل رسالة الي المدير','إرسال رسالة لشخص آخر يحتاج مراجعة المستلم والنص'),
     ('اضف السايق شخص تجريبي','إضافة سائق تحتاج مراجعة الاسم ورقم الجوال'),
-    ('عبارة غامضة للاستيضاح','ما الذي تريد معرفته'),
+    ('供应商公司的问题','ما الذي تريد معرفته'),
 ])
 def test_local_clarification_does_not_claim_sensitive_content_or_send_onward(setup,question,expected):
     result=agent.accept_inbound(payload(1,question))
@@ -177,10 +179,39 @@ def test_readiness_after_document_does_not_reserve_another_model_attempt(setup):
     assert job['model_started_at'] is None and len(setup['model_calls'])==1
 
 
+def test_meta_chat_after_pdf_stays_textual_then_document_followup_keeps_original_root(setup,monkeypatch):
+    document=agent.accept_inbound(payload(1,'لخص محتوى المستند',True));assert tick()
+    async def conversation(question,document_text,**kwargs):
+        await kwargs['before_request']()
+        setup['model_calls'].append((question,document_text,kwargs))
+        if question=='عايزك تتواصلي تواصل عادي':
+            assert document_text=='' and not kwargs['conversation_history']
+            answer='أنا معك. خلينا نتكلم ببساطة.'
+        else:
+            assert setup['actual'] in document_text
+            assert not kwargs['conversation_history']
+            answer='البوابة المذكورة C2.'
+        return privacy.ReplyResult(answer,True,True,'model_success')
+    monkeypatch.setattr(privacy,'understand',conversation)
+    meta=agent.accept_inbound(payload(2,'عايزك تتواصلي تواصل عادي'));assert tick()
+    meta_job=store.get_job(meta['job_id'])
+    assert meta_job['status']=='sent' and meta_job['document_status']=='none'
+    assert meta_job['context_source_job_id'] is None and not meta_job['document_text']
+    follow=agent.accept_inbound(payload(3,'ما هي البوابة والبضاعة'));assert tick()
+    follow_job=store.get_job(follow['job_id'])
+    assert follow_job['status']=='sent' and follow_job['context_source_job_id']==document['job_id']
+
+
 @pytest.mark.parametrize('question',[
     'ممكن تفهمني كيف تشتغلون بالتخليص؟',
     'عندي بضايع من الخارج، وش الخطوة الأولى معكم؟',
     'أنا صاحب منشأة صغيرة وأبغى أعرف ترتيب نقل البضاعة',
+    'هلا ما وصلني شي',
+    'عايزك تتواصلي تواصل عادي',
+    'طيب خلينا نتكلم ببساطة من غير تعقيد',
+    'ليش كل مرة تطلب مني ملف',
+    'مش عايز تلخيص مستندات، خلينا نتكلم عادي',
+    'ما هي البوابة والبضاعة',
 ])
 def test_owner_pilot_can_answer_safe_general_business_question_without_pdf(setup,monkeypatch,question):
     async def general(question,document_text,**kwargs):
@@ -193,6 +224,56 @@ def test_owner_pilot_can_answer_safe_general_business_question_without_pdf(setup
     job=store.get_job(result['job_id'])
     assert job['status']=='sent' and job['model_completed_at']
     assert len(setup['model_calls'])==1 and len(setup['sends'])==1
+
+
+def test_conversational_followup_uses_only_completed_same_scope_text(setup,monkeypatch):
+    first_question='ممكن تفهمني كيف تشتغلون بالتخليص؟'
+    first_reply='تقدم آفاق خدمات التخليص الجمركي والنقل وفق التفاصيل المعتمدة.'
+    async def conversation(question,document_text,**kwargs):
+        await kwargs['before_request']()
+        history=kwargs['conversation_history']
+        setup['model_calls'].append((question,history,kwargs['conversation_scope']))
+        if len(setup['model_calls'])==1:
+            assert not history
+            answer=first_reply
+        else:
+            assert len(history)==1
+            assert history[0]['question']==first_question
+            assert history[0]['reply_text']==first_reply
+            assert history[0]['conversation_id']==CONVERSATION
+            assert kwargs['conversation_scope']['before_job_id']>history[0]['job_id']
+            answer='المقصود ترتيب إجراءات التخليص والنقل بحسب تفاصيل البضاعة.'
+        return privacy.ReplyResult(answer,True,True,'model_success')
+    monkeypatch.setattr(privacy,'understand',conversation)
+    first=agent.accept_inbound(payload(1,first_question));assert tick()
+    follow=agent.accept_inbound(payload(2,'طيب وضحها لي ببساطة'));assert tick()
+    assert store.get_job(first['job_id'])['status']=='sent'
+    assert store.get_job(follow['job_id'])['status']=='sent'
+    assert len(setup['model_calls'])==2 and len(setup['sends'])==2
+    assert setup['sends'][0][1]!=setup['sends'][1][1]
+
+
+def test_real_store_history_reaches_mocked_conversational_request_without_metadata(setup,monkeypatch):
+    first_question='ممكن تفهمني كيف تشتغلون بالتخليص؟'
+    first_reply='الخدمات المذكورة تشمل التخليص الجمركي والنقل.'
+    bodies=[]
+    real_client=httpx.AsyncClient
+    def model(req):
+        bodies.append(json.loads(req.content))
+        answer=first_reply if len(bodies)==1 else 'المقصود إجراءات التخليص ونقل البضاعة بحسب تفاصيلها.'
+        return httpx.Response(200,json={'stop_reason':'end_turn','content':[{'type':'text','text':answer}]})
+    monkeypatch.setenv('ANTHROPIC_API_KEY','synthetic-test-key')
+    monkeypatch.setattr(privacy,'understand',REAL_UNDERSTAND)
+    monkeypatch.setattr(privacy.httpx,'AsyncClient',lambda **kwargs:real_client(transport=httpx.MockTransport(model),**kwargs))
+    first=agent.accept_inbound(payload(1,first_question));assert tick()
+    assert store.get_job(first['job_id'])['diagnostics']['model_success'] is True
+    second=agent.accept_inbound(payload(2,'طيب وضحها لي ببساطة'));assert tick()
+    assert store.get_job(second['job_id'])['diagnostics']['model_success'] is True
+    assert len(bodies)==2
+    outbound=json.dumps(bodies[1],ensure_ascii=False)
+    assert first_question in outbound and first_reply in outbound
+    assert all(value not in outbound for value in (ACCOUNT,OWNER,CONVERSATION,'authorization_generation','job_id'))
+    assert 'tools' not in bodies[1] and len(setup['sends'])==2
 
 
 def test_owner_general_text_model_timeout_never_retries_or_sends(setup,monkeypatch):
@@ -212,6 +293,16 @@ def test_unapproved_document_is_quarantined_without_model(setup):
     job=store.get_job(result['job_id'])
     assert job['document_status']=='quarantined' and not job['document_text']
     assert not setup['model_calls'] and len(setup['sends'])==1
+
+
+def test_unsupported_media_does_not_claim_pdf_or_provider_failure(setup):
+    incoming=payload(1,'لخص محتوى المستند')
+    incoming['message']['attachments']=[{'type':'image','mimeType':'image/jpeg','payload':{'id':'synthetic-image'}}]
+    result=agent.accept_inbound(incoming);assert tick()
+    job=store.get_job(result['job_id'])
+    assert job['status']=='sent' and job['document_status']=='unavailable'
+    assert not setup['model_calls'] and not setup['provider_reads']
+    assert 'PDF' not in job['reply_text'] and 'المزود' not in job['reply_text']
 
 
 def test_model_ambiguous_exception_never_regenerates_or_sends(setup,monkeypatch):

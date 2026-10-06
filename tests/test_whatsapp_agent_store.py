@@ -49,7 +49,8 @@ def add(db, number=1, *, account='a', sender='s', conversation='c', event=None, 
     with db() as connection:
         return store.enqueue(connection, account_id=account, message_id='m'+str(number),
                              event_id=event or 'e'+str(number), sender=sender,
-                             conversation_id=conversation, payload=payload if payload is not None else {'text': 'sanitized', 'attachment_count': attachment_count,
+                             conversation_id=conversation, payload=payload if payload is not None else {'text': 'sanitized', 'question': 'What does the document say?',
+                                 'question_allowed': True, 'question_kind': 'document_question', 'attachment_count': attachment_count,
                                  'attachments': [{'mime': 'application/pdf'}] if attachment_count else []}, now=now)
 
 
@@ -854,7 +855,7 @@ def test_pilot_screened_operations_text_needs_no_pdf_provenance(db):
 
 @pytest.mark.parametrize('changes', [
     {'question_allowed': False}, {'question_allowed': 'true'}, {'question_kind': 'unknown'},
-    {'question_kind': 'document_question'}, {'question': ''}, {'question': None},
+    {'question_kind': 'unrecognized_kind'}, {'question': ''}, {'question': None},
     {'attachment_count': 1}, {'attachment_count': False}, {'attachment_count': '0'},
     {'attachments': [{'mime': 'application/pdf'}]}, {'attachments': None},
 ])
@@ -942,3 +943,295 @@ def test_ordinary_text_success_never_qualifies_as_pdf_acceptance(db):
     with pytest.raises(ValueError):
         store.update_settings('a', mode='routine', acceptance={'owner_receipt_confirmed': True,
             'document_job_id': jobs[0]['id'], 'followup_job_id': jobs[1]['id']}, db_factory=db, now=NOW)
+
+
+def history_exchange(db, number, *, question='Remember the loading sequence', reply='Loading order recorded',
+                     account='a', sender='s', conversation='c', now=NOW, status='sent', payload_changes=None):
+    payload = operations_payload(question=question, question_kind='conversation', **(payload_changes or {}))
+    add(db, number, account=account, sender=sender, conversation=conversation, payload=payload, now=now)
+    job = store.claim_job(account_id=account, db_factory=db, now=now)
+    store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+        status='none', db_factory=db, now=now)
+    store.prepare_reply(job['id'], job['lease_token'], reply_text=reply, db_factory=db, now=now)
+    sending = store.claim_send(account_id=account, db_factory=db, now=now)
+    store.finish_send(job['id'], sending['send_token'], status=status, db_factory=db, now=now)
+    return store.get_job(job['id'], db_factory=db)
+
+
+def history_target(db, number=99, *, account='a', sender='s', conversation='c', now=NOW):
+    add(db, number, account=account, sender=sender, conversation=conversation,
+        payload=operations_payload(question='What did we just discuss?', question_kind='conversation'), now=now)
+    return store.claim_job(account_id=account, db_factory=db, now=now)
+
+
+def history(db, target, **kwargs):
+    return store.recent_exchanges(account_id=target['account_id'], sender=target['sender'],
+        conversation_id=target['conversation_id'], before_job_id=target['id'], db_factory=db, now=NOW, **kwargs)
+
+
+def test_conversation_kind_uses_same_pilot_reservation_and_final_guards(db):
+    enable(db)
+    job = ordinary_job(db, payload=operations_payload(question_kind='conversation'))
+    assert store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert store.model_authorized(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    store.save_model(job['id'], job['lease_token'], reply_text='A contextual reply', db_factory=db, now=NOW)
+    store.prepare_reply(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    sending = store.claim_send(db_factory=db, now=NOW)
+    assert store.send_authorized(job['id'], sending['send_token'], db_factory=db, now=NOW)
+    store.update_settings('a', mode='off', db_factory=db, now=NOW)
+    enable(db)
+    assert not store.send_authorized(job['id'], sending['send_token'], db_factory=db, now=NOW)
+
+
+def test_recent_exchanges_returns_actual_minimal_chronological_pairs(db):
+    enable(db)
+    first = history_exchange(db, 1, question='First business question', reply='First actual answer')
+    second = history_exchange(db, 2, question='Second business question', reply='Second actual answer')
+    target = history_target(db)
+    rows = history(db, target)
+    assert [row['job_id'] for row in rows] == [first['id'], second['id']]
+    assert rows[0]['question'] == 'First business question' and rows[0]['reply_text'] == 'First actual answer'
+    assert set(rows[0]) == {'job_id','account_id','sender','conversation_id','authorization_generation',
+                           'status','created_at','completed_at','question','reply_text'}
+    assert rows[0]['completed_at'] == NOW.isoformat()
+    assert all(row['status'] == 'sent' and row['authorization_generation'] == target['authorization_generation'] for row in rows)
+    assert history(db, target, limit=1)[0]['job_id'] == second['id']
+
+
+@pytest.mark.parametrize('scope', [{'account_id':'other'}, {'sender':'other'}, {'conversation_id':'other'}])
+def test_recent_exchanges_rejects_cross_scope_target(db, scope):
+    enable(db)
+    history_exchange(db, 1)
+    target = history_target(db)
+    args = {'account_id':'a','sender':'s','conversation_id':'c', **scope}
+    assert store.recent_exchanges(**args, before_job_id=target['id'], db_factory=db, now=NOW) == []
+
+
+def test_recent_exchanges_ignores_other_conversations_and_generations(db):
+    enable(db)
+    history_exchange(db, 1, conversation='other')
+    own = history_exchange(db, 2)
+    target = history_target(db)
+    assert [row['job_id'] for row in history(db, target)] == [own['id']]
+    store.update_settings('a', mode='off', db_factory=db, now=NOW)
+    enable(db)
+    assert history(db, target) == []
+    new_target = history_target(db, 100)
+    assert history(db, new_target) == []
+
+
+@pytest.mark.parametrize('status', ['blocked','failed','uncertain'])
+def test_recent_exchanges_excludes_non_sent_outcomes(db, status):
+    enable(db)
+    history_exchange(db, 1, status=status)
+    target = history_target(db)
+    assert history(db, target) == []
+
+
+@pytest.mark.parametrize('change', [
+    {'question_allowed':False}, {'question_allowed':'true'}, {'attachment_count':1},
+    {'attachments':[{'mime':'application/pdf'}]},
+])
+def test_recent_exchanges_excludes_blocked_question_and_attachment_shapes(db, change):
+    enable(db)
+    history_exchange(db, 1, payload_changes=change)
+    target = history_target(db)
+    assert history(db, target) == []
+
+
+def test_recent_exchanges_excludes_document_derived_pairs(db):
+    enable(db)
+    add(db)
+    doc = claim(db)
+    model(db, doc)
+    sent(db, doc, generated=True)
+    target = history_target(db)
+    assert history(db, target) == []
+
+
+def test_recent_exchanges_validates_target_and_pair_times(db):
+    enable(db)
+    old = NOW-timedelta(days=1, seconds=1)
+    history_exchange(db, 1, now=old)
+    fresh = history_exchange(db, 2)
+    target = history_target(db)
+    assert [row['job_id'] for row in history(db, target, max_age_seconds=999999)] == [fresh['id']]
+    assert store.recent_exchanges(account_id='a',sender='s',conversation_id='c',before_job_id=target['id'],
+        db_factory=db,now=NOW+timedelta(seconds=300)) == []
+    with db() as connection:
+        connection.execute("UPDATE whatsapp_agent_jobs SET status='ready' WHERE id=%s",(target['id'],))
+    assert history(db, target) == []
+
+
+def test_recent_exchanges_excludes_future_or_incomplete_sent_records(db):
+    enable(db)
+    first = history_exchange(db, 1)
+    second = history_exchange(db, 2)
+    target = history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET completed_at=NULL WHERE id=%s',(first['id'],))
+        connection.execute('UPDATE whatsapp_agent_jobs SET completed_at=%s WHERE id=%s',
+                           ((NOW+timedelta(seconds=1)).isoformat(),second['id']))
+    assert history(db, target) == []
+
+
+def test_recent_exchanges_whole_pair_count_and_total_caps(db):
+    enable(db)
+    for number in range(6):
+        history_exchange(db, number, question='q'+str(number), reply='r'+str(number))
+    target = history_target(db)
+    rows = history(db, target, limit=999)
+    assert [row['question'] for row in rows] == ['q2','q3','q4','q5']
+    store.prepare_reply(target['id'],target['lease_token'],terminal_status='blocked',db_factory=db,now=NOW)
+    for number in range(6,10):
+        history_exchange(db, number, question='q'*1500, reply='r'*2500)
+    target = history_target(db, 100)
+    rows = history(db, target)
+    assert len(rows) == 2 and sum(len(row['question'])+len(row['reply_text']) for row in rows) == 8000
+    assert all(row['question']=='q'*1500 and row['reply_text']=='r'*2500 for row in rows)
+
+
+@pytest.mark.parametrize('question,reply', [
+    ('q'*1501, 'actual reply'), ('actual question', 'r'*2501),
+    ('Read https://example.invalid/private?token=secret', 'actual reply'),
+    ('actual question', 'Use provider.example.invalid/path'), ('', 'actual reply'),
+])
+def test_recent_exchanges_skips_oversized_urls_or_empty_pairs(db, question, reply):
+    enable(db)
+    history_exchange(db, 1, question=question, reply=reply)
+    target = history_target(db)
+    assert history(db, target) == []
+
+
+def test_recent_context_keeps_actual_pdf_root_across_followup_and_harmless_turn(db):
+    enable(db)
+    add(db)
+    original = claim(db)
+    model(db, original)
+    sent(db, original, generated=True)
+    add(db, 2, attachment_count=0)
+    inherited = claim(db)
+    checkpoint(db, inherited, context_source_job_id=original['id'])
+    sent(db, inherited)
+    history_exchange(db, 3, question='Thanks', reply='You are welcome')
+    target = history_target(db)
+    root = store.recent_context(account_id='a',sender='s',conversation_id='c',
+        before_job_id=target['id'],db_factory=db,now=NOW)
+    assert root['id'] == original['id'] and root['context_source_job_id'] is None
+    checkpoint(db, target, context_source_job_id=root['id'])
+    assert store.get_job(target['id'],db_factory=db)['context_source_job_id'] == original['id']
+    assert store.get_job(target['id'],db_factory=db)['document_checkpointed_at'] == root['document_checkpointed_at']
+
+
+def test_context_checkpoint_rejects_inherited_non_root_source(db):
+    enable(db)
+    add(db)
+    root = claim(db)
+    checkpoint(db, root)
+    sent(db, root)
+    add(db, 2, attachment_count=0)
+    inherited = claim(db)
+    checkpoint(db, inherited, context_source_job_id=root['id'])
+    sent(db, inherited)
+    target = history_target(db)
+    with pytest.raises(store.StateConflict):
+        checkpoint(db, target, context_source_job_id=inherited['id'])
+
+
+def test_recent_context_requires_actual_pdf_shape_and_current_hash(db):
+    enable(db)
+    add(db, payload=operations_payload())
+    false_root = claim(db)
+    checkpoint(db, false_root)
+    sent(db, false_root)
+    assert store.recent_context(account_id='a',sender='s',conversation_id='c',db_factory=db,now=NOW) is None
+    add(db, 2)
+    pdf = claim(db)
+    checkpoint(db, pdf)
+    sent(db, pdf)
+    assert store.recent_context(account_id='a',sender='s',conversation_id='c',db_factory=db,now=NOW)['id'] == pdf['id']
+    store.update_settings('a',approved_sha256=[],db_factory=db,now=NOW)
+    assert store.recent_context(account_id='a',sender='s',conversation_id='c',db_factory=db,now=NOW) is None
+
+
+def test_recent_context_separate_pdf_approval_survives_routine_activation(db):
+    document, followup, acceptance = acceptance_pair(db)
+    store.update_settings('a',mode='routine',acceptance=acceptance,db_factory=db,now=NOW)
+    root = store.recent_context(account_id='a',sender='s',conversation_id='c',db_factory=db,now=NOW)
+    assert root['id'] == document['id']
+    assert root['authorization_generation'] < store.get_settings('a',db_factory=db)['authorization_generation']
+
+
+@pytest.mark.parametrize('changes', [
+    {'question_kind':'conversation'}, {'question_kind':'operations'}, {'question_kind':'greeting'},
+    {'question_allowed':False}, {'question_allowed':'true'},
+])
+def test_pdf_meta_response_cannot_replace_explicit_followup_acceptance(db, changes):
+    import json
+    document, followup, acceptance = acceptance_pair(db)
+    row = store.get_job(followup['id'],db_factory=db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET payload=%s WHERE id=%s',
+            (json.dumps({**row['payload'], **changes}),followup['id']))
+    assert row['context_source_job_id'] == document['id'] and row['model_completed_at']
+    with pytest.raises(ValueError):
+        store.update_settings('a',mode='routine',acceptance=acceptance,db_factory=db,now=NOW)
+
+
+def test_source_absent_document_question_can_request_natural_clarification(db):
+    enable(db)
+    store.update_settings('a', approved_sha256=[], db_factory=db, now=NOW)
+    job = ordinary_job(db, payload=operations_payload(question='What does the file say?', question_kind='document_question'))
+    assert store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert store.model_authorized(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    store.save_model(job['id'], job['lease_token'], reply_text='I do not have a file here; please attach it.',
+        diagnostics={'model_success': True}, db_factory=db, now=NOW)
+    store.prepare_reply(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    sending = store.claim_send(db_factory=db, now=NOW)
+    assert store.send_authorized(job['id'], sending['send_token'], db_factory=db, now=NOW)
+    store.finish_send(job['id'], sending['send_token'], status='sent', db_factory=db, now=NOW)
+    result = store.get_job(job['id'], db_factory=db)
+    assert result['document_status']=='none' and result['document_sha256'] is None and not result['document_text']
+    assert store.recent_context(account_id='a', sender='s', conversation_id='c', db_factory=db, now=NOW) is None
+    second = ordinary_job(db,2,payload=operations_payload(question='Is the file available?',question_kind='document_question'))
+    assert store.reserve_model(second['id'],second['lease_token'],db_factory=db,now=NOW)
+    store.save_model(second['id'],second['lease_token'],reply_text='No file is available yet.',
+        diagnostics={'model_success':True},db_factory=db,now=NOW)
+    store.prepare_reply(second['id'],second['lease_token'],db_factory=db,now=NOW)
+    sending = store.claim_send(db_factory=db,now=NOW)
+    store.finish_send(second['id'],sending['send_token'],status='sent',db_factory=db,now=NOW)
+    with pytest.raises(ValueError):
+        store.update_settings('a', mode='routine', acceptance={'owner_receipt_confirmed':True,
+            'document_job_id':job['id'],'followup_job_id':second['id']}, db_factory=db, now=NOW)
+
+
+@pytest.mark.parametrize('change', ['attachment', 'hash', 'text', 'context', 'quarantined', 'unavailable'])
+def test_document_question_source_absent_branch_cannot_hide_any_source(db, change):
+    enable(db)
+    payload = operations_payload(question='What does the file say?', question_kind='document_question')
+    if change == 'attachment':
+        payload.update(attachment_count=1, attachments=[{'mime':'application/pdf'}])
+    job = ordinary_job(db, payload=payload)
+    if change == 'context':
+        with db() as connection:
+            connection.execute('UPDATE whatsapp_agent_jobs SET context_source_job_id=%s WHERE id=%s',
+                               (job['id'],job['id']))
+    elif change != 'attachment':
+        values = {'text':'','sha256':None,'status':'none'}
+        if change == 'hash': values['sha256']=SHA
+        elif change == 'text': values.update(text=TEXT,sha256='b'*64)
+        else: values['status']=change
+        store.checkpoint_document(job['id'],job['lease_token'],db_factory=db,now=NOW,**values)
+    assert not store.reserve_model(job['id'],job['lease_token'],db_factory=db,now=NOW)
+    assert not store.model_authorized(job['id'],job['lease_token'],db_factory=db,now=NOW)
+    assert store.get_job(job['id'],db_factory=db)['model_started_at'] is None
+
+
+def test_source_absent_document_question_ambiguity_still_never_retries(db):
+    enable(db)
+    job = ordinary_job(db,payload=operations_payload(question_kind='document_question'))
+    assert store.reserve_model(job['id'],job['lease_token'],db_factory=db,now=NOW)
+    assert claim(db,NOW+timedelta(seconds=301)) is None
+    assert store.get_job(job['id'],db_factory=db)['status']=='uncertain'
+    assert not store.model_authorized(job['id'],job['lease_token'],db_factory=db,now=NOW)
+    assert store.claim_send(db_factory=db,now=NOW+timedelta(seconds=302)) is None

@@ -262,6 +262,8 @@ def _validate_acceptance(connection, account_id, settings):
         document["authorization_generation"] != settings["authorization_generation"] or
         followup["authorization_generation"] != settings["authorization_generation"] or
         not _pdf_payload(document["payload"]) or not _followup_payload(followup["payload"]) or
+        followup["payload"].get("question_allowed") is not True or
+        followup["payload"].get("question_kind") != "document_question" or
         document["context_source_job_id"] is not None or
         document["status"] != "sent" or followup["status"] != "sent" or
         document["document_status"] != "ok" or not document["document_text"] or
@@ -439,7 +441,8 @@ def checkpoint_document(job_id, lease_token, *, text, sha256, status, diagnostic
             if (not source or source["id"] >= job["id"] or source["status"] != "sent" or
                 any(source[key] != job[key] for key in ("account_id", "sender", "conversation_id")) or
                 source["document_status"] != "ok" or source["document_text"] != text or
-                source["document_sha256"] != sha256):
+                source["document_sha256"] != sha256 or source["context_source_job_id"] is not None or
+                not _pdf_payload(source["payload"])):
                 raise StateConflict("context source is not a prior matching sent document")
             if _time(source["document_checkpointed_at"]) <= _time(now) - timedelta(days=1):
                 raise StateConflict("context source has expired")
@@ -605,19 +608,105 @@ def finish_send(job_id, send_token, *, status, provider_message_id=None,
 
 def recent_context(*, account_id, sender, conversation_id, before_job_id=None,
                    max_age_seconds=86400, db_factory=None, now=None):
+    """Return the latest original approved PDF, never an inherited followup.
+
+    This separately approved document cache uses current sender/scope, current
+    digest approval and the original read timestamp. A routine-mode transition
+    does not discard a still-approved PDF solely because its generation changed.
+    """
     max_age_seconds = max(1, min(int(max_age_seconds), 86400))
     args = [account_id, sender, conversation_id,
-            _stamp(_time(now) - timedelta(seconds=max_age_seconds))]
+            _stamp(_time(now) - timedelta(seconds=max_age_seconds)), _stamp(now)]
     scope = ""
     if before_job_id is not None:
-        scope = " AND id<%s"
+        scope = " AND j.id<%s"
         args.append(before_job_id)
     with (db_factory or database)() as connection:
-        return _row(connection.execute("""SELECT * FROM whatsapp_agent_jobs
-            WHERE account_id=%s AND sender=%s AND conversation_id=%s AND status='sent'
-              AND document_status='ok' AND document_text<>'' AND document_sha256 IS NOT NULL
-              AND document_checkpointed_at>%s""" +
-            scope + " ORDER BY id DESC LIMIT 1", tuple(args)).fetchone())
+        rows = connection.execute("""SELECT j.*,s.approved_sha256
+            FROM whatsapp_agent_jobs j JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
+            WHERE j.account_id=%s AND j.sender=%s AND j.conversation_id=%s AND j.status='sent'
+              AND j.document_status='ok' AND j.document_text<>'' AND j.document_sha256 IS NOT NULL
+              AND j.context_source_job_id IS NULL
+              AND j.document_checkpointed_at>%s AND j.document_checkpointed_at<=%s
+              AND (s.mode='routine' OR (s.mode='owner_pilot' AND s.pilot_sender=j.sender))""" +
+            scope + " ORDER BY j.id DESC LIMIT 32", tuple(args)).fetchall()
+    for raw in rows:
+        row = _row(raw)
+        approved = row.pop("approved_sha256")
+        if row["document_sha256"] in approved and _pdf_payload(row["payload"]):
+            return row
+    return None
+
+
+MAX_EXCHANGES = 4
+MAX_EXCHANGE_QUESTION_CHARS = 1500
+MAX_EXCHANGE_REPLY_CHARS = 2500
+MAX_EXCHANGE_TOTAL_CHARS = 8000
+_HISTORY_URL = re.compile(r"(?:[a-z][a-z0-9+.-]{1,20}://|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,63}\b)", re.I)
+
+
+def recent_exchanges(*, account_id, sender, conversation_id, before_job_id,
+                     limit=MAX_EXCHANGES, max_age_seconds=86400, db_factory=None, now=None):
+    """Return small, whole, text-only sent pairs for this active target job.
+
+    Scope and generation are checked with the actual target and current settings
+    in one SQL snapshot. Document-derived pairs are deliberately excluded: PDF
+    context has its own provenance-bound path. Caller must re-screen both texts
+    before use; the flags here are eligibility metadata, not content validation.
+    Returned pairs are chronological, with ISO UTC times and no provider/media
+    metadata. Oversized or URL-bearing pairs are skipped, never truncated.
+    """
+    for name, value in (("account_id", account_id), ("sender", sender),
+                        ("conversation_id", conversation_id)):
+        _identifier(value, name)
+    if type(before_job_id) is not int or before_job_id <= 0:
+        raise ValueError("before_job_id must identify the current processing job")
+    limit = max(1, min(int(limit), MAX_EXCHANGES))
+    max_age_seconds = max(1, min(int(max_age_seconds), 86400))
+    stamp = _stamp(now)
+    cutoff = _stamp(_time(now) - timedelta(seconds=max_age_seconds))
+    with (db_factory or database)() as connection:
+        rows = connection.execute("""SELECT j.id AS job_id,j.account_id,j.sender,j.conversation_id,
+            j.authorization_generation,j.status,j.created_at,j.completed_at,j.reply_text,j.payload
+            FROM whatsapp_agent_jobs j
+            JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
+            JOIN whatsapp_agent_jobs target ON target.id=%s
+              AND target.account_id=j.account_id AND target.sender=j.sender
+              AND target.conversation_id=j.conversation_id
+            WHERE j.account_id=%s AND j.sender=%s AND j.conversation_id=%s
+              AND target.authorization_generation=s.authorization_generation
+              AND target.status='processing' AND target.lease_until>%s
+              AND target.created_at>%s AND target.created_at<=%s
+              AND j.id<target.id AND j.status='sent'
+              AND j.created_at>%s AND j.created_at<=%s
+              AND j.completed_at>%s AND j.completed_at<=%s
+              AND j.document_status='none'
+              AND (j.document_text IS NULL OR j.document_text='')
+              AND j.document_sha256 IS NULL AND j.context_source_job_id IS NULL
+              AND """ + _ELIGIBLE + " ORDER BY j.id DESC LIMIT 32",
+            (before_job_id, account_id, sender, conversation_id, stamp, cutoff, stamp,
+             cutoff, stamp, cutoff, stamp)).fetchall()
+    result, total = [], 0
+    for raw in rows:
+        row = _row(raw)
+        payload = row.pop("payload")
+        question, reply = payload.get("question"), row["reply_text"]
+        if (payload.get("question_allowed") is not True or not _followup_payload(payload) or
+            not isinstance(question, str) or not question.strip() or
+            not isinstance(reply, str) or not reply.strip() or
+            len(question) > MAX_EXCHANGE_QUESTION_CHARS or len(reply) > MAX_EXCHANGE_REPLY_CHARS or
+            _HISTORY_URL.search(question) or _HISTORY_URL.search(reply)):
+            continue
+        size = len(question) + len(reply)
+        if total + size > MAX_EXCHANGE_TOTAL_CHARS:
+            break
+        row["question"] = question
+        row["created_at"], row["completed_at"] = _stamp(row["created_at"]), _stamp(row["completed_at"])
+        result.append(row)
+        total += size
+        if len(result) >= limit:
+            break
+    return list(reversed(result))
 
 
 def get_job(job_id, *, db_factory=None):
@@ -641,10 +730,12 @@ def get_outbox(job_id, *, db_factory=None):
 
 
 def _model_input_permitted(job, settings):
-    """Distinguish approved document evidence from screened business-only text.
+    """Distinguish approved document evidence from screened no-document text.
 
-    The text exception cannot reinterpret any document or inherited context as
-    ordinary text. It never supplies PDF/followup evidence for routine activation.
+    The source-absent exception cannot reinterpret any attached document or
+    inherited context as ordinary text. A document question with no source may
+    ask the model to clarify absence, never fabricate a document or supply the
+    PDF/followup evidence required for routine activation.
     """
     has_document = bool(job["document_text"] or job["document_sha256"]) or job["context_source_job_id"] is not None
     if has_document:
@@ -653,7 +744,7 @@ def _model_input_permitted(job, settings):
     payload = job.get("payload") or {}
     question = payload.get("question")
     return (job["document_status"] == "none" and _followup_payload(payload) and
-            payload.get("question_allowed") is True and payload.get("question_kind") == "operations" and
+            payload.get("question_allowed") is True and payload.get("question_kind") in {"operations", "conversation", "document_question"} and
             isinstance(question, str) and bool(question.strip()))
 
 
