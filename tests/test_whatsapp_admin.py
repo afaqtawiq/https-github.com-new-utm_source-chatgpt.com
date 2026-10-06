@@ -58,7 +58,11 @@ class Connection:
             CREATE TABLE shipment_operations(shipment_id INTEGER UNIQUE,stage TEXT,notes TEXT,created_at TEXT,updated_at TEXT);
             CREATE TABLE freight_negotiations(id INTEGER PRIMARY KEY,shipment_id INTEGER UNIQUE,
                 owner_phone TEXT,weight_tons REAL,status TEXT,notes TEXT,created_at TEXT,updated_at TEXT,\n                contact_channel TEXT,record_kind TEXT DEFAULT 'shipment_request',
-                provider_message_id TEXT,provider_call_id TEXT,contacted_at TEXT);
+                provider_message_id TEXT,provider_call_id TEXT,contacted_at TEXT,
+                owner_message_provider TEXT,owner_message_account_id TEXT,owner_message_conversation_id TEXT);
+            CREATE TABLE freight_owner_receipts(id INTEGER PRIMARY KEY,negotiation_id INTEGER,
+                provider_message_id TEXT,owner_phone TEXT,contact_fingerprint TEXT,provider TEXT,account_id TEXT,conversation_id TEXT,
+                delivery_status TEXT,error_code INTEGER,reason TEXT,checked_at TEXT,checked_by INTEGER);
             CREATE TABLE driver_broadcasts(id INTEGER PRIMARY KEY,shipment_id INTEGER,status TEXT,is_test INTEGER DEFAULT 0,
                 sent_count INTEGER,failed_count INTEGER,confirmed_at TEXT,completed_at TEXT,accepted_driver_id INTEGER,accepted_at TEXT);
             CREATE TABLE driver_broadcast_recipients(id INTEGER PRIMARY KEY,broadcast_id INTEGER,driver_id INTEGER,
@@ -68,6 +72,9 @@ class Connection:
                 provider_message_id TEXT,sent_at TEXT);
             CREATE TABLE driver_recovery_receipts(id INTEGER PRIMARY KEY,attempt_id INTEGER,provider_message_id TEXT,delivery_status TEXT,checked_at TEXT);
             CREATE TABLE accounts(id INTEGER PRIMARY KEY,name TEXT,status TEXT);
+            CREATE TABLE freight_owner_reply_bindings(shipment_event_id INTEGER PRIMARY KEY,negotiation_id INTEGER,
+                contact_fingerprint TEXT,provider_message_id TEXT,owner_phone TEXT,account_id TEXT,conversation_id TEXT,
+                inbound_event_id TEXT,inbound_message_id TEXT,binding_source TEXT,recorded_at TEXT);
             CREATE TABLE shipment_events(id INTEGER PRIMARY KEY,shipment_id INTEGER,
                 event_type TEXT,summary TEXT,stage TEXT,happened_at TEXT);
         ''')
@@ -77,7 +84,7 @@ class Connection:
             return Cursor(self.db.execute('SELECT 1'))
         sql = sql.replace("NOW()+INTERVAL '10 minutes'", "datetime('now','+10 minutes')")
         sql = sql.replace('BIGSERIAL PRIMARY KEY', 'INTEGER PRIMARY KEY')
-        sql = sql.replace('NOW()', 'CURRENT_TIMESTAMP').replace(' FOR UPDATE', '').replace('::jsonb', '')
+        sql = sql.replace('NOW()', 'CURRENT_TIMESTAMP').replace(' FOR UPDATE OF n', '').replace(' FOR UPDATE', '').replace('::jsonb', '')
         return Cursor(self.db.execute(sql.replace('%s', '?'), args))
 
 

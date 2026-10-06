@@ -65,7 +65,8 @@ class Providers:
             raise WhatsAppBlocked('CI owner preflight blocked; no provider send')
         if mode == 'no_receipt':
             return {'messages': []}
-        return {'provider': 'ci-fake', 'messages': [{'id': receipt}]}
+        return {'provider': 'zernio', 'messages': [{'id': receipt}], 'account_id': ACCOUNT,
+                'conversation_id': 'ci-transport-' + recipient.lstrip('+')}
 
     async def driver(self, recipient, message):
         from app.zernio_whatsapp import WhatsAppBlocked
@@ -599,6 +600,8 @@ def run(providers):
         assert (one('SELECT COUNT(*) n FROM shipments')['n'], one('SELECT COUNT(*) n FROM drivers')['n']) == (records_before[0] + 1, records_before[1])
         assert not providers.unexpected, providers.unexpected
         print('PASS: read-only transport status, legacy fallback, signed natural greeting/query, duplicate idempotency and no chat-triggered sends.')
+        from owner_delivery_acceptance import run_owner_delivery
+        run_owner_delivery(providers, inbound)
         from staff_routing_acceptance import run_staff_routing
         run_staff_routing(providers, inbound)
         from transport_disclosed_acceptance import run_disclosed

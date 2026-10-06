@@ -151,7 +151,7 @@ def afaaq_command(c, command):
 
 def shipment_status(c, reference):
     """Read only the requested shipment; provider acceptance is not delivery."""
-    row = c.execute('''SELECT s.reference,s.origin,s.destination,s.status,s.is_test,
+    row = c.execute('''SELECT s.id,s.reference,s.origin,s.destination,s.status,s.is_test,
         n.status negotiation_status,n.contact_channel,n.provider_message_id,
         n.provider_call_id,n.contacted_at,b.id broadcast_id,b.status broadcast_status
         FROM shipments s LEFT JOIN freight_negotiations n ON n.shipment_id=s.id
@@ -176,6 +176,8 @@ def shipment_status(c, reference):
         'contact_failed': 'فشل طلب التواصل مع صاحب الشحنة',
         'contact_uncertain': 'نتيجة التواصل غير مؤكدة؛ تحتاج مراجعة',
         'awaiting_owner': 'بانتظار رد أو استكمال تفاصيل صاحب الشحنة',
+        'owner_delivery_failed': 'فشل تسليم رسالة صاحب الشحنة؛ يحتاج مراجعة',
+        'owner_delivery_unknown': 'إيصال صاحب الشحنة غير مؤكد؛ يحتاج مراجعة',
         'owner_agreed': 'تم تسجيل اتفاق صاحب الشحنة',
         'needs_review': 'بانتظار المراجعة',
         'carrier_offer': 'عرض ناقل يبحث عن حمولة',
@@ -199,17 +201,11 @@ def shipment_status(c, reference):
     from app.transport_status import snapshot, evidence_lines, current_status
     broadcast = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s', (row['broadcast_id'],)).fetchone() if row.get('broadcast_id') else None
     evidence = snapshot(c,broadcast)
-    stage = current_status(row['status'],row['negotiation_status'],evidence)
+    from app.owner_delivery import snapshot as owner_snapshot, evidence_lines as owner_lines
+    owner_evidence = owner_snapshot(c,row['id'])
+    stage = current_status(row['status'],row['negotiation_status'],evidence,owner_evidence)
     lines = [heading, f"الحالة التشغيلية: {labels.get(stage, stage)} ({stage})"]
-    if row['provider_message_id']:
-        lines.append('تواصل صاحب الشحنة: قبل مزود واتساب طلب الإرسال وله معرف مسجل.')
-        lines.append('تسليم الرسالة وقراءتها غير مؤكدين في هذا السجل.')
-    elif row['provider_call_id']:
-        lines.append('تواصل صاحب الشحنة: قبل مزود الاتصال طلب المكالمة وله معرف مسجل؛ هذا لا يثبت الرد عليها.')
-    else:
-        lines.append('تواصل صاحب الشحنة: لا يوجد معرف قبول مسجل من المزود.')
-    if (row['provider_message_id'] or row['provider_call_id']) and row['contacted_at']:
-        lines.append('وقت قبول طلب التواصل: ' + str(row['contacted_at']))
+    lines.extend(owner_lines(owner_evidence))
     lines.extend(evidence_lines(evidence))
     return '\n'.join(lines)
 

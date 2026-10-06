@@ -59,6 +59,8 @@ def _init_storage():
     with db() as c:
         for statement in statements:
             c.execute(statement)
+        from app.owner_delivery import init_storage as init_owner_delivery
+        init_owner_delivery(c)
         c.execute(
             """INSERT INTO freight_negotiations(shipment_id,naqliat_load_id,owner_phone,weight_tons,status,created_at,updated_at)
                SELECT s.id,n.id,n.owner_phone,n.weight_tons,'ready_to_contact',%s,%s
@@ -209,8 +211,10 @@ async def contact_owner(shipment_id, approved=False, user_id=None):
         if not provider_id:
             raise RuntimeError("لم يرجع مزود الرسائل معرفًا؛ يلزم التحقق قبل إعادة المحاولة")
         execute("""UPDATE freight_negotiations SET status='awaiting_owner',contact_channel='whatsapp',
-            provider_message_id=?,contacted_at=?,last_error=NULL,updated_at=? WHERE shipment_id=?""",
-            (provider_id, utcnow(), utcnow(), shipment_id))
+            provider_message_id=?,owner_message_provider=?,owner_message_account_id=?,owner_message_conversation_id=?,
+            contacted_at=?,last_error=NULL,updated_at=? WHERE shipment_id=?""",
+            (provider_id, result.get("provider"), result.get("account_id"), result.get("conversation_id"),
+             utcnow(), utcnow(), shipment_id))
         log(user_id, "freight_owner_contact_submitted", "shipment", shipment_id, "Provider accepted message: " + provider_id)
     except Exception as exc:
         status = 'contact_blocked' if isinstance(exc, WhatsAppBlocked) else 'contact_uncertain' if attempted else 'contact_failed'
@@ -553,7 +557,8 @@ def workflow_page(request: Request):
         for item in items:
             broadcast = c.execute('SELECT * FROM driver_broadcasts WHERE id=%s', (item['broadcast_id'],)).fetchone() if item.get('broadcast_id') else None
             evidence = snapshot(c,broadcast)
-            item['effective_status'] = current_status(item['status'],item['negotiation_status'],evidence)
+            from app.owner_delivery import snapshot as owner_snapshot
+            item['effective_status'] = current_status(item['status'],item['negotiation_status'],evidence,owner_snapshot(c,item['id']))
     table = "".join(f"<tr><td><a href='/freight-workflow/{x['id']}'>{esc(display_reference(x['reference'],x.get('is_test')))}</a></td><td>{esc(x['origin'])} → {esc(x['destination'])}</td><td dir=ltr>{esc(x['owner_phone'])}</td><td>{esc('عرض ناقل يبحث عن حمولة' if x.get('record_kind') == 'carrier_offer' else x['negotiation_status'])}</td><td>{esc(x['agreed_owner_price'])}</td><td>{esc(x['driver_offer_price'])}</td><td>{esc(x.get('effective_status'))}</td><td>{esc(x.get('driver_name'))}</td></tr>" for x in items)
     return HTMLResponse(_page("إدارة عروض الشحن", f"<h1>إدارة عروض الشحن</h1><p><a href='/dashboard'>الرئيسية</a></p><div class=card><table><tr><th>الشحنة</th><th>المسار</th><th>صاحب الشحنة</th><th>التفاوض</th><th>اتفاق المالك</th><th>عرض السائق</th><th>الإرسال</th><th>السائق المقبول</th></tr>{table or '<tr><td colspan=8>لا توجد شحنات.</td></tr>'}</table></div>"))
 
@@ -587,8 +592,11 @@ def workflow_detail(shipment_id: int, request: Request):
         {classification}</div>"""))
     broadcast = one("SELECT * FROM driver_broadcasts WHERE shipment_id=? ORDER BY id DESC LIMIT 1", (shipment_id,))
     from app.transport_status import snapshot, evidence_lines, current_status
-    with db() as c: transport_evidence = snapshot(c, broadcast)
-    effective_status = current_status(item['status'],item['negotiation_status'],transport_evidence)
+    from app.owner_delivery import snapshot as owner_snapshot, evidence_lines as owner_lines
+    with db() as c:
+        transport_evidence = snapshot(c, broadcast)
+        owner_evidence = owner_snapshot(c, shipment_id)
+    effective_status = current_status(item['status'],item['negotiation_status'],transport_evidence,owner_evidence)
     source = one("SELECT raw_text,description,capture_method,captured_at FROM naqliat_loads WHERE id=?",
                  (item.get('naqliat_load_id'),)) if item.get('naqliat_load_id') else None
     source_text = ((source or {}).get('raw_text') or (source or {}).get('description') or '').strip()
@@ -601,7 +609,7 @@ def workflow_detail(shipment_id: int, request: Request):
         'contacting': 'جارٍ التواصل؛ لا تكرر الإرسال',
         'contact_uncertain': 'نتيجة الإرسال غير مؤكدة؛ يلزم التحقق قبل إعادة المحاولة',
     }
-    owner_state = ('قبل مزود التواصل الطلب؛ هذا لا يثبت وصوله للمستلم'
+    owner_state = (' '.join(owner_lines(owner_evidence))
                    if item.get('provider_message_id') or item.get('provider_call_id') else
                    owner_states.get(item['negotiation_status'], 'لا يوجد معرّف إرسال موثق في هذا السجل'))
     driver_state = (f"عرض موجود — {effective_status}؛ راجع سجل المستلمين" if broadcast else
@@ -615,6 +623,14 @@ def workflow_detail(shipment_id: int, request: Request):
     progress = f"""<section class=card id=shipment-progress><h2>ماذا تم في هذه الشحنة؟</h2>
     <p>الاستلام: محفوظة بالمرجع {esc(item['reference'])}.</p>
     <p>صاحب الشحنة: {esc(owner_state)}.</p><p>السائقون: {esc(driver_state)}.</p></section>"""
+    progress += '<section class=card id=owner-delivery-evidence><h2>إيصال تواصل صاحب الشحنة</h2>' + ''.join('<p>' + esc(line) + '</p>' for line in owner_lines(owner_evidence)) + '</section>'
+    if (current.get('role') in ('admin','transport') and item.get('provider_message_id')
+            and item.get('contact_channel') == 'whatsapp'):
+        progress += f"""<form method=post action='/freight-workflow/{shipment_id}/owner-delivery/reconcile'>
+        <input type=hidden name=csrf value='{esc(current['csrf'])}'>
+        <input type=hidden name=contact_fingerprint value='{esc(owner_evidence['fingerprint'])}'>
+        <label><input type=checkbox name=confirm_lookup value=yes required> أعتمد فحص إيصال هذه الرسالة فقط؛ قد يستهلك طلبات مدفوعة لدى المزود، دون إرسال رسالة</label>
+        <button>فحص إيصال صاحب الشحنة مرة واحدة</button></form>"""
     progress += '<section class=card id=transport-evidence><h2>دليل الإرسال والقبول</h2>' + ''.join('<p>' + esc(line) + '</p>' for line in evidence_lines(transport_evidence)) + '</section>'
     if source:
         from app.transport_intake import extract_transport
@@ -653,6 +669,8 @@ def workflow_detail(shipment_id: int, request: Request):
     <tr><th>last_error</th><td>{esc(item.get('last_error') or '—')}</td></tr>
     </table></section>"""
     owner_contact_control = f"""<form method=post action='/freight-workflow/{shipment_id}/contact-owner'><input type=hidden name=csrf value='{esc(current['csrf'])}'><button>اعتماد التواصل مع صاحب الشحنة</button></form>"""
+    if item.get('provider_message_id') or item.get('provider_call_id'):
+        owner_contact_control = '<p>قبول التواصل محفوظ؛ لا توجد إعادة إرسال تلقائية. راجع الإيصال والردود أولًا.</p>'
     if item.get('is_test'):
         owner_contact_control = '<p>حالة استفسار الاختبار: ' + esc(item.get('test_owner_contact_status')) + '</p>'
         if (current.get('role') == 'admin' and item.get('test_owner_contact_status') in ('not_sent', 'blocked')
@@ -678,6 +696,19 @@ def workflow_detail(shipment_id: int, request: Request):
     if broadcast:
         controls += f"<p><a href='/commands/broadcast/{broadcast['id']}'>مراجعة العرض وتأكيد الإرسال الجماعي مرة واحدة</a> — الحالة: {esc(broadcast['status'])}</p>"
     return HTMLResponse(_page(item["reference"], f"<div class=card><h1>{esc(item['reference'])}</h1><p>{esc(item['origin'])} → {esc(item['destination'])}</p><p>صاحب الشحنة: <span dir=ltr>{esc(item['owner_phone'])}</span> | الحالة الحالية: {esc(effective_status)}</p><p class=warn>{esc(item.get('last_error'))}</p>{controls}</div>"))
+
+
+@router.post('/freight-workflow/{shipment_id}/owner-delivery/reconcile')
+async def reconcile_owner_delivery(shipment_id: int, request: Request):
+    current = session(request)
+    data = form(await request.body())
+    if current.get('role') not in ('admin', 'transport') or data.get('csrf') != current['csrf']:
+        raise HTTPException(403)
+    if data.get('confirm_lookup') != 'yes':
+        raise HTTPException(400, 'يلزم اعتماد فحص الإيصال؛ لا يُرسل هذا الإجراء أي رسالة')
+    from app.owner_delivery import reconcile
+    await reconcile(shipment_id, data.get('contact_fingerprint'), current['user_id'])
+    return RedirectResponse(f'/freight-workflow/{shipment_id}', 303)
 
 
 @router.post('/freight-workflow/{shipment_id}/reextract')
@@ -843,8 +874,9 @@ async def send_test_owner_inquiry(shipment_id, user_id, preview):
             c.execute('SELECT id FROM shipments WHERE id=%s FOR UPDATE', (shipment_id,)).fetchone()
             now = utcnow()
             c.execute("""UPDATE freight_negotiations SET test_owner_contact_status='sent',provider_message_id=%s,
-                contact_channel='whatsapp',contacted_at=%s,last_error=NULL,updated_at=%s WHERE shipment_id=%s""",
-                (receipt, now, now, shipment_id))
+                contact_channel='whatsapp',owner_message_provider=%s,owner_message_account_id=%s,
+                owner_message_conversation_id=%s,contacted_at=%s,last_error=NULL,updated_at=%s WHERE shipment_id=%s""",
+                (receipt, result.get('provider'), result.get('account_id'), result.get('conversation_id'), now, now, shipment_id))
             c.execute("""INSERT INTO shipment_events(shipment_id,event_type,summary,stage,happened_at,created_by)
                 VALUES(%s,'test_owner_inquiry_submitted',%s,'test_pending',%s,%s)""",
                 (shipment_id, 'اختبار معلن؛ قبول المزود لا يثبت التسليم أو القراءة. Provider ID: ' + receipt, now, user_id))
@@ -931,8 +963,10 @@ def workflow_api(request: Request):
         for item in items:
             broadcast = c.execute('SELECT * FROM driver_broadcasts WHERE shipment_id=%s ORDER BY id DESC LIMIT 1', (item['shipment_id'],)).fetchone()
             evidence = snapshot(c, broadcast)
+            from app.owner_delivery import snapshot as owner_snapshot
             item['transport_evidence'] = evidence
-            item['effective_status'] = current_status(item['shipment_status'],item['status'],evidence)
+            item['owner_delivery_evidence'] = owner_snapshot(c,item['shipment_id'])
+            item['effective_status'] = current_status(item['shipment_status'],item['status'],evidence,item['owner_delivery_evidence'])
     return {"owner_auto_contact_enabled": os.getenv("ENABLE_EXTERNAL_ACTIONS", "0") == "1",
             "driver_margin_sar": 150, "items": items}
 
