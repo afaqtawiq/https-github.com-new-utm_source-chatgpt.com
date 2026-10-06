@@ -4,7 +4,7 @@ Based on the deployed manager-inbox release `cdaeb696410c27836edec98558640f74425
 
 ## Manager PDF access
 
-The existing inbox adds explicit download and local-text-review actions for PDF attachments. Admin session, configured account, private conversation, exact message and attachment index are verified before fetching any bytes. The media identifier comes only from the verified attachment's `payload.id`.
+The existing inbox adds explicit download and local-text-review actions for PDF attachments. Admin session, configured account, private conversation, exact message and attachment index are verified before fetching any bytes. The media identifier comes from the verified attachment's `payload.id` (string or numeric), its canonical same-origin media-proxy URL, or the official resolver response for that exact verified message/index. A canonical URL with an explicit different account is rejected; it is parsed only for identity and never followed.
 
 WhatsApp binary retrieval uses the provider's documented `GET /v1/whatsapp/media/{mediaId}` with the existing server client and account ID. Attachment URLs and refresh URLs are never followed. Only the fixed Zernio origin receives its existing authorization header; no credential is copied to the browser or a media host. Redirects, compressed bodies, non-PDF MIME, bad PDF signatures and oversized responses fail closed. No automatic retry follows an expired or failed binary download.
 
@@ -39,4 +39,5 @@ No new subscription, credential or grant is introduced. Downloads use the existi
 
 - https://docs.zernio.com/changelog?platform=whatsapp&type=breaking_change (July 22, 2026 WhatsApp binary media endpoint)
 - https://docs.zernio.com/messages/get-inbox-conversation-messages
+- https://docs.zernio.com/messages/get-message-attachment
 - https://docs.zernio.com/platforms/whatsapp/inbox
