@@ -45,11 +45,11 @@ def enable(db, account='a', sender='s'):
                                  approved_sha256=[SHA], db_factory=db, now=NOW)
 
 
-def add(db, number=1, *, account='a', sender='s', conversation='c', event=None, attachment_count=1, now=NOW):
+def add(db, number=1, *, account='a', sender='s', conversation='c', event=None, attachment_count=1, now=NOW, payload=None):
     with db() as connection:
         return store.enqueue(connection, account_id=account, message_id='m'+str(number),
                              event_id=event or 'e'+str(number), sender=sender,
-                             conversation_id=conversation, payload={'text': 'sanitized', 'attachment_count': attachment_count,
+                             conversation_id=conversation, payload=payload if payload is not None else {'text': 'sanitized', 'attachment_count': attachment_count,
                                  'attachments': [{'mime': 'application/pdf'}] if attachment_count else []}, now=now)
 
 
@@ -393,7 +393,7 @@ def test_routine_document_gate_and_text_only_reservation(db):
         sha256='b'*64, status='ok', db_factory=db, now=NOW)
     assert not store.reserve_model(document['id'], document['lease_token'], db_factory=db, now=NOW)
     assert store.get_job(document['id'], db_factory=db)['diagnostics']['reason'] == 'document_provenance_not_approved'
-    add(db, 2)
+    add(db, 2, payload=operations_payload())
     text_only = claim(db)
     store.checkpoint_document(text_only['id'], text_only['lease_token'], text='',
         sha256=None, status='none', db_factory=db, now=NOW)
@@ -818,3 +818,127 @@ def test_concurrent_settings_forms_only_one_generation_can_win():
         assert store.get_settings('a', db_factory=factory)['authorization_generation'] == expected+1
     finally:
         connection.close()
+
+
+def operations_payload(**changes):
+    return {'question': 'How can I organize a shipment handover?', 'question_allowed': True,
+            'question_kind': 'operations', 'attachment_count': 0, 'attachments': [], **changes}
+
+
+def ordinary_job(db, number=1, *, payload=None, now=NOW, sender='s'):
+    add(db, number, sender=sender, payload=operations_payload() if payload is None else payload, now=now)
+    job = claim(db, now)
+    if job:
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+            status='none', db_factory=db, now=now)
+    return job
+
+
+def test_pilot_screened_operations_text_needs_no_pdf_provenance(db):
+    enable(db)
+    store.update_settings('a', approved_sha256=[], db_factory=db, now=NOW)
+    job = ordinary_job(db)
+    assert store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert store.model_authorized(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert not store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    store.save_model(job['id'], job['lease_token'], reply_text='A screened business response',
+        diagnostics={'model_success': True}, db_factory=db, now=NOW)
+    store.prepare_reply(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    sending = store.claim_send(db_factory=db, now=NOW)
+    assert store.send_authorized(job['id'], sending['send_token'], db_factory=db, now=NOW)
+    store.finish_send(job['id'], sending['send_token'], status='sent', db_factory=db, now=NOW)
+    assert store.get_job(job['id'], db_factory=db)['document_status'] == 'none'
+    assert store.recent_context(account_id='a', sender='s', conversation_id='c', db_factory=db, now=NOW) is None
+    assert not store.send_authorized(job['id'], sending['send_token'], db_factory=db, now=NOW)
+
+
+@pytest.mark.parametrize('changes', [
+    {'question_allowed': False}, {'question_allowed': 'true'}, {'question_kind': 'unknown'},
+    {'question_kind': 'document_question'}, {'question': ''}, {'question': None},
+    {'attachment_count': 1}, {'attachment_count': False}, {'attachment_count': '0'},
+    {'attachments': [{'mime': 'application/pdf'}]}, {'attachments': None},
+])
+def test_pilot_ordinary_text_rejects_unscreened_or_document_like_payload(db, changes):
+    enable(db)
+    job = ordinary_job(db, payload=operations_payload(**changes))
+    assert not store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert not store.model_authorized(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    row = store.get_job(job['id'], db_factory=db)
+    assert row['status'] == 'blocked' and row['model_started_at'] is None
+
+
+@pytest.mark.parametrize('checkpoint_values', [
+    {'text': '', 'sha256': None, 'status': 'unavailable'},
+    {'text': '', 'sha256': SHA, 'status': 'none'},
+    {'text': TEXT, 'sha256': 'b'*64, 'status': 'ok'},
+])
+def test_ordinary_payload_cannot_bypass_document_provenance(db, checkpoint_values):
+    enable(db)
+    job = ordinary_job(db)
+    store.checkpoint_document(job['id'], job['lease_token'], db_factory=db, now=NOW, **checkpoint_values)
+    assert not store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+
+
+def test_ordinary_text_guards_recheck_screened_scope(db):
+    import json
+    enable(db)
+    job = ordinary_job(db)
+    assert store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET payload=%s WHERE id=%s',
+            (json.dumps(operations_payload(question_allowed=False)), job['id']))
+    assert not store.model_authorized(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    store.save_model(job['id'], job['lease_token'], reply_text='Previously returned response', db_factory=db, now=NOW)
+    store.prepare_reply(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert store.claim_send(db_factory=db, now=NOW) is None
+    assert store.get_job(job['id'], db_factory=db)['status'] == 'blocked'
+
+
+def test_pilot_ordinary_text_keeps_sender_budget_and_uncertain_fencing(db):
+    enable(db)
+    assert ordinary_job(db, 100, sender='other') is None
+    for number in range(11):
+        job = ordinary_job(db, number)
+        reserved = store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+        assert reserved is (number < 10)
+        if reserved:
+            store.prepare_reply(job['id'], job['lease_token'], terminal_status='uncertain', db_factory=db, now=NOW)
+        assert not store.model_authorized(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert store.get_job(job['id'], db_factory=db)['diagnostics']['reason'] == 'daily_model_budget_exhausted'
+
+
+def test_pilot_ordinary_text_stop_and_crash_do_not_reauthorize(db):
+    enable(db)
+    first = ordinary_job(db)
+    assert store.reserve_model(first['id'], first['lease_token'], db_factory=db, now=NOW)
+    assert claim(db, NOW+timedelta(seconds=301)) is None
+    assert store.get_job(first['id'], db_factory=db)['status'] == 'uncertain'
+    assert not store.model_authorized(first['id'], first['lease_token'], db_factory=db, now=NOW)
+    second = ordinary_job(db, 2)
+    assert store.reserve_model(second['id'], second['lease_token'], db_factory=db, now=NOW)
+    store.save_model(second['id'], second['lease_token'], reply_text='Business response', db_factory=db, now=NOW)
+    store.prepare_reply(second['id'], second['lease_token'], db_factory=db, now=NOW)
+    sending = store.claim_send(db_factory=db, now=NOW)
+    assert store.send_authorized(second['id'], sending['send_token'], db_factory=db, now=NOW)
+    store.update_settings('a', mode='off', db_factory=db, now=NOW)
+    enable(db)
+    assert not store.send_authorized(second['id'], sending['send_token'], db_factory=db, now=NOW)
+    assert store.claim_send(db_factory=db, now=NOW+timedelta(seconds=301)) is None
+    assert store.get_job(second['id'], db_factory=db)['status'] == 'uncertain'
+
+
+def test_ordinary_text_success_never_qualifies_as_pdf_acceptance(db):
+    enable(db)
+    jobs = []
+    for number in range(2):
+        job = ordinary_job(db, number)
+        assert store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+        store.save_model(job['id'], job['lease_token'], reply_text='Known business response',
+            diagnostics={'model_success': True}, db_factory=db, now=NOW)
+        store.prepare_reply(job['id'], job['lease_token'], db_factory=db, now=NOW)
+        sending = store.claim_send(db_factory=db, now=NOW)
+        store.finish_send(job['id'], sending['send_token'], status='sent', db_factory=db, now=NOW)
+        jobs.append(job)
+    with pytest.raises(ValueError):
+        store.update_settings('a', mode='routine', acceptance={'owner_receipt_confirmed': True,
+            'document_job_id': jobs[0]['id'], 'followup_job_id': jobs[1]['id']}, db_factory=db, now=NOW)

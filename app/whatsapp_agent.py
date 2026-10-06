@@ -223,12 +223,24 @@ async def processing(job):
         document_status = 'ok' if text else 'none'
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id)
     if not data.get('question_allowed'):
-        reply = 'وصلت رسالتك. فيها تفاصيل تحتاج مراجعة محلية قبل استخدامها في الفهم الآلي؛ اكتب سؤالًا تشغيليًا دون أسرار أو بيانات بنكية.'
+        if data.get('question_kind') == 'clarify_driver':
+            reply = privacy.DRIVER_CLARIFY_REPLY
+        elif data.get('question_kind') == 'clarify_action':
+            reply = privacy.ACTION_CLARIFY_REPLY
+        elif data.get('question_reason') == 'instruction_content':
+            reply = 'وضّح السؤال الذي تريد الإجابة عنه؛ لا أنفّذ التعليمات الموجودة داخل المستندات.'
+        elif data.get('question_kind') == 'clarify':
+            reply = 'ما الذي تريد معرفته؟ أقدر أساعدك بسؤال عن المستند أو استفسار تشغيلي واضح.'
+        else:
+            reply = 'تحتاج هذه الرسالة مراجعة محلية قبل استخدامها في الفهم الآلي. اكتب السؤال دون أسرار أو بيانات بنكية.'
     elif document_status == 'quarantined':
         reply = 'وصل ملف PDF، وأوقفته للمراجعة المحلية قبل مشاركته مع نموذج الفهم. لم أعتمد محتواه أو أسجل منه أي حركة.'
     elif document_status == 'unavailable':
         reply = 'وصلتني بيانات مرفق PDF، لكن لم أتمكن من قراءة ملفه من المزود. لم أستنتج محتواه؛ يلزم مراجعة المرفق الأصلي.'
-    elif not text and not (data.get('question_kind') == 'operations' and settings['mode'] == 'routine'):
+    elif not data.get('attachments') and data.get('question_kind') in ('greeting','thanks','ready'):
+        reply = {'greeting':privacy.GREETING_REPLY,'thanks':privacy.THANKS_REPLY,
+                 'ready':privacy.READY_REPLY}[data['question_kind']]
+    elif not text and data.get('question_kind') != 'operations':
         reply = ('جاهزة للاختبار. أرسل ملف PDF التجريبي هنا، ثم اسألني عن محتواه.'
                  if settings['mode'] == 'owner_pilot' else 'أنا معك. أرسل المستند أو حدّد الاستفسار التشغيلي الذي تريد مراجعته.')
     else:
@@ -400,7 +412,7 @@ async def job_page(job_id: int, request: Request):
     outbox = await run_in_threadpool(store.get_outbox,job_id)
     settings = await run_in_threadpool(store.get_settings,account)
     read_scope(request,current,account)
-    public = {k:job.get(k) for k in ('id','status','sender','conversation_id','message_id','event_id','read_attempts',
+    public = {k:job.get(k) for k in ('id','account_id','status','sender','conversation_id','message_id','event_id','read_attempts',
         'authorization_generation','document_sha256','document_status','context_source_job_id','model_started_at','model_completed_at','created_at','diagnostics')}
     public['attachment_shapes'] = [item.get('shape') for item in job['payload'].get('attachments',[])]
     public['provider_message_id'] = (outbox or {}).get('provider_message_id')

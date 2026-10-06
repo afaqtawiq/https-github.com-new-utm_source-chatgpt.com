@@ -34,12 +34,12 @@ def verify(factory):
         return store.update_settings(account, mode='owner_pilot', pilot_sender='owner',
             approved_sha256=[SHA], db_factory=factory, now=NOW)
 
-    def enqueue(account, message, *, event=None, sender='owner', conversation='conversation', attachment_count=1):
+    def enqueue(account, message, *, event=None, sender='owner', conversation='conversation', attachment_count=1, payload=None):
         with factory() as connection:
             connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (conversation,))
             return store.enqueue(connection, account_id=account, message_id=message,
                 event_id=event or 'event-'+message, sender=sender, conversation_id=conversation,
-                payload={'text': 'synthetic sanitized input', 'attachment_count': attachment_count,
+                payload=payload if payload is not None else {'text': 'synthetic sanitized input', 'attachment_count': attachment_count,
                          'attachments': [{'mime': 'application/pdf'}] if attachment_count else []}, now=NOW)
 
     def claim(account, now=NOW):
@@ -291,6 +291,95 @@ def verify(factory):
         raise AssertionError('old-generation pilot evidence accepted')
     except ValueError:
         pass
+    # Owner-pilot ordinary business text uses the same capped no-tools lane
+    # without requiring a document. All input metadata is synthetic here.
+    ordinary_payload = {'question': 'How can I organize a shipment handover?',
+        'question_allowed': True, 'question_kind': 'operations',
+        'attachment_count': 0, 'attachments': []}
+    settings('ordinary')
+    store.update_settings('ordinary', approved_sha256=[], db_factory=factory, now=NOW)
+    ordinary_jobs = []
+    for number in range(2):
+        enqueue('ordinary', 'question-'+str(number), payload=ordinary_payload)
+        job = claim('ordinary')
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+            status='none', db_factory=factory, now=NOW)
+        assert reserve(job)
+        assert store.model_authorized(job['id'], job['lease_token'], db_factory=factory, now=NOW)
+        assert not reserve(job)
+        store.save_model(job['id'], job['lease_token'], reply_text='Synthetic business response',
+            diagnostics={'model_success': True}, db_factory=factory, now=NOW)
+        prepare(job)
+        outgoing = send('ordinary')
+        assert store.send_authorized(job['id'], outgoing['send_token'], db_factory=factory, now=NOW)
+        finish(outgoing)
+        ordinary_jobs.append(job)
+    assert store.recent_context(account_id='ordinary', sender='owner', conversation_id='conversation',
+        db_factory=factory, now=NOW) is None
+    try:
+        store.update_settings('ordinary', mode='routine', acceptance={'owner_receipt_confirmed': True,
+            'document_job_id': ordinary_jobs[0]['id'], 'followup_job_id': ordinary_jobs[1]['id']},
+            db_factory=factory, now=NOW)
+        raise AssertionError('ordinary text replaced PDF pilot acceptance')
+    except ValueError:
+        pass
+    assert enqueue('ordinary', 'other-sender', sender='other', payload=ordinary_payload)['status'] == 'blocked'
+
+    changes = [{'question_allowed': False}, {'question_allowed': 'true'},
+        {'question_kind': 'unknown'}, {'question_kind': 'document_question'},
+        {'attachment_count': 1}, {'attachments': [{'mime': 'application/pdf'}]},
+        {'question': ''}]
+    for number, change in enumerate(changes):
+        account = 'ordinary-negative-'+str(number)
+        settings(account)
+        enqueue(account, 'question', payload={**ordinary_payload, **change})
+        job = claim(account)
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+            status='none', db_factory=factory, now=NOW)
+        assert not reserve(job)
+        assert not store.model_authorized(job['id'], job['lease_token'], db_factory=factory, now=NOW)
+        assert get(job)['model_started_at'] is None
+    settings('ordinary-unapproved-document')
+    enqueue('ordinary-unapproved-document', 'question', payload=ordinary_payload)
+    job = claim('ordinary-unapproved-document')
+    store.checkpoint_document(job['id'], job['lease_token'], text=TEXT, sha256='b'*64,
+        status='ok', db_factory=factory, now=NOW)
+    assert not reserve(job)
+
+    # Concurrent ordinary questions share the same ten-reservation pilot budget;
+    # ambiguous crashes consume their reservation and never cause regeneration.
+    settings('ordinary-budget')
+    ordinary_active = []
+    for number in range(12):
+        enqueue('ordinary-budget', str(number), conversation='c'+str(number), payload=ordinary_payload)
+        job = claim('ordinary-budget')
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+            status='none', db_factory=factory, now=NOW)
+        ordinary_active.append(job)
+    ordinary_reservations = parallel(lambda index: reserve(ordinary_active[index]), 12)
+    assert sum(ordinary_reservations) == 10
+    assert claim('ordinary-budget', NOW+timedelta(seconds=301)) is None
+    assert [get(job)['status'] for job in ordinary_active].count('uncertain') == 10
+    assert all(not store.model_authorized(job['id'], job['lease_token'], db_factory=factory, now=NOW)
+               for job in ordinary_active)
+    assert send('ordinary-budget', NOW+timedelta(seconds=302)) is None
+
+    # OFF/ON permanently fences ordinary output just like document output.
+    enqueue('ordinary', 'stop-question', payload=ordinary_payload)
+    job = claim('ordinary')
+    store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+        status='none', db_factory=factory, now=NOW)
+    assert reserve(job)
+    store.save_model(job['id'], job['lease_token'], reply_text='Synthetic known result', db_factory=factory, now=NOW)
+    prepare(job)
+    outgoing = send('ordinary')
+    assert store.send_authorized(job['id'], outgoing['send_token'], db_factory=factory, now=NOW)
+    store.update_settings('ordinary', mode='off', db_factory=factory, now=NOW)
+    settings('ordinary')
+    assert not store.send_authorized(job['id'], outgoing['send_token'], db_factory=factory, now=NOW)
+    assert send('ordinary', NOW+timedelta(seconds=301)) is None
+    assert get(job)['status'] == 'uncertain'
+
     # Stale UI tabs cannot overwrite a concurrent authorization reconfiguration.
     generation = settings('settings-cas')['authorization_generation']
     def submit_settings(number):

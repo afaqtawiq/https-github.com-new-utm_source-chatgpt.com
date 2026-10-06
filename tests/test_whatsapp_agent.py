@@ -136,6 +136,76 @@ def test_private_url_and_unsafe_caption_never_persist_or_reach_model(setup):
     assert store.get_job(job['id'])['status']=='sent'
 
 
+@pytest.mark.parametrize('question,expected',[
+    ('ارسل رسالة الي المدير','إرسال رسالة لشخص آخر يحتاج مراجعة المستلم والنص'),
+    ('اضف السايق شخص تجريبي','إضافة سائق تحتاج مراجعة الاسم ورقم الجوال'),
+    ('عبارة غامضة للاستيضاح','ما الذي تريد معرفته'),
+])
+def test_local_clarification_does_not_claim_sensitive_content_or_send_onward(setup,question,expected):
+    result=agent.accept_inbound(payload(1,question))
+    assert tick()
+    job=store.get_job(result['job_id'])
+    assert job['status']=='sent' and expected in job['reply_text']
+    assert 'بيانات بنكية' not in job['reply_text']
+    assert not setup['model_calls'] and len(setup['sends'])==1
+    assert setup['sends'][0][0]==OWNER
+    assert not job['payload']['question']
+
+
+@pytest.mark.parametrize('question',['اختبار تجريبي','هذا اختبار تجريبي فقط. رد بكلمة جاهز، وبعدها سأرسل لك ملف PDF للاختبار.'])
+def test_natural_readiness_stays_local_and_invites_actual_pdf(setup,question):
+    result=agent.accept_inbound(payload(1,question))
+    assert tick()
+    job=store.get_job(result['job_id'])
+    assert job['status']=='sent' and job['reply_text']==privacy.READY_REPLY
+    assert not setup['model_calls'] and not setup['provider_reads']
+    assert len(setup['sends'])==1 and setup['sends'][0][0]==OWNER
+
+
+@pytest.mark.parametrize('question,expected',[('مرحبا',privacy.GREETING_REPLY),('شكرا',privacy.THANKS_REPLY)])
+def test_greeting_and_thanks_do_not_repeat_pilot_instructions(setup,question,expected):
+    result=agent.accept_inbound(payload(1,question));assert tick()
+    assert store.get_job(result['job_id'])['reply_text']==expected
+    assert not setup['model_calls'] and len(setup['sends'])==1
+
+
+def test_readiness_after_document_does_not_reserve_another_model_attempt(setup):
+    agent.accept_inbound(payload(1,'لخص محتوى المستند',True));assert tick()
+    result=agent.accept_inbound(payload(2,'اختبار تجريبي'));assert tick()
+    job=store.get_job(result['job_id'])
+    assert job['status']=='sent' and job['reply_text']==privacy.READY_REPLY
+    assert job['model_started_at'] is None and len(setup['model_calls'])==1
+
+
+@pytest.mark.parametrize('question',[
+    'ممكن تفهمني كيف تشتغلون بالتخليص؟',
+    'عندي بضايع من الخارج، وش الخطوة الأولى معكم؟',
+    'أنا صاحب منشأة صغيرة وأبغى أعرف ترتيب نقل البضاعة',
+])
+def test_owner_pilot_can_answer_safe_general_business_question_without_pdf(setup,monkeypatch,question):
+    async def general(question,document_text,**kwargs):
+        await kwargs['before_request']()
+        setup['model_calls'].append((question,document_text,kwargs))
+        assert document_text=='' and kwargs['history']==()
+        return privacy.ReplyResult('تقدم آفاق خدمات التخليص الجمركي والنقل وفق التفاصيل المعتمدة.',True,True,'model_success')
+    monkeypatch.setattr(privacy,'understand',general)
+    result=agent.accept_inbound(payload(1,question));assert tick()
+    job=store.get_job(result['job_id'])
+    assert job['status']=='sent' and job['model_completed_at']
+    assert len(setup['model_calls'])==1 and len(setup['sends'])==1
+
+
+def test_owner_general_text_model_timeout_never_retries_or_sends(setup,monkeypatch):
+    async def timed_out(*args,**kwargs):
+        await kwargs['before_request']()
+        setup['model_calls'].append('attempt')
+        raise httpx.ReadTimeout('synthetic timeout')
+    monkeypatch.setattr(privacy,'understand',timed_out)
+    result=agent.accept_inbound(payload(1,'ممكن تفهمني كيف تشتغلون بالتخليص؟'));assert tick()
+    assert store.get_job(result['job_id'])['status']=='uncertain'
+    assert not tick() and setup['model_calls']==['attempt'] and not setup['sends']
+
+
 def test_unapproved_document_is_quarantined_without_model(setup):
     store.update_settings(ACCOUNT,approved_sha256=['a'*64])
     result=agent.accept_inbound(payload(1,'لخص محتوى المستند',True));assert tick()
