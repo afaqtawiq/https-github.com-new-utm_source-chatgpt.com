@@ -34,13 +34,15 @@ def verify(factory):
         return store.update_settings(account, mode='owner_pilot', pilot_sender='owner',
             approved_sha256=[SHA], db_factory=factory, now=NOW)
 
-    def enqueue(account, message, *, event=None, sender='owner', conversation='conversation', attachment_count=1, payload=None):
+    def enqueue(account, message, *, event=None, sender='owner', conversation='conversation', attachment_count=1, payload=None, now=NOW):
         with factory() as connection:
             connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (conversation,))
             return store.enqueue(connection, account_id=account, message_id=message,
                 event_id=event or 'event-'+message, sender=sender, conversation_id=conversation,
-                payload=payload if payload is not None else {'text': 'synthetic sanitized input', 'attachment_count': attachment_count,
-                         'attachments': [{'mime': 'application/pdf'}] if attachment_count else []}, now=NOW)
+                payload=payload if payload is not None else {'text': 'synthetic sanitized input',
+                         'question': 'What does the document say?', 'question_allowed': True,
+                         'question_kind': 'document_question', 'attachment_count': attachment_count,
+                         'attachments': [{'mime': 'application/pdf'}] if attachment_count else []}, now=now)
 
     def claim(account, now=NOW):
         return store.claim_job(account_id=account, db_factory=factory, now=now)
@@ -326,7 +328,7 @@ def verify(factory):
     assert enqueue('ordinary', 'other-sender', sender='other', payload=ordinary_payload)['status'] == 'blocked'
 
     changes = [{'question_allowed': False}, {'question_allowed': 'true'},
-        {'question_kind': 'unknown'}, {'question_kind': 'document_question'},
+        {'question_kind': 'unknown'}, {'question_kind': 'unrecognized_kind'},
         {'attachment_count': 1}, {'attachments': [{'mime': 'application/pdf'}]},
         {'question': ''}]
     for number, change in enumerate(changes):
@@ -379,6 +381,157 @@ def verify(factory):
     assert not store.send_authorized(job['id'], outgoing['send_token'], db_factory=factory, now=NOW)
     assert send('ordinary', NOW+timedelta(seconds=301)) is None
     assert get(job)['status'] == 'uncertain'
+
+    # Same-thread conversation history is persisted text, bounded and fenced to
+    # the active target generation. Document/context-bearing records never enter.
+    conversation_payload = {**ordinary_payload, 'question_kind': 'conversation'}
+    def exchange(account, message, *, question='Prior conversation turn', reply='Actual prior response',
+                 when=NOW, status='sent', payload_changes=None, conversation='conversation'):
+        payload = {**conversation_payload, 'question': question, **(payload_changes or {})}
+        enqueue(account, message, conversation=conversation, payload=payload, now=when)
+        job = claim(account, when)
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+            status='none', db_factory=factory, now=when)
+        store.prepare_reply(job['id'], job['lease_token'], reply_text=reply, db_factory=factory, now=when)
+        outgoing = send(account, when)
+        store.finish_send(job['id'], outgoing['send_token'], status=status,
+            provider_message_id='history-'+str(job['id']), db_factory=factory, now=when)
+        return get(job)
+    def target_for_history(account, message='target'):
+        enqueue(account, message, payload=conversation_payload)
+        return claim(account)
+    def exchanges(account, target, **kwargs):
+        return store.recent_exchanges(account_id=account, sender='owner', conversation_id='conversation',
+            before_job_id=target['id'], db_factory=factory, now=NOW, **kwargs)
+
+    settings('conversation-positive')
+    conversation_job = target_for_history('conversation-positive')
+    store.checkpoint_document(conversation_job['id'], conversation_job['lease_token'], text='', sha256=None,
+        status='none', db_factory=factory, now=NOW)
+    assert reserve(conversation_job)
+    assert store.model_authorized(conversation_job['id'], conversation_job['lease_token'], db_factory=factory, now=NOW)
+    store.save_model(conversation_job['id'], conversation_job['lease_token'], reply_text='Conversation response',
+        db_factory=factory, now=NOW)
+    prepare(conversation_job)
+    conversation_send = send('conversation-positive')
+    assert store.send_authorized(conversation_job['id'], conversation_send['send_token'], db_factory=factory, now=NOW)
+    finish(conversation_send)
+
+    settings('history')
+    exchange('history', 'old', when=NOW-timedelta(days=1, seconds=1))
+    exchange('history', 'other-conversation', conversation='unrelated')
+    history_pairs = [exchange('history', 'pair-'+str(number), question='q'+str(number), reply='r'+str(number))
+                     for number in range(6)]
+    exchange('history', 'blocked-question', payload_changes={'question_allowed': False})
+    exchange('history', 'not-sent', status='uncertain')
+    exchange('history', 'url-reply', reply='https://example.invalid/private')
+    history_target = target_for_history('history')
+    history_rows = exchanges('history', history_target, limit=999, max_age_seconds=999999)
+    assert [row['job_id'] for row in history_rows] == [job['id'] for job in history_pairs[-4:]]
+    assert all(set(row)=={'job_id','account_id','sender','conversation_id','authorization_generation',
+                         'status','created_at','completed_at','question','reply_text'} for row in history_rows)
+    for field in ('account_id','sender','conversation_id'):
+        scope = {'account_id':'history','sender':'owner','conversation_id':'conversation', field:'unrelated'}
+        assert store.recent_exchanges(**scope, before_job_id=history_target['id'], db_factory=factory, now=NOW) == []
+    store.update_settings('history', mode='off', db_factory=factory, now=NOW)
+    settings('history')
+    assert exchanges('history', history_target) == []
+    fresh_target = target_for_history('history', 'new-target')
+    assert exchanges('history', fresh_target) == []
+
+    settings('history-bounds')
+    for number in range(4):
+        exchange('history-bounds', str(number), question='q'*1500, reply='r'*2500)
+    exchange('history-bounds', 'oversized', question='q'*1501)
+    bounds_target = target_for_history('history-bounds')
+    bounded = exchanges('history-bounds', bounds_target)
+    assert len(bounded)==2 and sum(len(row['question'])+len(row['reply_text']) for row in bounded)==8000
+    assert all(row['question']=='q'*1500 and row['reply_text']=='r'*2500 for row in bounded)
+
+    settings('history-document')
+    enqueue('history-document', 'pdf')
+    history_document = claim('history-document')
+    model(history_document)
+    prepare(history_document)
+    finish(send('history-document'))
+    doc_target = target_for_history('history-document')
+    assert exchanges('history-document', doc_target) == []
+
+    # The PDF cache remains anchored to the original actual attachment across
+    # inherited/meta replies and harmless text turns. Only an explicit document
+    # question can serve as the separate one-time rollout followup proof.
+    settings('pdf-root-history')
+    enqueue('pdf-root-history', 'root-pdf')
+    actual_root = claim('pdf-root-history')
+    model(actual_root)
+    prepare(actual_root)
+    finish(send('pdf-root-history'))
+    enqueue('pdf-root-history', 'pdf-meta', payload=conversation_payload)
+    meta = claim('pdf-root-history')
+    checkpoint(meta, source=actual_root['id'])
+    assert reserve(meta)
+    store.save_model(meta['id'], meta['lease_token'], reply_text='Known contextual meta response',
+        diagnostics={'model_success': True}, db_factory=factory, now=NOW)
+    prepare(meta)
+    finish(send('pdf-root-history'))
+    exchange('pdf-root-history', 'thanks', question='Thanks', reply='You are welcome')
+    enqueue('pdf-root-history', 'explicit-followup', attachment_count=0)
+    final_followup = claim('pdf-root-history')
+    original = store.recent_context(account_id='pdf-root-history',sender='owner',conversation_id='conversation',
+        before_job_id=final_followup['id'],db_factory=factory,now=NOW)
+    assert original['id']==actual_root['id'] and original['context_source_job_id'] is None
+    text_pairs = exchanges('pdf-root-history', final_followup)
+    assert len(text_pairs)==1 and text_pairs[0]['question']=='Thanks'
+    checkpoint(final_followup, source=original['id'])
+    assert reserve(final_followup)
+    store.save_model(final_followup['id'], final_followup['lease_token'], reply_text='Known explicit document answer',
+        diagnostics={'model_success': True}, db_factory=factory, now=NOW)
+    prepare(final_followup)
+    finish(send('pdf-root-history'))
+    try:
+        store.update_settings('pdf-root-history',mode='routine', acceptance={'owner_receipt_confirmed':True,
+            'document_job_id':actual_root['id'],'followup_job_id':meta['id']},db_factory=factory,now=NOW)
+        raise AssertionError('meta PDF reply substituted for explicit document followup')
+    except ValueError:
+        pass
+    store.update_settings('pdf-root-history',mode='routine', acceptance={'owner_receipt_confirmed':True,
+        'document_job_id':actual_root['id'],'followup_job_id':final_followup['id']},db_factory=factory,now=NOW)
+    original = store.recent_context(account_id='pdf-root-history',sender='owner',conversation_id='conversation',
+        db_factory=factory,now=NOW)
+    assert original['id']==actual_root['id']
+
+    # A document question with genuinely no source may clarify that absence;
+    # it must not downgrade a present/quarantined source to an empty-source call.
+    settings('source-absent')
+    store.update_settings('source-absent',approved_sha256=[],db_factory=factory,now=NOW)
+    absent_payload = {**ordinary_payload,'question_kind':'document_question','question':'What does the file say?'}
+    enqueue('source-absent','no-file',payload=absent_payload)
+    absent = claim('source-absent')
+    store.checkpoint_document(absent['id'],absent['lease_token'],text='',sha256=None,status='none',
+        db_factory=factory,now=NOW)
+    assert reserve(absent)
+    assert store.model_authorized(absent['id'],absent['lease_token'],db_factory=factory,now=NOW)
+    store.save_model(absent['id'],absent['lease_token'],reply_text='I have no file here; please attach it.',
+        diagnostics={'model_success':True},db_factory=factory,now=NOW)
+    prepare(absent)
+    absent_send = send('source-absent')
+    assert store.send_authorized(absent['id'],absent_send['send_token'],db_factory=factory,now=NOW)
+    finish(absent_send)
+    assert store.recent_context(account_id='source-absent',sender='owner',conversation_id='conversation',
+        db_factory=factory,now=NOW) is None
+    for number, change in enumerate(('attachment','hash','quarantined','unavailable')):
+        account = 'source-present-'+str(number)
+        settings(account)
+        payload = dict(absent_payload)
+        if change=='attachment':payload.update(attachment_count=1,attachments=[{'mime':'application/pdf'}])
+        enqueue(account,'blocked',payload=payload)
+        candidate = claim(account)
+        store.checkpoint_document(candidate['id'],candidate['lease_token'],text='',
+            sha256=SHA if change=='hash' else None,
+            status=change if change in ('quarantined','unavailable') else 'none',db_factory=factory,now=NOW)
+        assert not reserve(candidate)
+        assert get(candidate)['model_started_at'] is None
+        assert not store.model_authorized(candidate['id'],candidate['lease_token'],db_factory=factory,now=NOW)
 
     # Stale UI tabs cannot overwrite a concurrent authorization reconfiguration.
     generation = settings('settings-cas')['authorization_generation']
