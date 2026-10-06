@@ -1,6 +1,7 @@
 import os
 from fastapi.responses import JSONResponse,RedirectResponse
 from app.zernio_whatsapp import router as zernio_whatsapp_router
+from app.whatsapp_inbox import router as whatsapp_inbox_router
 from app.main import app
 from app.zernio_receiver import router as zernio_receiver_router
 from app.verification import router as verification_router
@@ -63,6 +64,7 @@ def role_allowed(request,s):
  return not any(path==p or path.startswith(p+'/') for p in ROLE_PREFIX.get(role,()))
 def sensitive_permission(request):
  path=request.url.path
+ if request.method=='POST' and path.startswith('/whatsapp-inbox/drafts/') and path.endswith('/send'):return 'send_whatsapp'
  if request.method=='POST' and path.startswith('/customer-campaigns/'):
   if path.endswith('/send/email') or path=='/customer-campaigns/schedule':return 'send_email'
   if path.endswith('/send/whatsapp') or path.endswith('/template'):return 'send_whatsapp'
@@ -100,7 +102,7 @@ async def enterprise_security_guard(request,call_next):
   if perm=='send_email' and is_manual_outbound_send(request.method,request.url.path):
    from app.gmail_oauth import connection
    official_send=official_manual_send_without_stepup(request.method,request.url.path,connection(sess['user_id']))
-  if not recent_stepup(sess['id']) and not official_send:return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+(request.url.path.rsplit('/',2)[0] if request.url.path.endswith('/owner-delivery/reconcile') else request.url.path.rsplit('/',1)[0] if request.url.path in ('/settings/social/refresh','/settings/runway/check') or '/recovery/' in request.url.path or request.url.path.endswith(('/contact-owner','/test-owner-inquiry','/refresh-preview')) or (request.url.path.startswith('/runway-studio/') and request.url.path.endswith('/run')) else '/settings/whatsapp/channel' if request.url.path=='/settings/whatsapp/channel/templates' else request.url.path),'permission':perm},status_code=428)
+  if not recent_stepup(sess['id']) and not official_send:return JSONResponse({'detail':'Recent MFA step-up required','step_up':'/mfa/step-up?next='+(request.url.path.rsplit('/',2)[0] if request.url.path.endswith('/owner-delivery/reconcile') else request.url.path.rsplit('/',1)[0] if request.url.path in ('/settings/social/refresh','/settings/runway/check') or '/recovery/' in request.url.path or request.url.path.endswith(('/contact-owner','/test-owner-inquiry','/refresh-preview')) or (request.url.path.startswith('/runway-studio/') and request.url.path.endswith('/run')) or (request.url.path.startswith('/whatsapp-inbox/drafts/') and request.url.path.endswith('/send')) else '/settings/whatsapp/channel' if request.url.path=='/settings/whatsapp/channel/templates' else request.url.path),'permission':perm},status_code=428)
  from app.live_activity import tracked_request
  response=await tracked_request(request,call_next,sess);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(self), geolocation=()' if request.url.path in ('/retell-web-test','/commands') else 'camera=(), microphone=(), geolocation=()';return response
 for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router,mfa_stepup_router,security_operations_router,incident_response_router,retell_integration_router,phone_sales_router,crm_contacts_router):app.include_router(r)
@@ -111,6 +113,7 @@ init_carrier_storage()
 app.include_router(carrier_directory_router)
 app.include_router(whatsapp_integration_router)
 app.include_router(zernio_whatsapp_router)
+app.include_router(whatsapp_inbox_router)
 app.include_router(command_assistant_router)
 app.include_router(naqliat_connector_router)
 app.include_router(freight_workflow_router)

@@ -351,6 +351,11 @@ async def open_conversation(c, target):
                                       {'accountId': account_id(), 'sortOrder': 'desc', 'limit': 100})
                 now = datetime.now(timezone.utc)
                 for msg in messages.get('messages', []):
+                    if (not isinstance(msg, dict)
+                            or msg.get('accountId', account_id()) != account_id()
+                            or msg.get('conversationId', cid) != cid
+                            or msg.get('platform', 'whatsapp') != 'whatsapp'):
+                        raise WhatsAppBlocked('هوية رسالة نافذة المحادثة غير مطابقة؛ لم تُرسل الرسالة')
                     if msg.get('direction') != 'incoming' or phone(msg.get('senderId')) != target:
                         continue
                     try:
@@ -369,16 +374,20 @@ async def open_conversation(c, target):
     raise WhatsAppBlocked('تعذر إكمال التحقق من المحادثة؛ لم تُرسل الرسالة')
 
 
-async def send(recipient, message, *, template_prefix='afaaq_transport_'):
+async def send(recipient, message, *, template_prefix='afaaq_transport_', expected_account=None, expected_conversation=None):
     if template_prefix not in ('afaaq_transport_', 'afaaq_marketing_'):
         raise WhatsAppBlocked('نوع قالب الإرسال غير مسموح')
     target = phone(recipient)
     if not target or not message.strip():
         raise WhatsAppBlocked('رقم المستلم أو نص الرسالة غير صالح')
+    if expected_account is not None and expected_account != account_id():
+        raise WhatsAppBlocked('تغير حساب واتساب؛ لم تُرسل الرسالة')
     async with transport_batch() as batch:
         c = await batch.get_client()
         await validate_account(c)
         cid = await open_conversation(c, target)
+        if expected_conversation is not None and (not cid or str(cid) != expected_conversation):
+            raise WhatsAppBlocked('المحادثة تغيرت أو نافذة الرد مغلقة؛ لم تُرسل الرسالة')
         proof = batch.windows.get((target, str(cid)))
         body = {'accountId': account_id()}
         if cid:
