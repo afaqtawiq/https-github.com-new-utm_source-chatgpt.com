@@ -47,6 +47,7 @@ ACTION_CLARIFY_REPLY = 'إرسال رسالة لشخص آخر يحتاج مرا�
 DRIVER_CLARIFY_REPLY = 'إضافة سائق تحتاج مراجعة الاسم ورقم الجوال من موظف مخوّل في الإدارة. هذه المحادثة لا تحفظ سجل سائق، حتى إذا وردت بياناته في رد لاحق.'
 DOCUMENT_REQUIRED_REPLY = 'أحتاج مستندًا معتمدًا للإجابة عن تفاصيله.'
 FALLBACK_REPLY = 'ما قدرت أجهز إجابة موثوقة من المعلومات المتاحة الآن.'
+LIVE_LOG_UNAVAILABLE_REPLY = 'ما عندي وصول مباشر لسجل الشحنات، لذلك ما أقدر أحدد هل استُلمت شحنات اليوم أو ما المتاح حاليًا.'
 GREETING_REPLY = 'أهلًا! أنا معك، كيف أقدر أساعدك؟'
 READY_REPLY = 'جاهزة. تقدر تسألني عن محتوى مستند معتمد.'
 THANKS_REPLY = 'العفو، أنا معك.'
@@ -742,6 +743,7 @@ _SAME_CHAT_DETAIL_REQUEST = re.compile(
 _LIVE_AVAILABILITY_ASSERTION = re.compile(
     r'(?:^|[.!؟?،؛;\n]|\b(?:لكن|ولكن)\s+|\s+و(?=الشحنات|شحنات|لا\s*توجد))\s*'
     r'(?:(?:نعم|اكيد)\s*)?(?:'
+    r'(?:لدي|لدينا|عندي|عندنا)\s*(?:شحنات|شحنه|حموله)(?!\w)|'
     r'(?:الشحنات|شحناتنا|الشحنه)\s*(?:متاحه|متوفره|جاهزه|غير\s*(?:متاحه|متوفره))|'
     r'(?:لا\s*(?:توجد|يوجد|تتوفر)|ما\s*(?:عندي|عندنا|في|فيه)|ليس\s*(?:لدي|لدينا))'
     r'\s*(?:(?:لدي|لدينا|عندي|عندنا)\s*)?(?:شحنات|شحنه|الشحنات)(?!\w))'
@@ -908,14 +910,80 @@ _DESCRIPTIVE_PREFIX_WORDS = {
     'ساعه', 'ساعات', 'سائل', 'سائله', 'ساحه', 'ساحات', 'سائق', 'سائقه', 'ساري', 'ساريه',
 }
 
+# Natural conversation is not a third-person document extract. Pronouns and
+# future morphology alone say nothing about external execution. Match complete
+# operational predicates instead; clarification clauses are not status proof.
+_OPERATION_STEM = r'(?:قوم|تولي|تعهد|لتزم|ؤكد|وكد|وعد|ضمن|رتب|نسق|جهز|ستلم|ستقبل|ستعلم|بحث|فحص|تابع|راجع|تحقق|تكفل|نفذ|عمل|باشر|شحن|سلم|نقل|وصل)'
+_OPERATION_PRESENT = re.compile(
+    r'(?<!\w)[وف]?(?:[ب]?[ان]|س[انيت])' + _OPERATION_STEM + r'(?:ه|ها|هم|لك|ك)?(?!\w)')
+_OPERATION_PAST = re.compile(
+    r'(?<!\w)[وف]?(?:استلم|استقبل|فحص|راجع|تحقق|رتب|نسق|جهز|نفذ|عمل|باشر|شحن|سلم|نقل|وصل|تولي)'
+    r'(?:ت|نا|وا)(?:ه|ها|هم)?(?!\w)')
+_OPERATION_PASSIVE = re.compile(
+    r'(?<!\w)[وف]?(?:تم|سيتم|جرى|جري)\s*(?:استلام|استقبال|فحص|نقل|توصيل|تسليم|شحن|مراجعه|تجهيز|ترتيب)(?!\w)')
+_UNDERTAKING_CLAIM = re.compile(r'(?<!\w)[وف]?(?:قمت|قمنا|متعهده?|ملتزمه?)(?!\w)')
+_EPISTEMIC_QUESTION = re.compile(
+    r'^(?:[وف]?هل|[وف]?تقصد|[وف]?تقصدي|[وف]?تسأل|[وف]?تسال|'
+    r'(?:لا|ما)\s*(?:اعرف|ادري|نعرف|ندري)|'
+    r'لا\s*(?:استطيع|يمكنني)\s*(?:معرفه|الجزم)|المعلومات\s*غير\s*متاحه|'
+    r'(?:المعلومات|البيانات)(?:\s+[\u0621-\u064a]+){0,5}\s*لا\s*(?:تبين|توضح)\s*(?:ان|هل|ما\s*اذا)|'
+    r'(?:ليس|ليست|ما)\s*(?:لدي|عندي|لدينا|عندنا)\s*(?:معلومات|بيانات|وصول|اطلاع))\b')
+
+
+def _conversation_execution_claim(value: str) -> bool:
+    """Conservative claim checks, not a universal Arabic grammar classifier.
+
+    Never exempt a whole reply because it contains a question or negation.
+    Contrast/second clauses are checked independently, including conditional
+    assistant promises. In-chat explanation is not an external operation.
+    """
+    for clause in re.split(r'[.!؟?،؛;\n]|\b(?:لكن|ولكن|بس|but|however)\b|'
+                           r'\s+و(?=انا\b|نحن\b|قد\b|(?:استلم|استقبل|رتب|نقل|وصل)(?:ت|نا)\b)', value):
+        clause = clause.strip()
+        if not clause:
+            continue
+        if _UNDERTAKING_CLAIM.search(clause):
+            return True
+        # A relative-clause receipt verb under an explicit clarification is
+        # not a first-person promise merely because Arabic starts it with ا.
+        operational_clause = clause
+        # A user-directed question about another actor's past receipt is not
+        # evidence that receipt occurred. Preserve everything after its verb.
+        if re.match(r'^(?:يمكنك|تقدر)\s*سؤال\b', clause):
+            operational_clause = re.sub(
+                r'\b(?:ان|اذا|هل)\s*(?:كانوا\s*)?(?:استلموا|استقبلوا)(?!\w)',
+                'عن حاله غير معلومه', operational_clause)
+        if re.match(r'^(?:[وف]?هل\s*)?(?:تقصد|تقصدي|تسال|تسأل)\b', clause):
+            operational_clause = re.sub(
+                r'(?<!\w)(?:التي|الذي)\s*(?:استقبل|استلم)(?:ها|ه|هم)?'
+                r'\s+(?!(?:انا|نحن|سوف|راح)\b)[\u0621-\u064a]{2,}(?!\w)',
+                'تفاصيل الاستلام', operational_clause)
+        # Even an interrogative/conditional offer to execute is unsupported.
+        if _OPERATION_PRESENT.search(operational_clause):
+            return True
+        # Asking whether a third party received cargo, or explicitly saying
+        # that this is unknown, does not assert that it happened.
+        if _EPISTEMIC_QUESTION.search(clause):
+            continue
+        if _OPERATION_PAST.search(operational_clause) or _OPERATION_PASSIVE.search(operational_clause):
+            return True
+    return False
+
+
+def _no_live_log_fallback(question: str, *, using_document: bool, reason: str) -> str:
+    """A truthful capability limit, never a successful model/status result."""
+    value = _fold(question)
+    if (not using_document and reason.startswith('reply_action_')
+            and re.search(r'شحن[اهت]|حمول', value)
+            and re.search(r'اليوم|الان|حاليا|استقبال|استلام|المتاح|متاح|عندكم', value)):
+        return LIVE_LOG_UNAVAILABLE_REPLY
+    return FALLBACK_REPLY
+
 
 def _descriptive_only(value: str, document: str, *, conversational: bool = False) -> bool:
     folded = _fold(value)
     if conversational:
-        # Remove harmless self-reference only for this check. Specific verbs,
-        # future execution, completion claims and promises remain prohibited.
-        folded = re.sub(r'(?<!\w)(?:انا|نحن|اني|اننا|i|we|our|us|my)(?!\w)', ' ', folded)
-        folded = re.sub(r'(?:ما|ليس|مش|مو)\s*(?:عندي|لدي|لدينا|عندنا)(?!\w)', 'المعلومات غير متاحه', folded)
+        return not _conversation_execution_claim(folded)
     if _NON_DESCRIPTIVE.search(folded):
         return False
     for word in _ARABIC_WORD.findall(folded):
@@ -1229,7 +1297,9 @@ clarification without offering any numeric or spelled-out amount.'''
             return ReplyResult(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
         if answer:
             return ReplyResult(answer, True, True, 'model_answer')
-        return ReplyResult(FALLBACK_REPLY, True, False, output.reason)
+        return ReplyResult(_no_live_log_fallback(screened_question.safe_text,
+                                               using_document=using_document, reason=output.reason),
+                           True, False, output.reason)
     except httpx.TimeoutException:
         if in_before_request:
             raise
