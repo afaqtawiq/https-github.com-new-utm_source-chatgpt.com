@@ -374,9 +374,11 @@ async def open_conversation(c, target):
     raise WhatsAppBlocked('تعذر إكمال التحقق من المحادثة؛ لم تُرسل الرسالة')
 
 
-async def send(recipient, message, *, template_prefix='afaaq_transport_', expected_account=None, expected_conversation=None):
+async def send(recipient, message, *, template_prefix='afaaq_transport_', expected_account=None, expected_conversation=None, idempotency_key=None):
     if template_prefix not in ('afaaq_transport_', 'afaaq_marketing_'):
         raise WhatsAppBlocked('نوع قالب الإرسال غير مسموح')
+    if idempotency_key is not None and not re.fullmatch(r'wa-agent-[0-9a-f]{64}', idempotency_key):
+        raise WhatsAppBlocked('معرف محاولة الإرسال غير صالح')
     target = phone(recipient)
     if not target or not message.strip():
         raise WhatsAppBlocked('رقم المستلم أو نص الرسالة غير صالح')
@@ -438,7 +440,7 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_', expect
             _check_deadline(batch, path, deadline)
             _check_account(batch, path)
             _check_window(batch, path, target, cid, proof)
-            response = await c.post(BASE + path, json=body, headers={'Idempotency-Key': 'afaaq-' + uuid.uuid4().hex})
+            response = await c.post(BASE + path, json=body, headers={'Idempotency-Key': idempotency_key or 'afaaq-' + uuid.uuid4().hex})
             _observe_rate(batch, response)
         if 400 <= response.status_code < 500 and response.status_code not in (408, 409):
             error = WhatsAppBlocked('رفض مزود واتساب الإرسال (HTTP ' + str(response.status_code) + ')؛ راجع القالب وصلاحية الحساب')

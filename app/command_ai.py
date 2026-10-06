@@ -13,6 +13,7 @@ Claude only chooses an action and its fields; it never runs SQL or sends anythin
 Without ANTHROPIC_API_KEY everything behaves exactly as before.
 """
 import json
+from contextvars import ContextVar
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,8 @@ from app import command_assistant as page
 from app import whatsapp_admin as wa
 
 MODEL = os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5')
+# Trusted receiver context, never set from message content.
+LEGACY_MODEL_DISABLED = ContextVar('whatsapp_legacy_model_disabled', default=False)
 
 WA_ACTIONS = """Allowed actions (WhatsApp, Afaq Tuwaiq logistics platform):
 - list_drivers {}
@@ -69,6 +72,8 @@ def _staff_context():
 
 
 def ask_claude(actions, text):
+    if LEGACY_MODEL_DISABLED.get():
+        return None
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None
@@ -193,6 +198,8 @@ def _report(c, period):
 
 def answer_question(question):
     """Read-only conversation; no tools, operational lookup or action dispatch."""
+    if LEGACY_MODEL_DISABLED.get():
+        return None
     from app.customs_knowledge import KNOWLEDGE
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:

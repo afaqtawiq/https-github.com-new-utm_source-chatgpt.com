@@ -18,6 +18,9 @@ from html import escape
 router = APIRouter()
 # Installed by the production team integration; runs before customer/driver routing.
 team_reply = None
+# Optional durable lane, installed only by the production bootstrap.
+durable_inbound = None
+durable_legacy_claim = None
 
 def valid_signature(raw, signature, secret):
     return bool(secret and signature and hmac.compare_digest(
@@ -114,12 +117,21 @@ async def receive(request: Request):
         return JSONResponse({"error":"Missing event or conversation identifiers"}, status_code=400)
     ensure_tables()
     ensure_intake_tables()
+    legacy_local_only = False
+    if durable_inbound is not None:
+        queued = await run_in_threadpool(durable_inbound, p)
+        if queued is not None and queued.get('legacy_local_only') is True:
+            legacy_local_only = True
+        elif queued is not None:
+            return queued
     from app.whatsapp_admin import owner_sender, admin_reply, is_admin_command
     sender = owner_sender(p)
     transport_action = {}
     def prepare_reply():
         with db() as c:
             c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
+            if durable_legacy_claim is not None and not durable_legacy_claim(c, p):
+                return None
             claim = c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'sending') ON CONFLICT DO NOTHING RETURNING event_id",(event_id,conversation_id)).fetchone()
             if not claim: return None
             if team_reply is not None:
@@ -226,7 +238,15 @@ async def receive(request: Request):
                         WHERE conversation_id=%s AND agent='afaaq'""",
                         (json.dumps(values, ensure_ascii=False), conversation_id))
         return agent, reply
-    prepared = await run_in_threadpool(prepare_reply)
+    model_token = None
+    if legacy_local_only:
+        from app.command_ai import LEGACY_MODEL_DISABLED
+        model_token = LEGACY_MODEL_DISABLED.set(True)
+    try:
+        prepared = await run_in_threadpool(prepare_reply)
+    finally:
+        if model_token is not None:
+            LEGACY_MODEL_DISABLED.reset(model_token)
     if prepared is None:
         return {"ok":True,"duplicate":True}
     agent, reply = prepared

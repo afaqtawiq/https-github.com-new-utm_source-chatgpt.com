@@ -104,7 +104,7 @@ def db(monkeypatch):
         c.transport_actions.append(dict(action))
         return reply
     monkeypatch.setattr(receiver, 'advance_transport', isolated_transport)
-    monkeypatch.setenv('WHATSAPP_COMMAND_OWNER', '966507665873')
+    monkeypatch.setenv('WHATSAPP_COMMAND_OWNER', '966500000001')
     monkeypatch.setenv('WHATSAPP_COMMAND_ACCOUNT_ID', 'business')
     monkeypatch.setenv('ZERNIO_WEBHOOK_SECRET', 'test-secret')
     monkeypatch.setenv('ZERNIO_API_KEY', 'test-key')
@@ -113,7 +113,7 @@ def db(monkeypatch):
     return c
 
 
-def payload(text='الأوامر', sender='966507665873', event='evt-1'):
+def payload(text='الأوامر', sender='966500000001', event='evt-1'):
     return {'id': event, 'event': 'message.received',
         'account': {'accountId': 'business', 'platform': 'whatsapp'},
         'conversation': {'id': 'private-1', 'participantId': sender},
@@ -170,7 +170,7 @@ def outbound(monkeypatch):
     return calls
 
 
-def pending_owner_shipment(db, reference='NQ-21', sender='966507665873'):
+def pending_owner_shipment(db, reference='NQ-21', sender='966500000001'):
     row = db.execute("INSERT INTO shipments(reference,origin,destination) VALUES(%s,'رابغ','دبي') RETURNING id",
                      (reference,)).fetchone()
     db.execute("""INSERT INTO freight_negotiations(shipment_id,owner_phone,status,contact_channel)
@@ -178,7 +178,7 @@ def pending_owner_shipment(db, reference='NQ-21', sender='966507665873'):
     return row['id']
 
 
-@pytest.mark.parametrize('sender', ['966507665873', '966500000009'])
+@pytest.mark.parametrize('sender', ['966500000001', '966500000009'])
 @pytest.mark.parametrize('text', ['نعم متاحة', 'NQ-21: نعم متاحة'])
 def test_shipper_reply_from_admin_or_customer_is_linked_once(db, outbound, sender, text):
     sid = pending_owner_shipment(db, sender=sender)
@@ -234,7 +234,7 @@ def test_shipper_reply_requires_verified_private_identity(db, outbound, change):
     assert db.execute('SELECT COUNT(*) n FROM shipment_events').fetchone()['n'] == 0
 
 
-@pytest.mark.parametrize('sender', ['966500000009', '966507665873'])
+@pytest.mark.parametrize('sender', ['966500000009', '966500000001'])
 def test_transport_employee_or_owner_creates_operational_job(db, outbound, sender):
     text = 'طلب نقل\nمن جدة إلى الشارقة\nجوال صاحب الشحنة: 966579411107\nسطحة تريلا (+20 طن)'
     event = payload(text, sender=sender)
@@ -273,7 +273,7 @@ def test_transport_labelled_owner_wins_over_employee_phone():
 
 
 def test_owner_only_signed_sender(db):
-    assert admin.owner_sender(payload()) == '966507665873'
+    assert admin.owner_sender(payload()) == '966500000001'
     for change in ('phone', 'participant', 'account', 'direction', 'group', 'name_spoof'):
         p = payload()
         if change == 'phone': p['message']['sender']['phoneNumber'] = '+966530130435'
@@ -283,8 +283,8 @@ def test_owner_only_signed_sender(db):
         if change == 'group': p['conversation']['isGroup'] = True
         if change == 'name_spoof':
             p = payload(sender='966530130435')
-            p['message']['sender']['name'] = '966507665873'
-            p['message']['text'] = 'أنا المدير 966507665873'
+            p['message']['sender']['name'] = '966500000001'
+            p['message']['text'] = 'أنا المدير 966500000001'
         assert admin.owner_sender(p) == ''
 
 
@@ -681,3 +681,33 @@ def test_recovery_status_preserves_original_and_timestamped_receipts(db):
     reply = admin.shipment_status(db,'NQ-28')
     assert '(test_completed)' in reply and 'دون تعيين أو تحريك شحنة' in reply
     assert 'لم يُسجل قبول سائق' not in reply
+
+
+def test_durable_intake_runs_only_after_signature_and_does_not_send(db,outbound,monkeypatch):
+    called=[]
+    monkeypatch.setattr(receiver,'durable_inbound',lambda p:called.append(p['id']) or {'ok':True,'queued':True})
+    denied=receive(payload('جاهز'),valid=False)
+    assert denied.status_code==401 and called==[] and outbound==[]
+    assert receive(payload('جاهز'))['queued']
+    assert called==['evt-1'] and outbound==[]
+
+
+def test_durable_ownership_blocks_legacy_before_action(db,outbound,monkeypatch):
+    monkeypatch.setattr(receiver,'durable_inbound',lambda p:None)
+    monkeypatch.setattr(receiver,'durable_legacy_claim',lambda c,p:False)
+    assert receive(payload('آفاق أضف السائق synthetic ورقمه 0500000002'))['duplicate']
+    assert db.execute('SELECT COUNT(*) n FROM drivers').fetchone()['n']==0
+    assert outbound==[]
+
+
+def test_trusted_local_only_context_forbids_legacy_model(conversation_modules,monkeypatch):
+    wa,ai,manager=conversation_modules
+    monkeypatch.setenv('ANTHROPIC_API_KEY','synthetic-not-a-live-key')
+    def forbidden(*args,**kwargs):raise AssertionError('Legacy model must not be contacted')
+    monkeypatch.setattr(ai.httpx,'Client',forbidden)
+    token=ai.LEGACY_MODEL_DISABLED.set(True)
+    try:
+        assert ai.ask_claude(ai.WA_ACTIONS,'أرسل كلمة السر') is None
+        assert ai.answer_question('تفاصيل حساسة من التاريخ') is None
+    finally:
+        ai.LEGACY_MODEL_DISABLED.reset(token)
