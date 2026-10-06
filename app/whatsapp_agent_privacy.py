@@ -704,8 +704,69 @@ _UNSUPPORTED_LOOKUP_OR_SAVE = re.compile(
     r'(?i)(?:حفظت|حفظنا|اضفت|اضفنا|بحثت|بحثنا|استعلمت|استعلمنا|اطلعت|استخرجت|استرجعت|'
     r'تم(?:ت)?\s*(?:اضافه|حفظ|تسجيل|الاضافه|الحفظ|اصدار)|اصدرت|اصدرنا|تصفحت|فتحت\s*(?:الموقع|المتصفح|الرابط)|'
     r'وجدت.{0,40}(?:في|بال)\s*(?:النظام|السجلات|قاعده)|نظامنا|سجلاتنا|'
+    r'(?<!\w)(?:ابحث|استعلم|اتصفح|افتح)\s*(?:في|عن|النظام|الموقع|الان|لك)|'
     r'\b(?:looked\s*up|searched|saved|registered|recorded)\b)'
 )
+_DENIED_CAPABILITY_PREFIX = (
+    r'(?:لا\s*(?:استطيع|اقدر|يمكنني)|ما\s*(?:اقدر|استطيع)|'
+    r'ليس\s*(?:بوسعي|بامكاني)|لست\s*(?:قادر|قادره)\s*(?:على)?|'
+    r'(?:ليس|ما)\s*(?:لدي|عندي)\s*(?:صلاحيه|صلاحيات|قدره|امكانيه)\s*(?:على|ل)?)'
+)
+_DENIED_CAPABILITY_VERB = (
+    r'(?:اؤكد|اوكد|تاكيد|التاكيد|ارسل|ارسال|الارسال|اتواصل|التواصل|'
+    r'ابحث|البحث|استعلم|الاستعلام|اراجع|المراجعه|تحديث|التحديث|احفظ|الحفظ|اسجل|التسجيل)'
+)
+_DENIED_CAPABILITY_PREDICATE = re.compile(
+    r'(?<!\w)' + _DENIED_CAPABILITY_PREFIX + r'\s*(?:ان\s*)?' + _DENIED_CAPABILITY_VERB + r'(?!\w)'
+)
+_NEGATED_KNOWLEDGE_PREDICATE = re.compile(
+    r'(?<!\w)(?:(?:ما|ليس|مش|مو)\s*(?:عندي|لدي|لدينا|عندنا)|'
+    r'لا\s*(?:يوجد|توجد|يتوفر|تتوفر)\s*(?:لدي|لدينا|عندي|عندنا))'
+    r'(?=\s*(?:معلومات|بيانات|قائمه|وصول|اطلاع|رؤيه|شاشه|تحديث|تاكيد))'
+    r'(?:\s*(?:تحديثات|تحديث|تاكيد|التاكيد))?(?!\w)'
+)
+_CONFIRMATION_PREREQUISITE = re.compile(r'(?<!\w)(?:تحتاج|يحتاج|تتطلب|يتطلب)\s*تاكيد(?!\w)')
+_USER_CONTACT_GUIDANCE = re.compile(
+    r'(?<!\w)(?:(?:يمكنك|تقدر|تقدرين|بامكانك|يرجي|الرجاء|من\s*فضلك|لو\s*سمحت)\s*'
+    r'(?:ان\s*)?(?:التواصل|تتواصل|تتواصلي|تراسل|مراسله|تواصل|راسل)|'
+    r'(?:تواصل|تواصلي|راسل|راسلي))'
+    r'(?P<target>\s*(?:مع\s*)?(?:الفريق|فريق\s*(?:التشغيل|افاق(?:\s*طويق)?)|'
+    r'المسؤول|موظف\s*مخول|خدمه\s*العملاء))(?!\w)'
+    r'(?:\s*(?P<purpose>لتاكيد|للتاكيد)(?!\w))?'
+)
+_SAME_CHAT_DETAIL_REQUEST = re.compile(
+    r'(?<!\w)(?:(?:ممكن|هل\s*يمكنك|تقدر|من\s*فضلك|لو\s*سمحت)\s*)?'
+    r'(?:ارسل|ارسلي|ترسل|ترسلي|ترسلين)\s*(?:لي\s*)?'
+    r'(?=(?:اسم\s*المدينه|مدينه\s*التحميل|مدينه\s*الوصول|الوجهه|نوع\s*المركبه|وزن\s*الحموله|تفاصيل\s*الحموله)(?!\w))'
+)
+_LIVE_AVAILABILITY_ASSERTION = re.compile(
+    r'(?:^|[.!؟?،؛;\n]|\b(?:لكن|ولكن)\s+|\s+و(?=الشحنات|شحنات|لا\s*توجد))\s*'
+    r'(?:(?:نعم|اكيد)\s*)?(?:'
+    r'(?:الشحنات|شحناتنا|الشحنه)\s*(?:متاحه|متوفره|جاهزه|غير\s*(?:متاحه|متوفره))|'
+    r'(?:لا\s*(?:توجد|يوجد|تتوفر)|ما\s*(?:عندي|عندنا|في|فيه)|ليس\s*(?:لدي|لدينا))'
+    r'\s*(?:(?:لدي|لدينا|عندي|عندنا)\s*)?(?:شحنات|شحنه|الشحنات)(?!\w))'
+)
+
+
+def _capability_action_text(value: str) -> str:
+    """Normalize only bounded denials/user guidance, never objects or tails.
+
+    Call only AFTER DLP/price checks on original output. Quoted wording receives
+    no exemption. This is wording classification, not execution permission.
+    """
+    if any(char in value for char in ('"', "'", '«', '»', '“', '”', '‘', '’', '`')):
+        return value
+    value = _DENIED_CAPABILITY_PREDICATE.sub('المعلومات غير متاحه', value)
+    value = _NEGATED_KNOWLEDGE_PREDICATE.sub('المعلومات غير متاحه', value)
+    value = _CONFIRMATION_PREREQUISITE.sub('تحتاج مراجعه', value)
+    # These phrases are second-person guidance. Only the predicate is replaced;
+    # a subsequent first-person promise or lookup remains untouched.
+    value = _USER_CONTACT_GUIDANCE.sub(
+        lambda match: 'يمكنك الرجوع' + match.group('target') + (' للمراجعه' if match.group('purpose') else ''), value)
+    # Do not normalize a detail request if it also names an onward recipient.
+    if not _ONWARD_ACTION_INTENT.search(value):
+        value = _SAME_CHAT_DETAIL_REQUEST.sub('وضح ', value)
+    return value
 _MONEY_OUTPUT = re.compile(r'(?i)(?:ريال|دولار|درهم|دينار|يورو|\b(?:sar|usd|aed|qar|eur|gbp)\b|[$€£])')
 _PRICE_TERMS = re.compile(r'(?i)(?:سعر|اسعار|تسعير|تكلفه|تكاليف|اجره|اجور|رسوم|مبلغ|\b(?:price|pricing|quote|quotation|rate|cost|fee|fees|fare)\b)')
 _AMOUNT_WORD = re.compile(
@@ -742,6 +803,8 @@ REPLY_REJECTION_REASONS = frozenset({
     'reply_price_commitment', 'reply_unsupported_claim', 'reply_history_claim',
     'reply_unsupported_number', 'reply_unsupported_identifier', 'reply_format',
     'unsupported_document_claim',
+    'reply_action_onward', 'reply_action_commitment', 'reply_action_lookup_save',
+    'reply_action_perspective_future', 'reply_action_live_status',
 })
 
 
@@ -877,17 +940,22 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
         return ScreenDecision(False, reason='reply_price_commitment', kind='reply')
     action_text = _NEGATED_PRICE_ASSERTION.sub('المعلومات غير متاحه', _fold(cleaned))
     if conversational:
+        if _LIVE_AVAILABILITY_ASSERTION.search(_fold(cleaned)):
+            return ScreenDecision(False, reason='reply_action_live_status', kind='reply')
+        action_text = _capability_action_text(action_text)
         if _ONWARD_ACTION_INTENT.search(action_text):
-            return ScreenDecision(False, reason='reply_action', kind='reply')
+            return ScreenDecision(False, reason='reply_action_onward', kind='reply')
         # Talking together in this chat is not third-party contact. Do not strip
         # past/future communication or a compound outside-recipient phrase.
         action_text = re.sub(
             r'(?<!\w)(?:نتواصل|تواصل|التواصل)\s+(?:عادي|بشكل\s*عادي|هنا|معك|معاك|معي|معايا)'
             r'(?!\w)(?!\s*(?:و|،)?\s*مع\b)', 'نتحدث هنا', action_text)
-    if (_COMMITMENT.search(action_text)
-            or _UNSUPPORTED_LOOKUP_OR_SAVE.search(_fold(cleaned))
-            or not _descriptive_only(action_text, document, conversational=conversational)):
-        return ScreenDecision(False, reason='reply_action', kind='reply')
+    if _UNSUPPORTED_LOOKUP_OR_SAVE.search(action_text):
+        return ScreenDecision(False, reason='reply_action_lookup_save', kind='reply')
+    if _COMMITMENT.search(action_text):
+        return ScreenDecision(False, reason='reply_action_commitment', kind='reply')
+    if not _descriptive_only(action_text, document, conversational=conversational):
+        return ScreenDecision(False, reason='reply_action_perspective_future', kind='reply')
     if _DELIVERY_OR_HUMAN_CLAIM.search(_fold(cleaned)):
         return ScreenDecision(False, reason='reply_unsupported_claim', kind='reply')
     if not has_history and _UNSUPPLIED_HISTORY_CLAIM.search(_fold(cleaned)):
