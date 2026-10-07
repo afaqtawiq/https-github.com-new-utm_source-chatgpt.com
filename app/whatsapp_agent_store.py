@@ -18,6 +18,9 @@ import secrets
 LEASE_SECONDS = 300
 MAX_READ_ATTEMPTS = 3
 DAILY_MODEL_LIMITS = {"owner_pilot": 10, "routine": 50}
+MODEL_BUDGET_NOTICE = ('وصلت رسالتك. وصلنا للحد اليومي للفهم الآلي في التجربة؛ '
+                       'يتجدد الساعة ٣ صباحًا بتوقيت السعودية. أرسل سؤالك من جديد بعد ذلك، '
+                       'لأن الرسائل المتوقفة لا تُعاد تلقائيًا.')
 TERMINAL = frozenset({"sent", "blocked", "uncertain", "failed"})
 MODES = frozenset({"off", "owner_pilot", "routine"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -134,6 +137,10 @@ DDL = (
         send_token TEXT, send_started_at TIMESTAMPTZ, lease_until TIMESTAMPTZ,
         provider_message_id TEXT, diagnostics TEXT NOT NULL DEFAULT '{}',
         updated_at TIMESTAMPTZ NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS whatsapp_agent_budget_notices (
+        account_id TEXT NOT NULL, sender TEXT NOT NULL, window_start TIMESTAMPTZ NOT NULL,
+        job_id BIGINT NOT NULL UNIQUE REFERENCES whatsapp_agent_jobs(id),
+        PRIMARY KEY(account_id,sender,window_start))""",
     "CREATE INDEX IF NOT EXISTS whatsapp_agent_claim_idx ON whatsapp_agent_jobs(status,id)",
     "CREATE INDEX IF NOT EXISTS whatsapp_agent_scope_idx ON whatsapp_agent_jobs(account_id,sender,conversation_id,id)",
     "CREATE INDEX IF NOT EXISTS whatsapp_agent_budget_idx ON whatsapp_agent_jobs(account_id,model_started_at)",
@@ -494,11 +501,50 @@ def reserve_model(job_id, lease_token, *, db_factory=None, now=None):
             WHERE account_id=%s AND model_started_at>=%s AND model_started_at<%s""",
             (job["account_id"], _stamp(start), _stamp(start + timedelta(days=1)))).fetchone()["n"]
         if count >= DAILY_MODEL_LIMITS[settings["mode"]]:
-            _terminal(connection, job, "blocked", now, {"reason": "daily_model_budget_exhausted"})
+            _budget_exhausted(connection, job, settings, start, now)
             return False
         connection.execute("UPDATE whatsapp_agent_jobs SET model_started_at=%s,updated_at=%s WHERE id=%s",
                            (_stamp(now), _stamp(now), job_id))
         return True
+
+
+def _budget_exhausted(connection, job, settings, start, now):
+    """Claim and persist one local owner notice in the quota transaction.
+
+    The claim is never released after uncertain/blocked delivery or mode changes.
+    Existing blocked jobs are never reopened. A new inbound window is required.
+    """
+    diagnostics = {"reason": "daily_model_budget_exhausted",
+                   "model_reason": "daily_model_budget_exhausted",
+                   "model_attempted": False, "model_success": False}
+    if (settings['mode'] != 'owner_pilot' or settings['pilot_sender'] != job['sender']
+            or not start <= _time(job['created_at']) <= now):
+        _terminal(connection, job, 'blocked', now, diagnostics)
+        return
+    claimed = connection.execute("""INSERT INTO whatsapp_agent_budget_notices
+        (account_id,sender,window_start,job_id) VALUES(%s,%s,%s,%s)
+        ON CONFLICT(account_id,sender,window_start) DO NOTHING RETURNING job_id""",
+        (job['account_id'], job['sender'], _stamp(start), job['id'])).fetchone()
+    if not claimed:
+        diagnostics['budget_notice'] = 'already_claimed'
+        _terminal(connection, job, 'blocked', now, diagnostics)
+        return
+    diagnostics.update(budget_notice='local_notice', budget_notice_window=_stamp(start))
+    job['reply_text'] = MODEL_BUDGET_NOTICE
+    connection.execute("""UPDATE whatsapp_agent_jobs SET reply_text=%s,diagnostics=%s WHERE id=%s""",
+                       (job['reply_text'], _diagnostics(job['diagnostics'], diagnostics), job['id']))
+    _make_ready(connection, job, now)
+
+
+def _budget_notice_current(job, now, *, mode):
+    if job.get('diagnostics', {}).get('budget_notice') != 'local_notice':
+        return True
+    try:
+        start = _time(job['diagnostics']['budget_notice_window'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (mode == 'owner_pilot' and start == start.replace(hour=0, minute=0, second=0, microsecond=0)
+            and start <= _time(now) < start + timedelta(days=1))
 
 
 def save_model(job_id, lease_token, *, reply_text, diagnostics=None, db_factory=None, now=None):
@@ -569,6 +615,9 @@ def claim_send(*, account_id=None, db_factory=None, now=None):
         if not _enabled(settings, job) or job["authorization_generation"] != settings["authorization_generation"]:
             _terminal(connection, job, "blocked", now, {"reason": "mode_or_sender_not_enabled"})
             return None
+        if not _budget_notice_current(job, now, mode=settings['mode']):
+            _terminal(connection, job, 'blocked', now, {'reason': 'budget_notice_window_expired'})
+            return None
         if job["model_started_at"] and not _model_input_permitted(job, settings):
             has_document = bool(job["document_sha256"] or job["document_text"]) or job["context_source_job_id"] is not None
             reason = (("pilot_provenance_not_approved" if settings["mode"] == "owner_pilot" else "document_provenance_not_approved")
@@ -625,6 +674,7 @@ def recent_context(*, account_id, sender, conversation_id, before_job_id=None,
         rows = connection.execute("""SELECT j.*,s.approved_sha256
             FROM whatsapp_agent_jobs j JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
             WHERE j.account_id=%s AND j.sender=%s AND j.conversation_id=%s AND j.status='sent'
+              AND NOT EXISTS (SELECT 1 FROM whatsapp_agent_budget_notices n WHERE n.job_id=j.id)
               AND j.document_status='ok' AND j.document_text<>'' AND j.document_sha256 IS NOT NULL
               AND j.context_source_job_id IS NULL
               AND j.document_checkpointed_at>%s AND j.document_checkpointed_at<=%s
@@ -678,6 +728,7 @@ def recent_exchanges(*, account_id, sender, conversation_id, before_job_id,
               AND target.status='processing' AND target.lease_until>%s
               AND target.created_at>%s AND target.created_at<=%s
               AND j.id<target.id AND j.status='sent'
+              AND NOT EXISTS (SELECT 1 FROM whatsapp_agent_budget_notices n WHERE n.job_id=j.id)
               AND j.created_at>%s AND j.created_at<=%s
               AND j.completed_at>%s AND j.completed_at<=%s
               AND j.document_status='none'
@@ -795,7 +846,7 @@ def send_authorized(job_id, send_token, *, db_factory=None, now=None):
     if not send_token:
         return False
     with (db_factory or database)() as connection:
-        row = _row(connection.execute("""SELECT j.sender,j.document_text,
+        row = _row(connection.execute("""SELECT j.sender,j.document_text,j.diagnostics,
             j.document_sha256,j.document_status,j.model_started_at,j.context_source_job_id,j.payload,
             s.mode,s.pilot_sender,s.approved_sha256
             FROM whatsapp_agent_jobs j
@@ -807,7 +858,8 @@ def send_authorized(job_id, send_token, *, db_factory=None, now=None):
               AND (j.context_source_job_id IS NULL OR j.document_checkpointed_at>%s)""",
             (job_id, send_token, _stamp(now), _stamp(now),
              _stamp(_time(now)-timedelta(days=1)))).fetchone())
-        return bool(_guard_permitted(row, model=False))
+        return bool(row and _budget_notice_current(row, now, mode=row['mode'])
+                    and _guard_permitted(row, model=False))
 
 
 def claim_legacy(connection, *, account_id, message_id, event_id, sender,

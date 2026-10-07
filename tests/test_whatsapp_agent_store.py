@@ -1235,3 +1235,137 @@ def test_source_absent_document_question_ambiguity_still_never_retries(db):
     assert store.get_job(job['id'],db_factory=db)['status']=='uncertain'
     assert not store.model_authorized(job['id'],job['lease_token'],db_factory=db,now=NOW)
     assert store.claim_send(db_factory=db,now=NOW+timedelta(seconds=302)) is None
+
+
+def exhaust_owner_budget(db, *, now=NOW):
+    enable(db)
+    ids = []
+    for number in range(10):
+        job = ordinary_job(db, number, now=now)
+        assert store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=now)
+        store.prepare_reply(job['id'], job['lease_token'], terminal_status='uncertain', db_factory=db, now=now)
+        ids.append(job['id'])
+    return ids
+
+
+def make_budget_notice(db, number=100, *, now=NOW):
+    job = ordinary_job(db, number, now=now)
+    assert not store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=now)
+    return store.get_job(job['id'], db_factory=db)
+
+
+def test_budget_notice_is_one_durable_local_outbox_with_separate_model_failure(db):
+    old_ids = exhaust_owner_budget(db)
+    notice = make_budget_notice(db)
+    assert notice['status'] == 'ready' and notice['reply_text'] == store.MODEL_BUDGET_NOTICE
+    assert notice['model_started_at'] is None and notice['model_completed_at'] is None
+    assert notice['diagnostics']['model_reason'] == 'daily_model_budget_exhausted'
+    assert notice['diagnostics']['model_attempted'] is False and notice['diagnostics']['model_success'] is False
+    sending = store.claim_send(db_factory=db, now=NOW)
+    assert store.send_authorized(sending['id'], sending['send_token'], db_factory=db, now=NOW)
+    done = store.finish_send(sending['id'], sending['send_token'], status='sent', provider_message_id='synthetic-notice',
+                             diagnostics={'reason':'provider_accepted'}, db_factory=db, now=NOW)
+    assert done['diagnostics']['model_reason'] == 'daily_model_budget_exhausted'
+    assert done['diagnostics']['model_success'] is False
+    again = make_budget_notice(db, 101)
+    assert again['status'] == 'blocked' and again['diagnostics']['budget_notice'] == 'already_claimed'
+    assert store.claim_send(db_factory=db, now=NOW) is None
+    assert all(store.get_job(jid, db_factory=db)['status'] == 'uncertain' for jid in old_ids)
+    with db() as connection:
+        assert connection.execute('SELECT COUNT(*) n FROM whatsapp_agent_budget_notices').fetchone()['n'] == 1
+        assert connection.execute('SELECT COUNT(*) n FROM whatsapp_agent_jobs WHERE model_started_at IS NOT NULL').fetchone()['n'] == 10
+
+
+@pytest.mark.parametrize('outcome', ['uncertain', 'failed', 'blocked'])
+def test_notice_claim_survives_uncertain_or_failed_delivery(db, outcome):
+    exhaust_owner_budget(db); notice = make_budget_notice(db)
+    sending = store.claim_send(db_factory=db, now=NOW)
+    store.finish_send(sending['id'], sending['send_token'], status=outcome, db_factory=db, now=NOW)
+    assert make_budget_notice(db, 101)['diagnostics']['budget_notice'] == 'already_claimed'
+    assert store.claim_send(db_factory=db, now=NOW) is None
+    assert store.get_job(notice['id'], db_factory=db)['status'] == outcome
+
+
+def test_notice_send_crash_is_not_replayed_and_claim_survives_new_generation(db):
+    exhaust_owner_budget(db); notice = make_budget_notice(db)
+    sending = store.claim_send(db_factory=db, now=NOW)
+    store.recover_expired(db_factory=db, now=NOW+timedelta(seconds=301))
+    assert store.get_job(notice['id'], db_factory=db)['status'] == 'uncertain'
+    store.update_settings('a', mode='off', db_factory=db, now=NOW+timedelta(seconds=302))
+    store.update_settings('a', mode='owner_pilot', db_factory=db, now=NOW+timedelta(seconds=303))
+    assert not store.send_authorized(sending['id'], sending['send_token'], db_factory=db, now=NOW+timedelta(seconds=304))
+    assert make_budget_notice(db, 101, now=NOW+timedelta(seconds=305))['diagnostics']['budget_notice'] == 'already_claimed'
+
+
+@pytest.mark.parametrize('phase', ['SET reply_text=', 'INSERT INTO whatsapp_agent_outbox', "SET status='ready'"])
+def test_notice_transaction_rolls_back_claim_reply_and_outbox_together(db, phase):
+    exhaust_owner_budget(db)
+    job = ordinary_job(db, 100)
+    @contextmanager
+    def failing():
+        with db() as connection:
+            class Fault:
+                dialect = 'sqlite'
+                def execute(self, statement, arguments=()):
+                    if phase in statement:
+                        raise RuntimeError('synthetic transaction interruption')
+                    return connection.execute(statement, arguments)
+            yield Fault()
+    with pytest.raises(RuntimeError):
+        store.reserve_model(job['id'], job['lease_token'], db_factory=failing, now=NOW)
+    with db() as connection:
+        assert connection.execute('SELECT COUNT(*) n FROM whatsapp_agent_budget_notices').fetchone()['n'] == 0
+        assert connection.execute('SELECT COUNT(*) n FROM whatsapp_agent_outbox').fetchone()['n'] == 0
+    current = store.get_job(job['id'], db_factory=db)
+    assert current['status'] == 'processing' and current['reply_text'] is None and current['model_started_at'] is None
+    assert not store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    assert store.get_job(job['id'], db_factory=db)['status'] == 'ready'
+
+
+@pytest.mark.parametrize('already_claimed', [False, True])
+def test_notice_expires_at_utc_midnight_before_claim_or_final_send(db, already_claimed):
+    before = NOW.replace(hour=23, minute=59, second=58)
+    midnight = (before+timedelta(days=1)).replace(hour=0, minute=0, second=0)
+    exhaust_owner_budget(db, now=before); notice = make_budget_notice(db, now=before)
+    if already_claimed:
+        sending = store.claim_send(db_factory=db, now=before)
+        assert store.send_authorized(sending['id'], sending['send_token'], db_factory=db, now=before)
+        assert not store.send_authorized(sending['id'], sending['send_token'], db_factory=db, now=midnight)
+        store.finish_send(sending['id'], sending['send_token'], status='blocked', db_factory=db, now=midnight)
+    else:
+        assert store.claim_send(db_factory=db, now=midnight) is None
+        assert store.get_job(notice['id'], db_factory=db)['diagnostics']['reason'] == 'budget_notice_window_expired'
+    fresh = ordinary_job(db, 200, now=midnight+timedelta(seconds=1))
+    assert store.reserve_model(fresh['id'], fresh['lease_token'], db_factory=db, now=midnight+timedelta(seconds=1))
+    assert store.get_job(notice['id'], db_factory=db)['status'] == 'blocked'
+
+
+def test_sent_quota_notice_never_becomes_pdf_or_text_context(db):
+    exhaust_owner_budget(db)
+    add(db, 100)
+    job=claim(db); checkpoint(db, job)
+    assert not store.reserve_model(job['id'], job['lease_token'], db_factory=db, now=NOW)
+    sending=store.claim_send(db_factory=db, now=NOW)
+    store.finish_send(sending['id'], sending['send_token'], status='sent', db_factory=db, now=NOW)
+    assert store.recent_context(account_id='a', sender='s', conversation_id='c', db_factory=db, now=NOW) is None
+    target=ordinary_job(db, 101)
+    assert store.recent_exchanges(account_id='a', sender='s', conversation_id='c', before_job_id=target['id'], db_factory=db, now=NOW) == []
+    with db() as connection:
+        settings=store._settings(connection,'a',now=NOW)
+        settings['acceptance']={'owner_receipt_confirmed':True,'document_job_id':job['id'],'followup_job_id':target['id']}
+        with pytest.raises(ValueError): store._validate_acceptance(connection,'a',settings)
+
+
+def test_historical_budget_blocks_are_not_reopened_by_notice_migration(db):
+    enable(db)
+    old = ordinary_job(db, 900)
+    store.prepare_reply(old['id'], old['lease_token'], terminal_status='blocked',
+                        diagnostics={'reason':'daily_model_budget_exhausted'}, db_factory=db, now=NOW)
+    exhaust_owner_budget(db)
+    store.init_storage(db_factory=db)
+    notice = make_budget_notice(db)
+    assert store.claim_send(db_factory=db, now=NOW)['id'] == notice['id']
+    historical = store.get_job(old['id'], db_factory=db)
+    assert historical['status'] == 'blocked' and historical['reply_text'] is None
+    with db() as connection:
+        assert connection.execute('SELECT COUNT(*) n FROM whatsapp_agent_outbox WHERE job_id=%s', (old['id'],)).fetchone()['n'] == 0

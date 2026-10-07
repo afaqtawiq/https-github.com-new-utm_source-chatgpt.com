@@ -67,9 +67,9 @@ def verify(factory):
     def send(account, now=NOW):
         return store.claim_send(account_id=account, db_factory=factory, now=now)
 
-    def finish(job, status='sent'):
+    def finish(job, status='sent', now=NOW):
         return store.finish_send(job['id'], job['send_token'], status=status,
-            provider_message_id='synthetic-provider-'+str(job['id']), db_factory=factory, now=NOW)
+            provider_message_id='synthetic-provider-'+str(job['id']), db_factory=factory, now=now)
 
     def get(job):
         return store.get_job(job['id'], db_factory=factory)
@@ -165,7 +165,11 @@ def verify(factory):
     assert sum(reservations) == 10
     assert claim('independent', NOW+timedelta(seconds=301)) is None
     assert [get(job)['status'] for job in independent].count('uncertain') == 10
-    assert all(send('independent', NOW+timedelta(seconds=302)) is None for _ in range(2))
+    quota_notice = send('independent', NOW+timedelta(seconds=302))
+    assert quota_notice and quota_notice['reply_text'] == store.MODEL_BUDGET_NOTICE
+    assert quota_notice['model_started_at'] is None and quota_notice['model_completed_at'] is None
+    finish(quota_notice, 'uncertain', now=NOW+timedelta(seconds=302))
+    assert all(send('independent', NOW+timedelta(seconds=303)) is None for _ in range(2))
 
     # Read retries limited to 3, previous worker token fenced.
     settings('reads')
@@ -364,7 +368,11 @@ def verify(factory):
     assert [get(job)['status'] for job in ordinary_active].count('uncertain') == 10
     assert all(not store.model_authorized(job['id'], job['lease_token'], db_factory=factory, now=NOW)
                for job in ordinary_active)
-    assert send('ordinary-budget', NOW+timedelta(seconds=302)) is None
+    ordinary_notice = send('ordinary-budget', NOW+timedelta(seconds=302))
+    assert ordinary_notice and ordinary_notice['reply_text'] == store.MODEL_BUDGET_NOTICE
+    assert ordinary_notice['model_started_at'] is None and ordinary_notice['model_completed_at'] is None
+    finish(ordinary_notice, 'uncertain', now=NOW+timedelta(seconds=302))
+    assert send('ordinary-budget', NOW+timedelta(seconds=303)) is None
 
     # OFF/ON permanently fences ordinary output just like document output.
     enqueue('ordinary', 'stop-question', payload=ordinary_payload)
@@ -553,10 +561,342 @@ def verify(factory):
         pass
     assert store.get_settings('settings-cas', db_factory=factory) == current
 
+    verify_budget_notices(factory)
+
     print('PASS: PostgreSQL duplicate event/message aliases, concurrent SKIP LOCKED claims, '
           'conversation serialization, bounded reads/model budgets, crash checkpoints, '
-          'no ambiguous send retries, context isolation/freshness, acceptance and stop fencing. '
+          'no ambiguous send retries, context isolation/freshness, acceptance/stop fencing, and bounded quota notices. '
           'External API calls: 0.')
+
+
+def verify_budget_notices(factory):
+    """Actual concurrent transactions for the local-only exhausted-pilot notice.
+
+    These helpers reserve synthetic model attempts but never call a model or a
+    messaging provider. The factory is the same isolated disposable DB schema.
+    """
+    from app import whatsapp_agent_store as store
+    payload = {'question': 'How should I organize the handover?', 'question_allowed': True,
+               'question_kind': 'operations', 'attachment_count': 0, 'attachments': []}
+
+    def utc(value):
+        return (datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if isinstance(value, str) else value).astimezone(timezone.utc)
+
+    def configure(account, now=NOW):
+        return store.update_settings(account, mode='owner_pilot', pilot_sender='owner',
+            approved_sha256=[], db_factory=factory, now=now)
+
+    def row(job):
+        return store.get_job(job['id'], db_factory=factory)
+
+    def incoming(account, message, *, now=NOW, created_at=None, conversation=None):
+        with factory() as connection:
+            connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (conversation or message,))
+            store.enqueue(connection, account_id=account, message_id=message, event_id='event-'+message,
+                sender='owner', conversation_id=conversation or message, payload=payload, now=created_at or now)
+        job = store.claim_job(account_id=account, db_factory=factory, now=now)
+        assert job is not None
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None,
+            status='none', db_factory=factory, now=now)
+        return job
+
+    def reserve(job, now=NOW):
+        return store.reserve_model(job['id'], job['lease_token'], db_factory=factory, now=now)
+
+    def quota_count(account, now=NOW):
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        with factory() as connection:
+            return connection.execute("""SELECT COUNT(*) n FROM whatsapp_agent_jobs
+                WHERE account_id=%s AND model_started_at>=%s AND model_started_at<%s""",
+                (account, start.isoformat(), (start+timedelta(days=1)).isoformat())).fetchone()['n']
+
+    def exhaust(account, now=NOW, limit=10):
+        for number in range(quota_count(account, now), limit):
+            job = incoming(account, account+'-used-'+now.date().isoformat()+'-'+str(number), now=now)
+            assert reserve(job, now)
+            # A lost model result consumes the reservation; never regenerate it.
+            store.prepare_reply(job['id'], job['lease_token'], terminal_status='uncertain',
+                diagnostics={'reason':'synthetic_consumed_reservation'}, db_factory=factory, now=now)
+        assert quota_count(account, now) == limit
+
+    def notices(account):
+        with factory() as connection:
+            return [dict(item) for item in connection.execute("""SELECT account_id,sender,window_start,job_id
+                FROM whatsapp_agent_budget_notices WHERE account_id=%s ORDER BY window_start,job_id""",
+                (account,)).fetchall()]
+
+    def outboxes(account):
+        with factory() as connection:
+            return [dict(item) for item in connection.execute("""SELECT o.* FROM whatsapp_agent_outbox o
+                JOIN whatsapp_agent_jobs j ON j.id=o.job_id WHERE j.account_id=%s ORDER BY o.job_id""",
+                (account,)).fetchall()]
+
+    def send(account, now=NOW):
+        return store.claim_send(account_id=account, db_factory=factory, now=now)
+
+    def finish(job, status, now=NOW):
+        return store.finish_send(job['id'], job['send_token'], status=status,
+            db_factory=factory, now=now)
+
+    def parallel(action, count=8):
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            return list(pool.map(action, range(count)))
+
+    def assert_notice(job, now=NOW):
+        saved = row(job)
+        assert saved['reply_text'] == store.MODEL_BUDGET_NOTICE
+        assert saved['model_started_at'] is None and saved['model_completed_at'] is None
+        diagnostics = saved['diagnostics']
+        assert diagnostics['reason'] == diagnostics['model_reason'] == 'daily_model_budget_exhausted'
+        assert diagnostics['model_attempted'] is False and diagnostics['model_success'] is False
+        assert diagnostics['budget_notice'] == 'local_notice'
+        assert utc(diagnostics['budget_notice_window']) == now.replace(hour=0, minute=0, second=0, microsecond=0)
+        assert not store.model_authorized(job['id'], job.get('lease_token'), db_factory=factory, now=now)
+        return saved
+
+    def assert_duplicate(job, account, now=NOW):
+        assert not reserve(job, now)
+        saved = row(job)
+        assert saved['status'] == 'blocked'
+        assert saved['diagnostics']['budget_notice'] == 'already_claimed'
+        assert saved['diagnostics']['model_attempted'] is False
+        assert saved['diagnostics']['model_success'] is False
+        assert saved['model_started_at'] is None and saved['model_completed_at'] is None
+        assert quota_count(account, now) == 10
+
+    # Inject a crash after each durable INSERT but before transaction commit.
+    # The notice claim and outbox must roll back together, leaving the original
+    # processing lease intact and allowing one safe DB retry (no network ran).
+    for table in ('whatsapp_agent_budget_notices','whatsapp_agent_outbox'):
+        account = 'quota-rollback-'+table.rsplit('_',1)[-1]
+        configure(account)
+        exhaust(account)
+        candidate = incoming(account,'rollback-'+table)
+        @contextmanager
+        def fail_after_insert():
+            with factory() as connection:
+                class FaultConnection:
+                    dialect = getattr(connection,'dialect',None)
+                    def execute(self,statement,args=()):
+                        cursor = connection.execute(statement,args)
+                        if 'INSERT INTO '+table in statement:
+                            raise RuntimeError('synthetic notice transaction crash')
+                        return cursor
+                yield FaultConnection()
+        try:
+            store.reserve_model(candidate['id'],candidate['lease_token'],db_factory=fail_after_insert,now=NOW)
+            raise AssertionError('fault injector did not interrupt notice transaction')
+        except RuntimeError as error:
+            assert str(error)=='synthetic notice transaction crash'
+        assert not notices(account) and not outboxes(account)
+        assert row(candidate)['status']=='processing' and row(candidate)['model_started_at'] is None
+        assert quota_count(account)==10
+        assert not reserve(candidate)
+        assert_notice(candidate)
+        assert len(notices(account))==len(outboxes(account))==1
+
+    # Independent incoming conversations still share one account+sender notice.
+    account = 'quota-notice-concurrent'
+    configure(account)
+    exhaust(account)
+    def exhausted_incoming(number):
+        job = incoming(account, 'quota-conversation-'+str(number))
+        assert not reserve(job)
+        return job
+    requests = parallel(exhausted_incoming, 12)
+    saved = [row(job) for job in requests]
+    ready = [job for job in saved if job['status']=='ready']
+    assert len(ready)==1 and sum(job['status']=='blocked' for job in saved)==11
+    first = assert_notice(ready[0])
+    assert len(notices(account))==1 and notices(account)[0]['job_id']==first['id']
+    assert len(outboxes(account))==1 and outboxes(account)[0]['status']=='ready'
+    assert quota_count(account)==10
+    assert all(job['model_started_at'] is None and job['model_completed_at'] is None for job in saved)
+    claimed = [job for job in parallel(lambda _:send(account),8) if job]
+    assert len(claimed)==1 and claimed[0]['id']==first['id']
+    assert store.send_authorized(first['id'],claimed[0]['send_token'],db_factory=factory,now=NOW)
+    finish(claimed[0],'uncertain')
+    assert_duplicate(incoming(account,'after-uncertain'),account)
+    assert send(account) is None and len(notices(account))==len(outboxes(account))==1
+    assert outboxes(account)[0]['status']=='uncertain'
+
+    # A commit followed by a crash leaves one ready notice. A crash after its
+    # send claim becomes uncertain; neither path frees the once/window claim.
+    account = 'quota-notice-crash'
+    configure(account)
+    exhaust(account)
+    candidate = incoming(account,'notice-before-crash')
+    assert not reserve(candidate)
+    assert_notice(candidate)
+    later = NOW+timedelta(seconds=301)
+    store.recover_expired(account_id=account,db_factory=factory,now=later)
+    assert row(candidate)['status']=='ready'
+    crashed = send(account,later)
+    assert crashed and crashed['id']==candidate['id']
+    assert send(account,later+timedelta(seconds=1)) is None
+    after_crash = later+timedelta(seconds=301)
+    assert send(account,after_crash) is None and row(candidate)['status']=='uncertain'
+    assert_duplicate(incoming(account,'after-send-crash',now=after_crash),account,after_crash)
+    assert len(notices(account))==len(outboxes(account))==1
+
+    # Authorization changes fence old sends but never release a notice claim.
+    account = 'quota-notice-generation'
+    configure(account)
+    exhaust(account)
+    candidate = incoming(account,'notice-before-stop')
+    assert not reserve(candidate)
+    old_send = send(account)
+    store.update_settings(account,mode='off',db_factory=factory,now=NOW)
+    configure(account)
+    assert not store.send_authorized(old_send['id'],old_send['send_token'],db_factory=factory,now=NOW)
+    assert_duplicate(incoming(account,'after-reenable'),account)
+    finish(old_send,'blocked')
+    assert len(notices(account))==len(outboxes(account))==1 and send(account) is None
+
+    account = 'quota-ready-generation'
+    configure(account)
+    exhaust(account)
+    candidate = incoming(account,'ready-before-change')
+    assert not reserve(candidate)
+    store.update_settings(account,approved_sha256=[SHA],db_factory=factory,now=NOW)
+    assert row(candidate)['status']=='blocked'
+    assert_duplicate(incoming(account,'after-config-change'),account)
+    assert len(notices(account))==len(outboxes(account))==1
+
+    # An old ready notice expires at UTC midnight, even within normal send TTL.
+    start = NOW.replace(hour=0,minute=0,second=0,microsecond=0)
+    near_midnight = start+timedelta(days=1,seconds=-5)
+    next_window = start+timedelta(days=1)
+    account = 'quota-notice-window'
+    configure(account,near_midnight)
+    exhaust(account,near_midnight)
+    expired = incoming(account,'ready-before-midnight',now=near_midnight)
+    assert not reserve(expired,near_midnight)
+    assert_notice(expired,near_midnight)
+    assert send(account,next_window) is None
+    assert row(expired)['status']=='blocked'
+    assert row(expired)['diagnostics']['reason']=='budget_notice_window_expired'
+    assert quota_count(account,next_window)==0
+    exhaust(account,next_window)
+    renewed = incoming(account,'fresh-new-window-notice',now=next_window)
+    assert not reserve(renewed,next_window)
+    assert_notice(renewed,next_window)
+    assert len(notices(account))==2 and len(outboxes(account))==2
+    assert [utc(item['window_start']) for item in notices(account)]==[start,next_window]
+    assert row(expired)['status']=='blocked'  # no old job is reopened
+    finish(send(account,next_window),'sent',next_window)
+
+    # Even a successfully sent fixed notice is not conversational model history.
+    followup = incoming(account,'text-after-budget-notice',now=next_window,
+        conversation=row(renewed)['conversation_id'])
+    assert store.recent_exchanges(account_id=account,sender='owner',conversation_id=followup['conversation_id'],
+        before_job_id=followup['id'],db_factory=factory,now=next_window)==[]
+    store.prepare_reply(followup['id'],followup['lease_token'],terminal_status='blocked',db_factory=factory,now=next_window)
+
+    # The final pre-request guard independently fences a notice crossing midnight,
+    # despite its otherwise-valid lease. Guard reads do not retry or release it.
+    account = 'quota-notice-final-guard'
+    configure(account,near_midnight)
+    exhaust(account,near_midnight)
+    candidate = incoming(account,'claimed-before-midnight',now=near_midnight)
+    assert not reserve(candidate,near_midnight)
+    outgoing = send(account,near_midnight)
+    assert utc(outgoing['lease_until'])>next_window
+    assert store.send_authorized(outgoing['id'],outgoing['send_token'],db_factory=factory,now=near_midnight)
+    assert not store.send_authorized(outgoing['id'],outgoing['send_token'],db_factory=factory,now=next_window)
+    assert row(candidate)['status']=='sending'
+    finish(outgoing,'blocked',next_window)
+    assert len(notices(account))==1 and len(outboxes(account))==1
+
+    # A delayed old-window job or a future-window timestamp cannot consume the
+    # current window's notice. A later genuinely current inbound may claim it.
+    account = 'quota-notice-incoming-window'
+    current = next_window+timedelta(seconds=20)
+    configure(account,current)
+    exhaust(account,current)
+    for message,created in (('delayed-old-window',near_midnight),
+                            ('future-current-window',current+timedelta(seconds=60)),
+                            ('future-window',next_window+timedelta(days=1))):
+        stale = incoming(account,message,now=current,created_at=created)
+        assert not reserve(stale,current)
+        assert row(stale)['status']=='blocked'
+        assert not notices(account) and not outboxes(account)
+    current_notice = incoming(account,'current-window',now=current)
+    assert not reserve(current_notice,current)
+    assert_notice(current_notice,current)
+    assert len(notices(account))==len(outboxes(account))==1
+    with factory() as connection:
+        stranger = store.enqueue(connection,account_id=account,message_id='other-sender',event_id='other-sender-event',
+            sender='not-owner',conversation_id='other-sender-conversation',payload=payload,now=current)
+    assert stranger['status']=='blocked'
+    assert all(item['sender']=='owner' for item in notices(account))
+
+    # Locally extracting a PDF before the quota check does not turn the fixed
+    # notice into document context. No model call or successful PDF answer exists.
+    account = 'quota-notice-pdf-context'
+    configure(account)
+    store.update_settings(account,approved_sha256=[SHA],db_factory=factory,now=NOW)
+    exhaust(account)
+    pdf_payload = {'question':'What does this document say?','question_allowed':True,
+        'question_kind':'document_question','attachment_count':1,'attachments':[{'mime':'application/pdf'}]}
+    with factory() as connection:
+        store.enqueue(connection,account_id=account,message_id='pdf-at-cap',event_id='pdf-at-cap-event',
+            sender='owner',conversation_id='pdf-context-conversation',payload=pdf_payload,now=NOW)
+    pdf_notice = store.claim_job(account_id=account,db_factory=factory,now=NOW)
+    store.checkpoint_document(pdf_notice['id'],pdf_notice['lease_token'],text=TEXT,sha256=SHA,status='ok',
+        db_factory=factory,now=NOW)
+    assert not reserve(pdf_notice)
+    assert_notice(pdf_notice)
+    finish(send(account),'sent')
+    assert store.recent_context(account_id=account,sender='owner',conversation_id='pdf-context-conversation',
+        db_factory=factory,now=NOW) is None
+
+    # A true successful PDF followed by a quota notice is still not a completed
+    # model-understanding pilot, even with exact source linkage and owner receipt.
+    account = 'quota-notice-pdf-acceptance'
+    configure(account)
+    store.update_settings(account,approved_sha256=[SHA],db_factory=factory,now=NOW)
+    with factory() as connection:
+        store.enqueue(connection,account_id=account,message_id='real-pdf',event_id='real-pdf-event',
+            sender='owner',conversation_id='pdf-proof-conversation',payload=pdf_payload,now=NOW)
+    document = store.claim_job(account_id=account,db_factory=factory,now=NOW)
+    store.checkpoint_document(document['id'],document['lease_token'],text=TEXT,sha256=SHA,status='ok',
+        db_factory=factory,now=NOW)
+    assert reserve(document)
+    store.save_model(document['id'],document['lease_token'],reply_text='Synthetic model document answer',
+        diagnostics={'model_success':True},db_factory=factory,now=NOW)
+    store.prepare_reply(document['id'],document['lease_token'],db_factory=factory,now=NOW)
+    finish(send(account),'sent')
+    exhaust(account)
+    with factory() as connection:
+        store.enqueue(connection,account_id=account,message_id='capped-followup',event_id='capped-followup-event',
+            sender='owner',conversation_id='pdf-proof-conversation',
+            payload={**pdf_payload,'attachment_count':0,'attachments':[]},now=NOW)
+    capped_followup = store.claim_job(account_id=account,db_factory=factory,now=NOW)
+    store.checkpoint_document(capped_followup['id'],capped_followup['lease_token'],text=TEXT,sha256=SHA,status='ok',
+        context_source_job_id=document['id'],db_factory=factory,now=NOW)
+    assert not reserve(capped_followup)
+    assert_notice(capped_followup)
+    finish(send(account),'sent')
+    try:
+        store.update_settings(account,mode='routine',acceptance={'owner_receipt_confirmed':True,
+            'document_job_id':document['id'],'followup_job_id':capped_followup['id']},db_factory=factory,now=NOW)
+        raise AssertionError('fixed local quota notice substituted for a model followup')
+    except ValueError:
+        pass
+    assert store.get_settings(account,db_factory=factory)['mode']=='owner_pilot'
+
+    # The existing fully accepted routine fixture retains its 50-call cap; this
+    # owner-pilot-only notice must never be introduced into routine handling.
+    account = 'pdf-root-history'
+    assert store.get_settings(account,db_factory=factory)['mode']=='routine'
+    exhaust(account,limit=50)
+    routine = incoming(account,'routine-cap-reached')
+    assert not reserve(routine)
+    assert row(routine)['status']=='blocked' and row(routine)['model_started_at'] is None
+    assert not notices(account)
+    assert quota_count(account)==50
 
 
 def main():
