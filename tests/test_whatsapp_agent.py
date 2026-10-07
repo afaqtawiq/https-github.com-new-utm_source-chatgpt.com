@@ -463,10 +463,16 @@ def test_identity_succeeds_locally_at_exhausted_budget_without_reset(setup):
     assert job['status'] == 'sent' and job['model_started_at'] is None
     assert job['reply_text'] == privacy.IDENTITY_REPLY
     ordinary = agent.accept_inbound(payload(21, 'كيف أجهز شحنة؟')); assert tick()
-    blocked = store.get_job(ordinary['job_id'])
-    assert blocked['status'] == 'blocked'
-    assert blocked['diagnostics']['reason'] == 'daily_model_budget_exhausted'
-    assert not setup['model_calls'] and len(setup['sends']) == 1
+    notice = store.get_job(ordinary['job_id'])
+    assert notice['status'] == 'sent' and notice['reply_text'] == store.MODEL_BUDGET_NOTICE
+    assert notice['model_started_at'] is None
+    assert notice['diagnostics']['model_reason'] == 'daily_model_budget_exhausted'
+    assert notice['diagnostics']['model_success'] is False
+    assert notice['diagnostics']['reason'] == 'provider_accepted'
+    again = agent.accept_inbound(payload(22, 'ما تفاصيل الشحن؟')); assert tick()
+    blocked = store.get_job(again['job_id'])
+    assert blocked['status'] == 'blocked' and blocked['diagnostics']['budget_notice'] == 'already_claimed'
+    assert not setup['model_calls'] and len(setup['sends']) == 2
 
 
 def test_identity_after_pdf_does_not_inherit_document_or_model_gate(setup):
