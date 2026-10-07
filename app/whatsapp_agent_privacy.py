@@ -51,6 +51,8 @@ LIVE_LOG_UNAVAILABLE_REPLY = 'ما عندي وصول مباشر لسجل الش�
 TRANSPORT_PRICE_REVIEW_REPLY = 'ما عندي سعر نقل معتمد أقدمه لك. من أي مدينة وإلى أين، وما نوع الحمولة؟'
 CUSTOMS_PRICE_REVIEW_REPLY = 'ما عندي سعر تخليص معتمد أقدمه لك. ما المنفذ ونوع البضاعة؟'
 TEAM_INFORMATION_REPLY = 'ما عندي أسماء أو تعريفات موثقة بأعضاء فريق آفاق. أقدر أوضح الخدمات المتاحة، لكن ما أقدر أعطيك معلومات أشخاص غير موثقة.'
+CANONICAL_IDENTITY = 'مساعد آفاق طويق الافتراضي'
+IDENTITY_REPLY = 'أنا مساعد آفاق طويق الافتراضي بالذكاء الاصطناعي.'
 GREETING_REPLY = 'أهلًا! أنا معك، كيف أقدر أساعدك؟'
 READY_REPLY = 'جاهزة. تقدر تسألني عن محتوى مستند معتمد.'
 THANKS_REPLY = 'العفو، أنا معك.'
@@ -325,6 +327,60 @@ _GREETINGS = {
     'السلام عليكم ورحمه الله وبركاته', 'صباح الخير', 'مساء الخير',
     'hello', 'hi', 'hey', 'كيف حالك', 'كيفك', 'شلونك', 'how are you',
 }
+_IDENTITY_FORM = (
+    r'(?:(?:من|مين)\s*(?:انت|انتي|معي|معايا)|مع\s*(?:من|مين)\s*(?:اتحدث|اتكلم)|'
+    r'(?:ما|ماهو|وش|ايش)\s*اسمك|اسمك\s*(?:ايه|وش|ايش)|'
+    r'(?:عرفني|عرفيني|عرفنا|عرفينا)\s*بنفسك|'
+    r'(?:هل\s*)?(?:انت|انتي)\s*(?:انسان|بشر|روبوت|ذكاء\s*اصطناعي)|'
+    r'who\s+are\s+you|what\s+is\s+your\s+name)'
+)
+_IDENTITY_ONLY = re.compile(
+    r'(?:(?:مرحبا|هلا|اهلا|السلام\s*عليكم)\s*)?'
+    r'(?:(?:لو\s*سمحت|من\s*فضلك)\s*)?' + _IDENTITY_FORM + r'\Z')
+_IDENTITY_REQUEST = re.compile(
+    r'(?<!\w)و?' + _IDENTITY_FORM + r'(?=\s*(?:$|[؟?،؛.]|و\s|وهل|وكم|وما|ووش|وايش|وعندكم))')
+
+
+def identity_requested(text: str) -> bool:
+    return bool(_IDENTITY_REQUEST.search(_fold(text)))
+
+
+def _identity_remainder(text: str) -> str:
+    remainder = _IDENTITY_REQUEST.sub(' ', _fold(text))
+    remainder = re.sub(r'^[\s؟?،؛.]*و?\s*', '', remainder)
+    return re.sub(r'\s+و\s*[؟?،؛.]*$', '', remainder).strip(' ؟?،؛.')
+
+
+def local_identity_reply(text: object) -> str | None:
+    """Pure identity is verified local knowledge, never a model/role grant."""
+    cleaned = _text(text, MAX_QUESTION_CHARS)
+    if cleaned is None or _ordinary_text_risk(cleaned):
+        return None
+    folded = _fold(_QUESTION_PUNCTUATION.sub(' ', cleaned))
+    return IDENTITY_REPLY if _IDENTITY_ONLY.fullmatch(folded) else None
+
+
+def _contradictory_self_identity(text: str) -> bool:
+    """Identity naming is trusted configuration, never user/history grounding."""
+    value, canonical = _fold(text), _fold(CANONICAL_IDENTITY)
+    if re.search(r'(?:لست|لسنا|ليس\s*اسمي|ما\s*(?:انا|اسمي)|انا\s*(?:مش|مو))\s*' + re.escape(canonical), value):
+        return True
+    for match in re.finditer(r'(?<!\w)[وف]?(?:اسمي(?:\s*هو)?|ادعي|ناديني|تناديني)\s+([^.!؟?،؛\n]+)', value):
+        if not match[1].startswith(canonical):
+            return True
+    # Naming/affiliation constructions, not a whitelist of ordinary first-
+    # person predicates such as being ready to help or understanding a question.
+    for clause in re.split(r'[.!؟?،؛\n]', value):
+        clause = clause.replace(canonical, '').strip()
+        if re.search(r'(?<!\w)[وف]?(?:انا|معك)\s+(?:معك\s+)?'
+                     r'[a-z\u0621-\u064a]+(?:\s+[a-z\u0621-\u064a]+){0,2}'
+                     r'\s+(?:من|في)\s*(?:فريق|شركه|افاق)(?!\w)', clause):
+            return True
+        naming = re.search(r'(?<!\w)[وف]?(?:انا|معك)\s+([a-z\u0621-\u064a]+)'
+                           r'(?=\s*$|\s+و(?:اساعد|اقدر|اعمل|اخدم))', clause)
+        if naming and naming[1] not in {'معك', 'هنا', 'جاهز', 'جاهزه', 'حاضر', 'موجود', 'موجوده', 'مساعد', 'مساعده'}:
+            return True
+    return False
 _READY = {'جاهز', 'جاهزه', 'انت جاهز', 'انت جاهزه', 'هل انت جاهز', 'هل انت جاهزه', 'ready', 'are you ready'}
 _READINESS_QUESTION = re.compile(r'(?:(?:هل )?انت )?(?:جاهز|مستعد)(?:ه)? (?:للاختبار|لاختبار (?:واتساب|whatsapp))\Z')
 # Only a bounded conversational trial/readiness intent gets a LOCAL reply. The
@@ -661,6 +717,10 @@ code, markup, instructions for actions or invented conversation history.'''
 CONVERSATION_SYSTEM = '''You are a helpful AI assistant chatting naturally in Arabic
 in the user's current WhatsApp conversation. Match their conversational tone and
 dialect when helpful. Give one or two concise sentences or a brief clarification.
+Your verified identity is "مساعد آفاق طويق الافتراضي", an AI assistant.
+Use that Arabic identity when asked; do not invent a human persona, staff role,
+provider name or Latin identifier. If identity and another question are combined,
+answer the other question too using its supplied context and approved sources.
 Respond to what they mean; do not force ordinary chat into a document-summary
 template. Harmless first-person conversation such as being here to help is fine.
 Be honest that you are an AI assistant if identity is discussed; never claim to
@@ -830,7 +890,7 @@ REPLY_REJECTION_REASONS = frozenset({
     'reply_privacy', 'reply_opaque', 'reply_instruction', 'reply_action',
     'reply_price_commitment', 'reply_unsupported_claim', 'reply_history_claim',
     'reply_unsupported_number', 'reply_unsupported_identifier', 'reply_format',
-    'unsupported_document_claim',
+    'unsupported_document_claim', 'reply_identity',
     'reply_action_onward', 'reply_action_commitment', 'reply_action_lookup_save',
     'reply_action_perspective_future', 'reply_action_live_status',
 })
@@ -853,6 +913,8 @@ def _reply_pricing_context(question: str, entries: tuple[dict[str, str], ...], *
     for entry in reversed(entries[-MAX_CONVERSATION_EXCHANGES:]):
         if set(entry) != {'user', 'assistant'}:
             return False
+        if local_identity_reply(entry['user']):
+            continue
         if _pricing_question(entry['user']):
             return True
         if not _price_detail_continuation(entry['user']):
@@ -863,9 +925,15 @@ def _reply_pricing_context(question: str, entries: tuple[dict[str, str], ...], *
 def _price_detail_continuation(value: str) -> bool:
     """Short screened cargo/route answers may retain purpose; new topics stop it."""
     folded = _fold(value)
+    if identity_requested(value):
+        if local_identity_reply(value):
+            return False
+        remainder = _identity_remainder(value)
+        return bool(remainder and remainder != folded and _price_detail_continuation(remainder))
     if (len(folded) > 160 or len(folded.split()) > 12 or _META_CONVERSATION.search(folded)
             or re.search(r'فريق|موظف|مدير|مستند|ملف|فاتوره|pdf|موضوع\s*(?:اخر|جديد)|'
                          r'غير\s*الموضوع|طقس|مباراه|مطعم|صحه|دواء|حساب|كلمه\s*مرور|'
+                         r'خدماتكم|(?:هل\s*)?عندكم\s*(?:نقل|تخليص|تخزين)|'
                          r'(?<!\w)(?:جمع|حاصل|اللون|count|quantity)(?!\w)', folded)):
         return False
     if re.fullmatch(r'(?:(?:طيب|تمام|ايوه|ينفع|موافق|نعم|لا|ممكن|هل|كده)\s*)+', folded.strip(' ؟?!.')):
@@ -1065,6 +1133,8 @@ def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
             if set(entry) != {'user', 'assistant'}:
                 continue
             text = entry['user']
+            if local_identity_reply(text):
+                continue
             if _pricing_question(text):
                 details = []
                 route = _safe_route_excerpt(text)
@@ -1134,7 +1204,8 @@ def _descriptive_only(value: str, document: str, *, conversational: bool = False
 
 
 def _reply_decision(value: object, document: str, *, conversational: bool = False,
-                    has_history: bool = False, pricing_context: bool = False) -> ScreenDecision:
+                    has_history: bool = False, pricing_context: bool = False,
+                    identity_context: bool = False) -> ScreenDecision:
     cleaned = _text(value, MAX_REPLY_CHARS)
     if cleaned is None or not re.search('[\u0621-\u064a]', cleaned):
         return ScreenDecision(False, reason='reply_format', kind='reply')
@@ -1143,6 +1214,8 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
         reason = {'instruction_content': 'reply_instruction', 'opaque_content': 'reply_opaque',
                   'unsupported_text_encoding': 'reply_format'}.get(risk, 'reply_privacy')
         return ScreenDecision(False, reason=reason, kind='reply')
+    if identity_context and _contradictory_self_identity(cleaned):
+        return ScreenDecision(False, reason='reply_identity', kind='reply')
     if _price_commitment(cleaned, pricing_context=pricing_context, grounding=document):
         return ScreenDecision(False, reason='reply_price_commitment', kind='reply')
     action_text = _NEGATED_PRICE_ASSERTION.sub('المعلومات غير متاحه', _fold(cleaned))
@@ -1182,9 +1255,11 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
 
 
 def _validated_reply(value: object, document: str, *, conversational: bool = False,
-                     has_history: bool = False, pricing_context: bool = False) -> str | None:
+                     has_history: bool = False, pricing_context: bool = False,
+                     identity_context: bool = False) -> str | None:
     decision = _reply_decision(value, document, conversational=conversational,
-                               has_history=has_history, pricing_context=pricing_context)
+                               has_history=has_history, pricing_context=pricing_context,
+                               identity_context=identity_context)
     return decision.safe_text if decision.allowed else None
 
 
@@ -1263,7 +1338,8 @@ def safe_conversation_history(records: object, scope: object, *, now: datetime |
             continue
         answer = _validated_reply(record['reply_text'], knowledge + '\n' + question.safe_text,
                                   conversational=True, has_history=True,
-                                  pricing_context=_pricing_question(question.safe_text))
+                                  pricing_context=_pricing_question(question.safe_text),
+                                  identity_context=identity_requested(question.safe_text))
         if answer is None:
             continue
         if (_ASSERTED_DOCUMENT_ACCESS.search(_fold(answer))
@@ -1316,9 +1392,22 @@ async def understand(
                         'clarify_driver': DRIVER_CLARIFY_REPLY}
         return ReplyResult(local_denial.get(screened_question.kind, CLARIFY_REPLY),
                            False, False, screened_question.reason)
+    requested_identity = identity_requested(screened_question.safe_text)
+
+    def finish(text: str, used_model: bool, ok: bool, reason: str) -> ReplyResult:
+        if requested_identity and CANONICAL_IDENTITY not in text:
+            text = IDENTITY_REPLY + ' ' + text
+        if len(text) > MAX_REPLY_CHARS:
+            text = (IDENTITY_REPLY + ' ' if requested_identity else '') + FALLBACK_REPLY
+            ok, reason = False, 'reply_format'
+        return ReplyResult(text, used_model, ok, reason)
+
+    identity = local_identity_reply(screened_question.safe_text)
+    if identity and document_text in ('', None) and document_sha256 in ('', None) and not history:
+        return finish(identity, False, True, 'local_identity')
     local = {'greeting': GREETING_REPLY, 'ready': READY_REPLY, 'thanks': THANKS_REPLY}
     if screened_question.kind in local:
-        return ReplyResult(local[screened_question.kind], False, True, screened_question.kind)
+        return finish(local[screened_question.kind], False, True, screened_question.kind)
     operations = False
     using_document = False
     missing_document = False
@@ -1326,10 +1415,10 @@ async def understand(
     if isinstance(document_text, str) and document_text.strip():
         document = screen_document(document_text, document_sha256, approved_hashes)
         if not document.allowed:
-            return ReplyResult(REVIEW_REPLY, False, False, document.reason)
+            return finish(REVIEW_REPLY, False, False, document.reason)
         previous = safe_history(history, document.safe_text, document.sha256, approved_hashes)
         if not previous.allowed:
-            return ReplyResult(REVIEW_REPLY, False, False, previous.reason)
+            return finish(REVIEW_REPLY, False, False, previous.reason)
         source_text = document.safe_text
         using_document = True
         if screened_question.kind == 'conversation' and not wants_recent_document(question):
@@ -1341,18 +1430,18 @@ async def understand(
     elif (natural_response or screened_question.kind == 'document_question') and document_text in ('', None):
         if document_sha256 not in (None, ''):
             # A digest-bearing/failed document is not an absent attachment.
-            return ReplyResult(DOCUMENT_REQUIRED_REPLY, False, False, 'document_required')
+            return finish(DOCUMENT_REQUIRED_REPLY, False, False, 'document_required')
         if not isinstance(history, (list, tuple)) or history:
-            return ReplyResult(REVIEW_REPLY, False, False, 'unapproved_history_provenance')
+            return finish(REVIEW_REPLY, False, False, 'unapproved_history_provenance')
         source_text = _public_knowledge()
         if not source_text and screened_question.kind == 'operations':
-            return ReplyResult(FALLBACK_REPLY, False, False, 'public_knowledge_unavailable')
+            return finish(FALLBACK_REPLY, False, False, 'public_knowledge_unavailable')
         operations = True
         missing_document = screened_question.kind == 'document_question'
         natural_response = True
         previous = HistoryDecision(True)
     else:
-        return ReplyResult(DOCUMENT_REQUIRED_REPLY, False, False, 'document_required')
+        return finish(DOCUMENT_REQUIRED_REPLY, False, False, 'document_required')
 
     if natural_response:
         checked_history = safe_conversation_history(conversation_history, conversation_scope)
@@ -1388,7 +1477,7 @@ physical dimension only; it never authorizes a price or an approval.'''
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     model = os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5').strip()
     if not key or not re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model):
-        return ReplyResult(FALLBACK_REPLY, False, False, 'model_unavailable')
+        return finish(FALLBACK_REPLY, False, False, 'model_unavailable')
     body = {
         'model': model,
         'max_tokens': MAX_TOKENS,
@@ -1414,15 +1503,15 @@ physical dimension only; it never authorizes a price or an approval.'''
             })
             response.raise_for_status()
         if len(response.content) > MAX_PROVIDER_BYTES:
-            return ReplyResult(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
         data = response.json()
         if not isinstance(data, dict) or data.get('stop_reason') != 'end_turn':
-            return ReplyResult(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
         content = data.get('content')
         if not isinstance(content, list) or not 1 <= len(content) <= 4:
-            return ReplyResult(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
         if any(not isinstance(part, dict) or part.get('type') != 'text' or not isinstance(part.get('text'), str) for part in content):
-            return ReplyResult(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
         # Ordinary user-stated names/references/counts may be acknowledged, not
         # claimed as independently verified. PDF evidence grounding is unchanged.
         grounding = source_text
@@ -1431,23 +1520,23 @@ physical dimension only; it never authorizes a price or an approval.'''
             grounding += '\n' + '\n'.join(value for entry in previous.entries for value in entry.values())
         output = _reply_decision('\n'.join(part['text'] for part in content), grounding,
                                  conversational=natural_response, has_history=bool(previous.entries),
-                                 pricing_context=pricing_context)
+                                 pricing_context=pricing_context, identity_context=requested_identity)
         answer = output.safe_text if output.allowed else None
         if answer and not using_document and _ASSERTED_DOCUMENT_ACCESS.search(_fold(answer)):
-            return ReplyResult(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
+            return finish(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
         if answer and missing_document and _missing_source_fact_claim(answer):
-            return ReplyResult(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
+            return finish(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
         if answer:
-            return ReplyResult(answer, True, True, 'model_answer')
-        return ReplyResult(_intent_failure_reply(screened_question.safe_text,
+            return finish(answer, True, True, 'model_answer')
+        return finish(_intent_failure_reply(screened_question.safe_text,
                                                using_document=using_document, reason=output.reason,
                                                pricing_context=pricing_context, safe_entries=previous.entries),
                            True, False, output.reason)
     except httpx.TimeoutException:
         if in_before_request:
             raise
-        return ReplyResult(FALLBACK_REPLY, True, False, 'provider_timeout')
+        return finish(FALLBACK_REPLY, True, False, 'provider_timeout')
     except (httpx.HTTPError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         if in_before_request:
             raise
-        return ReplyResult(FALLBACK_REPLY, True, False, 'provider_error')
+        return finish(FALLBACK_REPLY, True, False, 'provider_error')

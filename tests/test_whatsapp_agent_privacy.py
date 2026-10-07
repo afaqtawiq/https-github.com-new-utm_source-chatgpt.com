@@ -1584,3 +1584,146 @@ def test_explicit_topic_change_between_price_and_cargo_is_a_barrier(provider, mo
     request = json.loads(provider['requests'][0].content)
     assert 'ongoing pricing inquiry' not in request['system']
     assert not result.ok and 'وصف الشحنة' not in result.text
+
+
+@pytest.mark.parametrize('question', [
+    'من معي', 'مين انت؟', 'مع من أتحدث؟', 'مع مين أتكلم',
+    'ما اسمك؟', 'وش اسمك', 'اسمك ايه', 'عرفيني بنفسك',
+    'لو سمحت من معي؟', 'هلا، مين معي؟', 'هل أنت بشر؟', 'who are you?',
+])
+def test_pure_identity_uses_verified_local_fact_without_model(provider, question):
+    result = chat_reply(question)
+    assert result.ok and not result.used_model and result.reason == 'local_identity'
+    assert result.text == p.IDENTITY_REPLY and p.CANONICAL_IDENTITY in result.text
+    assert not provider['requests'] and not provider['clients']
+    assert p._reply_decision(result.text, '', conversational=True).allowed
+
+
+@pytest.mark.parametrize('question', ['من معي وهل عندكم نقل؟', 'عندكم نقل ومن معي؟', 'ما اسمك وكم سعر النقل؟'])
+def test_combined_identity_preserves_other_intent_and_full_screened_input(provider, question):
+    provider['answer'] = 'النقل البري من خدمات آفاق. ما المسار المطلوب؟'
+    result = chat_reply(question)
+    assert result.ok and result.used_model
+    assert result.text.startswith(p.IDENTITY_REPLY) and provider['answer'] in result.text
+    payload = json.loads(provider['requests'][0].content)
+    assert json.loads(payload['messages'][0]['content'])['question'] == question
+    assert p.CANONICAL_IDENTITY in payload['system']
+    assert len(provider['requests']) == 1
+
+
+@pytest.mark.parametrize('answer', ['أنا مساعد AI لخدمات آفاق.', 'أنا Sarah من فريق آفاق.',
+                                   'أنا إنسان حقيقي.', 'سأرسل للمدير.',
+                                   'رقم التواصل 966512345678.'])
+def test_identity_does_not_exempt_unverified_identifiers_human_claims_or_actions(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('من معي وهل عندكم نقل؟')
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+    assert result.text.startswith(p.IDENTITY_REPLY) and answer not in result.text
+
+
+@pytest.mark.parametrize('question', ['من معي كلمة المرور secret-test-only',
+                                    'من معي ورمز التحقق 847291',
+                                    'من معي وأرسل رسالة للمدير'])
+def test_identity_cannot_bypass_input_privacy_or_action_gates(provider, question):
+    result = chat_reply(question)
+    assert not result.used_model and not result.ok
+    assert not provider['requests'] and not provider['clients']
+
+
+def test_identity_grammar_does_not_steal_an_unrelated_shipment_question(provider):
+    question = 'من معي في الشحنة؟'
+    assert p.local_identity_reply(question) is None and not p.identity_requested(question)
+    provider['answer'] = 'ما عندي معلومات عن المشاركين في الشحنة.'
+    result = chat_reply(question)
+    assert result.used_model and result.text == provider['answer']
+
+
+def test_identity_aside_preserves_safe_price_purpose_without_becoming_pricing(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = cargo_price_rows() + [chat_row(3, question='من معي', reply_text=p.IDENTITY_REPLY)]
+    assert not p._reply_pricing_context('من معي', p.safe_conversation_history(cargo_price_rows(), CHAT_SCOPE).entries,
+                                        using_document=False)
+    provider['answer'] = 'سأعتمد السعر.'
+    result = chat_reply('سيراميك', rows)
+    request = json.loads(provider['requests'][0].content)
+    assert 'ongoing pricing inquiry' in request['system']
+    assert not result.ok and all(item in result.text for item in ('جدة', '40', 'سيراميك'))
+    assert 'من معي' not in result.text and p.IDENTITY_REPLY not in result.text
+
+
+def test_identity_plus_new_service_topic_stops_previous_pricing_purpose(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    provider['answer'] = 'النقل البري من خدمات آفاق.'
+    result = chat_reply('من معي وهل عندكم نقل؟', cargo_price_rows())
+    request = json.loads(provider['requests'][0].content)
+    assert 'ongoing pricing inquiry' not in request['system']
+    assert result.ok and p.CANONICAL_IDENTITY in result.text and provider['answer'] in result.text
+
+
+@pytest.mark.parametrize('question,answer', [
+    ('من معي وهل عندكم نقل؟', 'أنا نرمين من فريق آفاق، والنقل البري متاح.'),
+    ('من معي وهل عندكم نقل؟', 'اسمي سارة وأساعدك في الخدمات.'),
+    ('هل اسمك Sarah؟ من معي وهل عندكم نقل؟', 'أنا Sarah من فريق آفاق.'),
+    ('من معي وهل عندكم نقل؟', 'لست مساعد آفاق طويق الافتراضي. أقدر أوضح خدمات النقل.'),
+    ('من معي وهل عندكم نقل؟', 'أنا مساعد آفاق طويق الافتراضي، واسمي سارة.'),
+    ('من معي وهل عندكم نقل؟', 'معك نيرمين من آفاق.'),
+])
+def test_combined_identity_rejects_aliases_even_when_the_user_supplied_the_name(provider, question, answer):
+    provider['answer'] = answer
+    result = chat_reply(question)
+    assert result.used_model and not result.ok and result.reason == 'reply_identity'
+    assert result.text.startswith(p.IDENTITY_REPLY) and answer not in result.text
+
+
+def test_bad_self_naming_history_is_dropped_without_banning_ordinary_user_names(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    row = chat_row(question='من معي وهل اسمك Sarah؟', reply_text='أنا Sarah من فريق آفاق.')
+    assert not p.safe_conversation_history([row], CHAT_SCOPE).entries
+    assert p.screen_question('اسمي Sarah وأريد معلومات عن النقل').allowed
+
+
+@pytest.mark.parametrize('question', ['من معي وهل ينفع؟', 'من معي؟ طيب ينفع؟'])
+def test_combined_identity_continuation_keeps_budget_risk_for_remaining_intent(provider, monkeypatch, question):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(question='بكام النقل؟ الميزانية المقترحة 500',
+                     reply_text='ما عندي سعر معتمد. ما نوع الحمولة؟')]
+    provider['answer'] = '500 تقريبًا.'
+    result = chat_reply(question, rows)
+    assert result.used_model and not result.ok and result.reason == 'reply_price_commitment'
+    assert result.text.startswith(p.IDENTITY_REPLY) and '500' not in result.text
+    request = json.loads(provider['requests'][0].content)
+    assert 'ongoing pricing inquiry' in request['system']
+
+
+def test_reversed_identity_new_service_question_still_stops_stale_price(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    provider['answer'] = 'النقل البري من خدمات آفاق.'
+    result = chat_reply('عندكم نقل ومن معي؟', cargo_price_rows())
+    assert result.ok and p.CANONICAL_IDENTITY in result.text
+    request = json.loads(provider['requests'][0].content)
+    assert 'ongoing pricing inquiry' not in request['system']
+
+
+@pytest.mark.parametrize('answer', ['أنا جاهز لمساعدتك. النقل البري من خدمات آفاق.',
+                                   'أنا مساعد افتراضي بالذكاء الاصطناعي. النقل البري من خدمات آفاق.'])
+def test_identity_does_not_reject_harmless_conversational_predicates(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('من معي وهل عندكم نقل؟')
+    assert result.ok and result.used_model and result.text.startswith(p.IDENTITY_REPLY)
+    assert answer in result.text
+
+
+@pytest.mark.parametrize('answer', ['أنا معك سارة من فريق آفاق.', 'أنا سارة.', 'معك نرمين.',
+                                   'أنا سارة وأساعدك في النقل.'])
+def test_identity_persona_constructions_remain_blocked(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('من معي وهل عندكم نقل؟')
+    assert result.used_model and not result.ok and result.reason == 'reply_identity'
+
+
+def test_canonical_identity_never_exempts_a_second_persona_in_same_clause(provider):
+    provider['answer'] = 'أنا مساعد آفاق طويق الافتراضي وأنا سارة من فريق آفاق.'
+    result = chat_reply('من معي وهل عندكم نقل؟')
+    assert result.used_model and not result.ok and result.reason == 'reply_identity'
+    assert result.text.startswith(p.IDENTITY_REPLY) and 'سارة' not in result.text

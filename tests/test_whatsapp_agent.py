@@ -436,3 +436,63 @@ def test_new_routes_are_mfa_sensitive_with_safe_return_paths():
         response=asyncio.run(ns['enterprise_security_guard'](request,None))
         assert response.status_code==428
         assert json.loads(response.body)['step_up']=='/mfa/step-up?next=/whatsapp-assistant'
+
+
+@pytest.mark.parametrize('question', ['من معي', 'مع من أتحدث؟', 'وش اسمك', 'هل أنت بشر؟'])
+def test_identity_worker_path_never_reserves_or_calls_model(setup, monkeypatch, question):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Pure identity must not reserve model budget')
+    monkeypatch.setattr(store, 'reserve_model', forbidden)
+    result = agent.accept_inbound(payload(1, question)); assert tick()
+    job = store.get_job(result['job_id'])
+    assert job['status'] == 'sent' and job['reply_text'] == privacy.IDENTITY_REPLY
+    assert job['model_started_at'] is None and not setup['model_calls']
+    assert len(setup['sends']) == 1 and setup['sends'][0][0] == OWNER
+
+
+def test_identity_succeeds_locally_at_exhausted_budget_without_reset(setup):
+    for number in range(10):
+        result = agent.accept_inbound(payload(number, 'ما الخدمات المتاحة؟'))
+        job = store.claim_job(account_id=ACCOUNT)
+        assert job['id'] == result['job_id']
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None, status='none')
+        assert store.reserve_model(job['id'], job['lease_token'])
+        store.prepare_reply(job['id'], job['lease_token'], terminal_status='uncertain')
+    identity = agent.accept_inbound(payload(20, 'من معي')); assert tick()
+    job = store.get_job(identity['job_id'])
+    assert job['status'] == 'sent' and job['model_started_at'] is None
+    assert job['reply_text'] == privacy.IDENTITY_REPLY
+    ordinary = agent.accept_inbound(payload(21, 'كيف أجهز شحنة؟')); assert tick()
+    blocked = store.get_job(ordinary['job_id'])
+    assert blocked['status'] == 'blocked'
+    assert blocked['diagnostics']['reason'] == 'daily_model_budget_exhausted'
+    assert not setup['model_calls'] and len(setup['sends']) == 1
+
+
+def test_identity_after_pdf_does_not_inherit_document_or_model_gate(setup):
+    agent.accept_inbound(payload(1, 'لخص محتوى المستند', True)); assert tick()
+    identity = agent.accept_inbound(payload(2, 'مع من أتحدث؟')); assert tick()
+    job = store.get_job(identity['job_id'])
+    assert job['status'] == 'sent' and job['reply_text'] == privacy.IDENTITY_REPLY
+    assert job['model_started_at'] is None and job['document_sha256'] is None
+    assert job['context_source_job_id'] is None and len(setup['model_calls']) == 1
+
+
+def test_combined_identity_worker_uses_guarded_model_for_other_intent(setup, monkeypatch):
+    bodies = []
+    real_client = httpx.AsyncClient
+    def response(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={'stop_reason':'end_turn','content':[{'type':'text','text':'النقل البري من خدمات آفاق.'}]})
+    monkeypatch.setenv('ANTHROPIC_API_KEY','synthetic-test-only')
+    monkeypatch.setenv('COMMAND_AI_MODEL','claude-test')
+    monkeypatch.setattr(privacy,'understand',REAL_UNDERSTAND)
+    monkeypatch.setattr(privacy.httpx,'AsyncClient',lambda **kwargs:real_client(transport=httpx.MockTransport(response),**kwargs))
+    question='من معي وهل عندكم نقل؟'
+    result=agent.accept_inbound(payload(1,question));assert tick()
+    job=store.get_job(result['job_id'])
+    assert job['status']=='sent' and job['model_started_at'] is not None
+    assert job['diagnostics']['model_success'] is True
+    assert privacy.CANONICAL_IDENTITY in job['reply_text'] and 'النقل البري' in job['reply_text']
+    assert len(bodies)==1 and json.loads(bodies[0]['messages'][0]['content'])['question']==question
+    assert len(setup['sends'])==1 and setup['sends'][0][0]==OWNER

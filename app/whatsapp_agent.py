@@ -250,6 +250,8 @@ async def processing(job):
         reply = 'وصل ملف PDF، وأوقفته للمراجعة المحلية قبل مشاركته مع نموذج الفهم. لم أعتمد محتواه أو أسجل منه أي حركة.'
     elif document_status == 'unavailable':
         reply = 'وصلتني بيانات المرفق، لكن لم أتمكن من قراءة محتواه في هذا المسار. لم أستنتج منه معلومات؛ يلزم مراجعته مباشرة.'
+    elif not data.get('attachments') and (identity_reply := privacy.local_identity_reply(data['question'])):
+        reply = identity_reply
     elif not data.get('attachments') and data.get('question_kind') in ('greeting','thanks','ready'):
         reply = {'greeting':privacy.GREETING_REPLY,'thanks':privacy.THANKS_REPLY,
                  'ready':privacy.READY_REPLY}[data['question_kind']]
