@@ -1145,7 +1145,7 @@ def test_noncommittal_price_limitations_and_equipment_clarification_reach_user(p
 def test_actual_numeric_or_implied_quotes_and_commitments_stay_blocked(provider, answer):
     provider['answer'] = answer
     result = chat_reply('أبغى أعرف سعر النقل وش تحتاجون من تفاصيل؟')
-    assert result.used_model and not result.ok and result.text == p.FALLBACK_REPLY
+    assert result.used_model and not result.ok and result.text == p.TRANSPORT_PRICE_REVIEW_REPLY
     assert result.reason == 'reply_price_commitment'
 
 
@@ -1185,7 +1185,7 @@ def test_bare_implied_quote_cannot_use_user_budget_as_rate_authority(provider, a
     provider['answer'] = answer
     result = chat_reply('بكام النقل؟ الميزانية المقترحة 500')
     assert result.used_model and not result.ok and result.reason == 'reply_price_commitment'
-    assert result.text == p.FALLBACK_REPLY
+    assert result.text == p.TRANSPORT_PRICE_REVIEW_REPLY
 
 
 def test_bare_quote_in_previous_pricing_exchange_is_dropped_whole(provider, monkeypatch):
@@ -1363,3 +1363,102 @@ def test_live_log_fallback_is_not_document_or_model_success(provider):
                                  reason=result.reason) == p.FALLBACK_REPLY
     assert p._no_live_log_fallback('هل تم استقبال شحنة اليوم', using_document=False,
                                  reason='reply_privacy') == p.FALLBACK_REPLY
+
+
+@pytest.mark.parametrize('question,answer', [
+    ('ممكن تعطينا اسعار نقل', 'لا يوجد لدي سعر معتمد الآن. ما مدينة التحميل والوجهة ونوع الحمولة؟'),
+    ('ممكن تعطينا اسعار نقل', 'الأسعار تحتاج مراجعة حسب المسار والحمولة. من أين وإلى أين؟'),
+    ('ممكن نتعرف علي فريق عملكم', 'ما عندي قائمة موثقة بأسماء فريق العمل. أقدر أوضح الخدمات التي تقدمها آفاق.'),
+    ('ممكن نتعرف علي فريق عملكم', 'لا أملك معلومات مؤكدة عن أسماء الفريق أو وسيلة التواصل معهم.'),
+    ('كم سعر التخليص لحاوية40 قدم', 'ما عندي سعر تخليص معتمد لحاوية 40 قدم. ما المنفذ ونوع البضاعة؟'),
+    ('كم سعر التخليص لحاوية40 قدم', 'حاوية 40 قدم؛ ما المنفذ ونوع البضاعة قبل تحديد السعر؟'),
+    ('كم سعر نقل حمولة 20 طن', 'الحمولة 20 طن. ما مدينة التحميل والوجهة؟'),
+    ('كم سعر نقل 12 صندوق', 'عدد الحمولة 12 صندوق. ما المسار المطلوب؟'),
+])
+def test_price_and_team_information_are_not_unauthorized_commitments(provider, question, answer):
+    provider['answer'] = answer
+    result = chat_reply(question)
+    assert result.ok and result.used_model and result.text == answer
+    assert result.reason == 'model_answer' and len(provider['requests']) == 1
+
+
+@pytest.mark.parametrize('answer', [
+    'سأحصل لك على وسيلة التواصل مع المدير.',
+    'سأجد لك وسيلة التواصل مع المدير.',
+    'سأعطيك وسيلة التواصل مع المدير.',
+    'سنوفر لكم وسيلة التواصل مع المدير.',
+    'وجدت طريقة التواصل مع المدير.',
+    'لا أملك معلومات عن الفريق، لكن سأعطيك وسيلة التواصل معهم.',
+    'لا توجد لدي معلومات عن الفريق، لكن سأرسل للمدير.',
+])
+def test_team_information_never_authorizes_contact_or_disclosure_promises(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('ممكن نتعرف علي فريق عملكم')
+    assert result.used_model and not result.ok
+    assert result.reason.startswith('reply_action_')
+    assert result.text == p.TEAM_INFORMATION_REPLY
+
+
+@pytest.mark.parametrize('answer', [
+    'حاوية 40 قدم بسعر 500 ريال.', '40 ريال.',
+    'حاوية 40 قدم، السعر 500.', 'حاوية 40 قدم، السعر خمسمية.',
+    'حاوية 40 قدم، والسعر معتمد.', 'حاوية 40 قدم، النقل مجاني.',
+    'حاوية 40 قدم، الرسوم علينا.', 'حاوية 40 قدم بخصم 10%.',
+    'حاوية 40 قدم متاحة اليوم.', 'الحاوية 40 قدم جاهزة.',
+    'حاوية 45 قدم؛ ما المنفذ؟', 'حمولة 20 طن؛ ما المنفذ؟',
+    'السعر للحاوية 40 قدم نهائي.',
+])
+def test_grounded_dimensions_never_authorize_rates_or_status(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('كم سعر التخليص لحاوية40 قدم')
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+    assert result.text == p.CUSTOMS_PRICE_REVIEW_REPLY
+
+
+@pytest.mark.parametrize('question,answer', [
+    ('كم سعر النقل؟ الميزانية 500', '500 تقريبًا.'),
+    ('كم سعر النقل؟ الميزانية 500', 'الحمولة 500 طن.'),
+    ('كم سعر نقل 20 طن', 'السعر 20 ريال.'),
+    ('كم سعر نقل 20 طن', 'حمولة 20 طن متاحة اليوم.'),
+    ('كم سعر نقل 12 صندوق', 'السعر 12.'),
+    ('كم سعر النقل يوم 2026-10-08', 'السعر 2026.'),
+])
+def test_quantities_dates_and_budgets_cannot_be_recast_as_money(provider, question, answer):
+    provider['answer'] = answer
+    result = chat_reply(question)
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+
+
+def test_intent_fallback_is_failure_and_does_not_disclose_team_data(provider):
+    provider['answer'] = 'سأتواصل مع المدير.'
+    result = chat_reply('ممكن نتعرف علي فريق عملكم')
+    assert result.used_model and not result.ok and result.text == p.TEAM_INFORMATION_REPLY
+    assert result.reason.startswith('reply_action_')
+    payload = json.loads(provider['requests'][0].content)
+    assert 'not a staff directory' in payload['system']
+    assert p._intent_failure_reply('كم سعر التخليص لحاوية40 قدم', using_document=True,
+                                  reason='reply_price_commitment') == p.FALLBACK_REPLY
+    assert p._intent_failure_reply('ممكن نتعرف علي فريق عملكم', using_document=False,
+                                  reason='reply_privacy') == p.FALLBACK_REPLY
+
+
+@pytest.mark.parametrize('question,answer', [
+    ('كم سعر نقل 20 صندوق', 'سعر النقل 20 صندوق.'),
+    ('كم سعر نقل 20 صندوق', '20 صندوق جاهز للشحن.'),
+    ('كم سعر التخليص لحاوية40 قدمًا', 'حاوية 40 قدمًا متاحة اليوم.'),
+    ('ممكن نتعرف علي فريق عملكم', 'وسيلة التواصل سأعطيك إياها لاحقًا.'),
+    ('ممكن نتعرف علي فريق عملكم', 'لا أستطيع أن أعطيك وسيلة التواصل، لكن سأجدها للمدير.'),
+])
+def test_measurement_and_contact_nouns_do_not_launder_positive_assertions(provider, question, answer):
+    provider['answer'] = answer
+    result = chat_reply(question)
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+
+
+def test_negated_contact_information_capability_remains_a_denial(provider):
+    provider['answer'] = 'لا أستطيع أن أعطيك وسيلة التواصل مع المدير.'
+    result = chat_reply('ممكن نتعرف علي فريق عملكم')
+    assert result.used_model and result.ok and result.text == provider['answer']

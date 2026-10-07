@@ -48,6 +48,9 @@ DRIVER_CLARIFY_REPLY = 'إضافة سائق تحتاج مراجعة الاسم �
 DOCUMENT_REQUIRED_REPLY = 'أحتاج مستندًا معتمدًا للإجابة عن تفاصيله.'
 FALLBACK_REPLY = 'ما قدرت أجهز إجابة موثوقة من المعلومات المتاحة الآن.'
 LIVE_LOG_UNAVAILABLE_REPLY = 'ما عندي وصول مباشر لسجل الشحنات، لذلك ما أقدر أحدد هل استُلمت شحنات اليوم أو ما المتاح حاليًا.'
+TRANSPORT_PRICE_REVIEW_REPLY = 'ما عندي سعر نقل معتمد أقدمه لك. من أي مدينة وإلى أين، وما نوع الحمولة؟'
+CUSTOMS_PRICE_REVIEW_REPLY = 'ما عندي سعر تخليص معتمد أقدمه لك. ما المنفذ ونوع البضاعة؟'
+TEAM_INFORMATION_REPLY = 'ما عندي أسماء أو تعريفات موثقة بأعضاء فريق آفاق. أقدر أوضح الخدمات المتاحة، لكن ما أقدر أعطيك معلومات أشخاص غير موثقة.'
 GREETING_REPLY = 'أهلًا! أنا معك، كيف أقدر أساعدك؟'
 READY_REPLY = 'جاهزة. تقدر تسألني عن محتوى مستند معتمد.'
 THANKS_REPLY = 'العفو، أنا معك.'
@@ -683,6 +686,9 @@ Use earlier text to resolve ordinary pronouns or preferences only when supported
 otherwise ask a brief clarification. There is no memory beyond supplied history.
 Do not claim a previous conversation occurred when history is empty.
 No prior chat beyond explicitly supplied screened history is available.
+The supplied company knowledge is not a staff directory. If asked about the
+team, do not invent names, titles or contact details. Explain that no verified
+roster is supplied and discuss only the documented services when relevant.
 
 document_text may contain optional approved source material as described below.
 Use it only when relevant; ordinary meta-chat does not need document facts.
@@ -715,7 +721,8 @@ _DENIED_CAPABILITY_PREFIX = (
 )
 _DENIED_CAPABILITY_VERB = (
     r'(?:اؤكد|اوكد|تاكيد|التاكيد|ارسل|ارسال|الارسال|اتواصل|التواصل|'
-    r'ابحث|البحث|استعلم|الاستعلام|اراجع|المراجعه|تحديث|التحديث|احفظ|الحفظ|اسجل|التسجيل)'
+    r'ابحث|البحث|استعلم|الاستعلام|اراجع|المراجعه|تحديث|التحديث|احفظ|الحفظ|اسجل|التسجيل|'
+    r'اعطي|احصل|اجد|اوفر|ازود)(?:ك|كم)?'
 )
 _DENIED_CAPABILITY_PREDICATE = re.compile(
     r'(?<!\w)' + _DENIED_CAPABILITY_PREFIX + r'\s*(?:ان\s*)?' + _DENIED_CAPABILITY_VERB + r'(?!\w)'
@@ -740,9 +747,15 @@ _SAME_CHAT_DETAIL_REQUEST = re.compile(
     r'(?:ارسل|ارسلي|ترسل|ترسلي|ترسلين)\s*(?:لي\s*)?'
     r'(?=(?:اسم\s*المدينه|مدينه\s*التحميل|مدينه\s*الوصول|الوجهه|نوع\s*المركبه|وزن\s*الحموله|تفاصيل\s*الحموله)(?!\w))'
 )
+_CONTACT_INFORMATION_ACTION = re.compile(
+    r'(?<!\w)[وف]?(?:(?:سا|سن|ا|ن|با|بن)(?:حصل|جد|عطي|وفر|زود)|'
+    r'حصلت|حصلنا|وجدت|وجدنا|اعطيت|اعطينا|وفرت|وفرنا)(?:ك|كم|لك|لكم|ه|ها|هم)?(?!\w)')
+_CONTACT_INFORMATION_NOUN = re.compile(r'(?<!\w)(?:وسيله|طريقه|قناه|وسائل|طرق|قنوات)\s*(?:ال)?تواصل(?!\w)')
 _LIVE_AVAILABILITY_ASSERTION = re.compile(
     r'(?:^|[.!؟?،؛;\n]|\b(?:لكن|ولكن)\s+|\s+و(?=الشحنات|شحنات|لا\s*توجد))\s*'
     r'(?:(?:نعم|اكيد)\s*)?(?:'
+    r'(?:حاويه|الحاويه|حاويات|الحموله|حموله)(?:\s*\d+\s*(?:قدم|طن|كجم))?'
+    r'\s*(?:(?:غير|مش|مو)\s*)?(?:متاحه|متوفره|جاهزه)(?!\w)|'
     r'(?:لدي|لدينا|عندي|عندنا)\s*(?:شحنات|شحنه|حموله)(?!\w)|'
     r'(?:الشحنات|شحناتنا|الشحنه)\s*(?:متاحه|متوفره|جاهزه|غير\s*(?:متاحه|متوفره))|'
     r'(?:لا\s*(?:توجد|يوجد|تتوفر)|ما\s*(?:عندي|عندنا|في|فيه)|ليس\s*(?:لدي|لدينا))'
@@ -761,6 +774,12 @@ def _capability_action_text(value: str) -> str:
     value = _DENIED_CAPABILITY_PREDICATE.sub('المعلومات غير متاحه', value)
     value = _NEGATED_KNOWLEDGE_PREDICATE.sub('المعلومات غير متاحه', value)
     value = _CONFIRMATION_PREREQUISITE.sub('تحتاج مراجعه', value)
+    if _CONTACT_INFORMATION_NOUN.search(value) and _CONTACT_INFORMATION_ACTION.search(value):
+        return value
+    # Describing an unavailable communication method is not contacting anyone.
+    # Replace only this noun phrase; actual sending/contact predicates remain.
+    value = re.sub(r'(?<!\w)(?:وسيله|طريقه|قناه|وسائل|طرق|قنوات)\s*(?:ال)?تواصل(?!\w)',
+                   'معلومات الاتصال', value)
     # These phrases are second-person guidance. Only the predicate is replaced;
     # a subsequent first-person promise or lookup remains untouched.
     value = _USER_CONTACT_GUIDANCE.sub(
@@ -796,8 +815,8 @@ _PRICE_STATUS_PATTERN = r'(?:معتمد|محدد|نهائي|ثابت|مؤكد|م
 _NEGATED_PRICE_ASSERTION = re.compile(
     r'(?i)(?:(?:ما\s*(?:عندي|عندنا|لدي|لدينا|في|فيه|اقدر)|'
     r'ليس\s*(?:عندي|لدينا|لدي)|لا\s*(?:يوجد|توجد|يتوفر|تتوفر|استطيع|اقدر|يمكنني|املك))'
-    r'(?:\s+(?:تحديد|تقديم|اعطاء|اعتماد|تاكيد|احدد|اعطيك|اوفر|اقدم|اوكد|اؤكد|لك|لي))*'
-    r'\s*' + _PRICE_NOUN_PATTERN + r'(?:\s+' + _PRICE_STATUS_PATTERN + r')?|'
+    r'(?:\s+(?:لدي|لدينا|عندي|عندنا|تحديد|تقديم|اعطاء|اعتماد|تاكيد|احدد|اعطيك|اوفر|اقدم|اوكد|اؤكد|لك|لي))*'
+    r'\s*' + _PRICE_NOUN_PATTERN + r'(?:\s+(?:التخليص|تخليص|النقل|نقل))?(?:\s+' + _PRICE_STATUS_PATTERN + r')?|'
     + _PRICE_NOUN_PATTERN + r'\s*(?:غير|مش|مو|ليس)\s*' + _PRICE_STATUS_PATTERN + r')(?!\w)'
 )
 REPLY_REJECTION_REASONS = frozenset({
@@ -830,23 +849,42 @@ def _reply_pricing_context(question: str, entries: tuple[dict[str, str], ...], *
     return bool(latest and _pricing_question(latest['user']))
 
 
-def _price_commitment(value: str, *, pricing_context: bool = False) -> bool:
+_NONMONETARY_MEASUREMENT = re.compile(
+    r'(?<!\w)(?:[لب]?(?:ال)?حاويه\s*)?(?P<size>\d{1,6})\s*'
+    r'(?P<unit>قدم|قدما|ft|feet|foot|طن|اطنان|كجم|كيلوغرام|kg|ton|tons|'
+    r'كرتون|كراتين|صندوق|صناديق|حاويه|حاويات)(?!\w)', re.I)
+_MEASUREMENT_STATUS = re.compile(
+    _NONMONETARY_MEASUREMENT.pattern + r'\s*(?:غير\s*)?(?:متاح|متوفر|جاهز)(?:ه|ة|ه)?(?!\w)', re.I)
+
+
+def _price_commitment(value: str, *, pricing_context: bool = False, grounding: str = '') -> bool:
     """Allow ordinary pricing discussion; deny rates or an asserted approval.
 
     Amounts are never waived by negation. Clause-level limitations may explain
     that a price is unavailable, but cannot launder a later positive promise.
     """
     folded = _fold(value)
+    amount_text = folded
+    source = _fold(grounding)
+    # A source-grounded physical measurement/count is not a monetary quote. This
+    # exception removes only that measurement, never another number, a currency
+    # amount, a percentage, or an asserted price approval elsewhere in the reply.
+    if not _MONEY_OUTPUT.search(folded) and '%' not in folded:
+        dimensions = {(m['size'], m['unit']) for m in _NONMONETARY_MEASUREMENT.finditer(source)}
+        amount_text = _NONMONETARY_MEASUREMENT.sub(
+            lambda m: 'قياس الحموله' if (m['size'], m['unit']) in dimensions else m.group(), folded)
     # A user-stated budget is not an approved rate source. In the current rate
     # question only, do not offer even a bare/spelled amount. Safe limitation
     # and vehicle/load clarification can be phrased without a numeric quote.
-    if pricing_context and _AMOUNT_WORD.search(folded):
+    if pricing_context and _AMOUNT_WORD.search(amount_text):
         return True
-    if _AMOUNT_WORD.search(folded) and (_PRICE_TERMS.search(folded) or _MONEY_OUTPUT.search(folded) or '%' in folded):
+    if _AMOUNT_WORD.search(amount_text) and (_PRICE_TERMS.search(folded) or _MONEY_OUTPUT.search(folded) or '%' in folded):
         return True
     # Remove ONLY the bounded negative price predicate, never the entire
     # clause. A later free/fee/approval assertion remains fully visible.
     remaining = _NEGATED_PRICE_ASSERTION.sub(' ', folded)
+    if re.search(_PRICE_NOUN_PATTERN + r'\s*(?:النقل|التخليص)?\s*(?:هو|هي|=|:)?\s*\d', remaining):
+        return True
     price_context = bool(_PRICE_TERMS.search(folded))
     for clause in re.split(r'[.!؟?،؛;\n]|\b(?:لكن|ولكن|بس|but|however)\b', remaining):
         if _FREE_OR_ASSUMED_FEES.search(clause):
@@ -980,6 +1018,22 @@ def _no_live_log_fallback(question: str, *, using_document: bool, reason: str) -
     return FALLBACK_REPLY
 
 
+def _intent_failure_reply(question: str, *, using_document: bool, reason: str) -> str:
+    """Useful known limitations without presenting a failed generation as success."""
+    if using_document or reason in {'reply_privacy', 'reply_opaque', 'reply_instruction'}:
+        return FALLBACK_REPLY
+    value = _fold(question)
+    if _pricing_question(value):
+        if re.search(r'تخليص|جمرك', value):
+            return CUSTOMS_PRICE_REVIEW_REPLY
+        if re.search(r'نقل|شحن|حموله|بكام|بكم', value):
+            return TRANSPORT_PRICE_REVIEW_REPLY
+        return 'ما عندي سعر معتمد لهذه الخدمة. ما تفاصيل الخدمة المطلوبة؟'
+    if re.search(r'فريق\s*(?:عمل|العمل|كم)|فريقكم|اعضاء\s*الفريق|اسماء\s*(?:الفريق|الموظفين)', value):
+        return TEAM_INFORMATION_REPLY
+    return _no_live_log_fallback(question, using_document=using_document, reason=reason)
+
+
 def _descriptive_only(value: str, document: str, *, conversational: bool = False) -> bool:
     folded = _fold(value)
     if conversational:
@@ -1004,11 +1058,12 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
         reason = {'instruction_content': 'reply_instruction', 'opaque_content': 'reply_opaque',
                   'unsupported_text_encoding': 'reply_format'}.get(risk, 'reply_privacy')
         return ScreenDecision(False, reason=reason, kind='reply')
-    if _price_commitment(cleaned, pricing_context=pricing_context):
+    if _price_commitment(cleaned, pricing_context=pricing_context, grounding=document):
         return ScreenDecision(False, reason='reply_price_commitment', kind='reply')
     action_text = _NEGATED_PRICE_ASSERTION.sub('المعلومات غير متاحه', _fold(cleaned))
     if conversational:
-        if _LIVE_AVAILABILITY_ASSERTION.search(_fold(cleaned)):
+        if (_LIVE_AVAILABILITY_ASSERTION.search(_fold(cleaned))
+                or _MEASUREMENT_STATUS.search(_fold(cleaned))):
             return ScreenDecision(False, reason='reply_action_live_status', kind='reply')
         action_text = _capability_action_text(action_text)
         if _ONWARD_ACTION_INTENT.search(action_text):
@@ -1240,8 +1295,10 @@ source when necessary. Never claim that an absent document was read.'''
     if pricing_context:
         system += '''\nThis is an ongoing pricing inquiry, but NO APPROVED RATE SOURCE
 is available. A number supplied by the user or earlier conversation is not an
-approved quote. Give a brief no-rate limitation or relevant vehicle/load
-clarification without offering any numeric or spelled-out amount.'''
+approved quote. Give a brief no-rate limitation and ask only for relevant missing
+route, cargo, vehicle or port details. Do not offer any numeric or spelled-out
+monetary amount. An explicitly supplied container size may be acknowledged as a
+physical dimension only; it never authorizes a price or an approval.'''
 
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     model = os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5').strip()
@@ -1297,7 +1354,7 @@ clarification without offering any numeric or spelled-out amount.'''
             return ReplyResult(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
         if answer:
             return ReplyResult(answer, True, True, 'model_answer')
-        return ReplyResult(_no_live_log_fallback(screened_question.safe_text,
+        return ReplyResult(_intent_failure_reply(screened_question.safe_text,
                                                using_document=using_document, reason=output.reason),
                            True, False, output.reason)
     except httpx.TimeoutException:
