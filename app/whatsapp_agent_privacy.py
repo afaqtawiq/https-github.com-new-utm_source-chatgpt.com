@@ -751,6 +751,10 @@ _CONTACT_INFORMATION_ACTION = re.compile(
     r'(?<!\w)[وف]?(?:(?:سا|سن|ا|ن|با|بن)(?:حصل|جد|عطي|وفر|زود)|'
     r'حصلت|حصلنا|وجدت|وجدنا|اعطيت|اعطينا|وفرت|وفرنا)(?:ك|كم|لك|لكم|ه|ها|هم)?(?!\w)')
 _CONTACT_INFORMATION_NOUN = re.compile(r'(?<!\w)(?:وسيله|طريقه|قناه|وسائل|طرق|قنوات)\s*(?:ال)?تواصل(?!\w)')
+_NOMINAL_PROCESS = re.compile(
+    r'(?P<boundary>^|[.!؟?،؛;\n])\s*[وف]?(?:اعتماد|تاكيد|التواصل|الحجز|التسجيل|الارسال)'
+    r'(?=(?:\s+[\u0621-\u064a]+){1,8}\s+(?:يتطلب|تتطلب|يحتاج|تحتاج|يساعد|تساعد|'
+    r'يتوقف|تتوقف|قد\s*(?:يوفر|توفر|يساعد|تساعد))(?!\w))')
 _LIVE_AVAILABILITY_ASSERTION = re.compile(
     r'(?:^|[.!؟?،؛;\n]|\b(?:لكن|ولكن)\s+|\s+و(?=الشحنات|شحنات|لا\s*توجد))\s*'
     r'(?:(?:نعم|اكيد)\s*)?(?:'
@@ -771,6 +775,9 @@ def _capability_action_text(value: str) -> str:
     """
     if any(char in value for char in ('"', "'", '«', '»', '“', '”', '‘', '’', '`')):
         return value
+    # A nominal subject explaining a prerequisite is not an actor's approval
+    # or promise. Replace only the noun; later actions and claims stay visible.
+    value = _NOMINAL_PROCESS.sub(lambda match: match['boundary'] + 'الاجراء', value)
     value = _DENIED_CAPABILITY_PREDICATE.sub('المعلومات غير متاحه', value)
     value = _NEGATED_KNOWLEDGE_PREDICATE.sub('المعلومات غير متاحه', value)
     value = _CONFIRMATION_PREREQUISITE.sub('تحتاج مراجعه', value)
@@ -841,12 +848,35 @@ def _reply_pricing_context(question: str, entries: tuple[dict[str, str], ...], *
         return True
     if using_document:
         return False
-    folded = _fold(question)
-    if (len(folded) > 160 or len(folded.split()) > 12 or _META_CONVERSATION.search(folded)
-            or re.search(r'(?<!\w)(?:العدد|عدد|الكميه|كميه|الوزن|وزن|اللون|لون|جمع|حاصل|count|quantity)(?!\w)', folded)):
+    if not _price_detail_continuation(question):
         return False
-    latest = next((entry for entry in reversed(entries) if set(entry) == {'user', 'assistant'}), None)
-    return bool(latest and _pricing_question(latest['user']))
+    for entry in reversed(entries[-MAX_CONVERSATION_EXCHANGES:]):
+        if set(entry) != {'user', 'assistant'}:
+            return False
+        if _pricing_question(entry['user']):
+            return True
+        if not _price_detail_continuation(entry['user']):
+            return False
+    return False
+
+
+def _price_detail_continuation(value: str) -> bool:
+    """Short screened cargo/route answers may retain purpose; new topics stop it."""
+    folded = _fold(value)
+    if (len(folded) > 160 or len(folded.split()) > 12 or _META_CONVERSATION.search(folded)
+            or re.search(r'فريق|موظف|مدير|مستند|ملف|فاتوره|pdf|موضوع\s*(?:اخر|جديد)|'
+                         r'غير\s*الموضوع|طقس|مباراه|مطعم|صحه|دواء|حساب|كلمه\s*مرور|'
+                         r'(?<!\w)(?:جمع|حاصل|اللون|count|quantity)(?!\w)', folded)):
+        return False
+    if re.fullmatch(r'(?:(?:طيب|تمام|ايوه|ينفع|موافق|نعم|لا|ممكن|هل|كده)\s*)+', folded.strip(' ؟?!.')):
+        return True
+    if _safe_route_excerpt(value):
+        return True
+    # New information questions are not silently treated as cargo answers.
+    if re.search(r'(?<!\w)(?:كم|ما|ماهي|ماهو|من|كيف|لماذا|ليش|هل)(?!\w)', folded):
+        return bool(re.search(r'(?:حاويه|حموله|بضاعه|نقل|شحن|طن|قدم)', folded)
+                    and not re.search(r'^(?:كم|ما|ماهي|ماهو|كيف|لماذا|ليش|هل)\b', folded))
+    return True
 
 
 _NONMONETARY_MEASUREMENT = re.compile(
@@ -1018,11 +1048,46 @@ def _no_live_log_fallback(question: str, *, using_document: bool, reason: str) -
     return FALLBACK_REPLY
 
 
-def _intent_failure_reply(question: str, *, using_document: bool, reason: str) -> str:
+def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
+                          pricing_context: bool = False,
+                          safe_entries: tuple[dict[str, str], ...] = ()) -> str:
     """Useful known limitations without presenting a failed generation as success."""
     if using_document or reason in {'reply_privacy', 'reply_opaque', 'reply_instruction'}:
         return FALLBACK_REPLY
     value = _fold(question)
+    if pricing_context and not _pricing_question(value) and _price_detail_continuation(question):
+        # Echo only bounded, independently screened user details, never a model
+        # rejection or an assistant's claim. History has already passed scope,
+        # age and whole-pair privacy checks. No extracted document enters here.
+        details = []
+        route = ''
+        for entry in safe_entries[-MAX_CONVERSATION_EXCHANGES:]:
+            if set(entry) != {'user', 'assistant'}:
+                continue
+            text = entry['user']
+            if _pricing_question(text):
+                details = []
+                route = _safe_route_excerpt(text)
+                continue
+            if not _price_detail_continuation(text):
+                details, route = [], ''
+                continue
+            route = _safe_route_excerpt(text) or route
+            if _safe_detail_excerpt(text):
+                details.append(text)
+        if _safe_detail_excerpt(question):
+            details.append(question)
+        route = _safe_route_excerpt(question) or route
+        details = list(dict.fromkeys(details))[-2:]
+        if route and not any(_safe_route_excerpt(detail) for detail in details):
+            details.insert(0, route)
+        if details:
+            summary = '؛ '.join(details)
+            missing = ('ما مدينتا التحميل والوصول؟' if not re.search(r'من\s+.+\s+(?:الي|الى)\s+', _fold(summary))
+                       else 'كم وزن الحمولة؟')
+            if re.search(r'\d+\s*(?:طن|كجم|كيلوغرام|kg)', _fold(summary)):
+                missing = 'هل هناك تفاصيل أخرى عن التحميل والتفريغ؟'
+            return 'فهمت وصف الشحنة: «' + summary + '». ما عندي سعر معتمد أقدمه لك. ' + missing
     if _pricing_question(value):
         if re.search(r'تخليص|جمرك', value):
             return CUSTOMS_PRICE_REVIEW_REPLY
@@ -1032,6 +1097,26 @@ def _intent_failure_reply(question: str, *, using_document: bool, reason: str) -
     if re.search(r'فريق\s*(?:عمل|العمل|كم)|فريقكم|اعضاء\s*الفريق|اسماء\s*(?:الفريق|الموظفين)', value):
         return TEAM_INFORMATION_REPLY
     return _no_live_log_fallback(question, using_document=using_document, reason=reason)
+
+
+def _safe_detail_excerpt(text: str) -> bool:
+    if len(text) > 120 or not screen_question(text).allowed:
+        return False
+    folded = _fold(text)
+    if re.fullmatch(r'(?:(?:طيب|تمام|ايوه|ينفع|موافق|نعم|لا|ممكن)\s*)+', folded) or re.search(r'[؟?]', text):
+        return False
+    return not (_MONEY_OUTPUT.search(folded) or _AMOUNT_WORD.search(
+        _NONMONETARY_MEASUREMENT.sub('قياس', folded)))
+
+
+def _safe_route_excerpt(text: str) -> str:
+    if not screen_question(text).allowed:
+        return ''
+    match = re.search(r'\bمن\s+([\u0621-\u064a ]{2,40}?)\s+(?:إلى|الي|الى)\s+'
+                      r'([\u0621-\u064a ]{2,40}?)(?=\s+(?:كم|بكم|وش|ما|السعر|سعر|التكلفة|التكلفه)\b|[؟?.،]|$)', text)
+    if not match or any(len(part.split()) > 3 for part in match.groups()):
+        return ''
+    return 'من ' + match[1].strip() + ' إلى ' + match[2].strip()
 
 
 def _descriptive_only(value: str, document: str, *, conversational: bool = False) -> bool:
@@ -1355,7 +1440,8 @@ physical dimension only; it never authorizes a price or an approval.'''
         if answer:
             return ReplyResult(answer, True, True, 'model_answer')
         return ReplyResult(_intent_failure_reply(screened_question.safe_text,
-                                               using_document=using_document, reason=output.reason),
+                                               using_document=using_document, reason=output.reason,
+                                               pricing_context=pricing_context, safe_entries=previous.entries),
                            True, False, output.reason)
     except httpx.TimeoutException:
         if in_before_request:

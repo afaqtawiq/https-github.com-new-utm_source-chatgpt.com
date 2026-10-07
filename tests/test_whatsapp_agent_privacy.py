@@ -1462,3 +1462,125 @@ def test_negated_contact_information_capability_remains_a_denial(provider):
     provider['answer'] = 'لا أستطيع أن أعطيك وسيلة التواصل مع المدير.'
     result = chat_reply('ممكن نتعرف علي فريق عملكم')
     assert result.used_model and result.ok and result.text == provider['answer']
+
+
+@pytest.mark.parametrize('answer', [
+    'اعتماد السعر يتطلب مراجعة التفاصيل من الفريق المختص.',
+    'تأكيد الوزن يساعد في توضيح تفاصيل الحمولة.',
+    'التواصل مع فريق النقل قد يوفر لك المعلومات المطلوبة.',
+    'الحجز المسبق يحتاج مراجعة التفاصيل.',
+])
+def test_nominal_process_subjects_are_not_actor_commitments(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('سيراميك')
+    assert result.ok and result.used_model and result.text == answer
+
+
+@pytest.mark.parametrize('answer', [
+    'سأقدم اعتماد السعر الذي يحتاج مراجعة.',
+    'اعتماد السعر يتطلب مراجعة، لكن سأعتمد السعر.',
+    'التواصل مع الفريق قد يوفر التفاصيل. سأتواصل مع المدير.',
+    'تأكيد الوزن يساعد في التوضيح. سأحجز النقل.',
+    'اعتماد السعر يتطلب مراجعة. السعر 500 ريال.',
+    'الحجز المسبق يحتاج مراجعة. حجزت النقل.',
+    'التواصل مع فريق النقل قد يوفر التفاصيل، وسأرسل الرسالة.',
+])
+def test_nominal_process_never_exempts_actual_actor_or_price_tail(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('سيراميك')
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+
+
+def cargo_price_rows():
+    return [
+        chat_row(1, question='النقل من جدة الي الرياض كم السعر',
+                 reply_text='ما عندي سعر معتمد. ما نوع البضاعة وحجم الشحنة؟'),
+        chat_row(2, question='حاوية40قدم',
+                 reply_text='ما عندي تسعيرة معتمدة لحاوية 40 قدم. ما نوع البضاعة؟'),
+    ]
+
+
+def test_full_price_container_cargo_flow_retains_purpose_and_scoped_facts(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    provider['answer'] = 'تمام، البضاعة سيراميك في حاوية 40 قدم من جدة إلى الرياض. كم وزن البضاعة؟'
+    result = chat_reply('سيراميك', cargo_price_rows())
+    assert result.ok and result.used_model and result.text == provider['answer']
+    request = json.loads(provider['requests'][0].content)
+    payload = json.loads(request['messages'][0]['content'])
+    assert 'ongoing pricing inquiry' in request['system']
+    assert len(payload['history']) == 2 and payload['question'] == 'سيراميك'
+    assert 'جدة' in payload['history'][0]['user'] and '40' in payload['history'][1]['user']
+    assert all(set(row) == {'user', 'assistant'} for row in payload['history'])
+
+
+def test_failed_cargo_generation_gets_grounded_useful_clarification_not_success(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    provider['answer'] = 'سأعتمد السعر وأرسل العرض.'
+    result = chat_reply('سيراميك', cargo_price_rows())
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+    assert all(detail in result.text for detail in ('جدة', 'الرياض', '40', 'سيراميك', 'وزن'))
+    assert 'سعر معتمد' in result.text and provider['answer'] not in result.text
+    assert 'مدينتا' not in result.text
+
+
+@pytest.mark.parametrize('question', ['طيب ينفع؟', 'سيراميك', 'سيراميك؟', 'من الرياض إلى جدة'])
+@pytest.mark.parametrize('answer', ['500 تقريبًا.', 'السعر 500 ريال.'])
+def test_price_purpose_survives_details_without_promoting_budget_to_quote(provider, monkeypatch, question, answer):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='بكام النقل؟ الميزانية المقترحة 500',
+                     reply_text='ما عندي سعر معتمد. ما نوع الحمولة؟'),
+            chat_row(2, question='حاوية40قدم', reply_text='ما نوع البضاعة في حاوية 40 قدم؟'),
+            chat_row(3, question='سيراميك', reply_text='كم وزن الحمولة؟')]
+    provider['answer'] = answer
+    result = chat_reply(question, rows)
+    assert result.used_model and not result.ok and result.reason == 'reply_price_commitment'
+    assert '500' not in result.text
+    request = json.loads(provider['requests'][0].content)
+    assert 'ongoing pricing inquiry' in request['system']
+
+
+@pytest.mark.parametrize('topic', [
+    'ممكن نتعرف علي فريق عملكم', 'عايزك تتواصلي تواصل عادي',
+    'ما لون الملف؟', 'موضوع جديد عن الطقس', 'كم حاصل جمع العدد؟',
+])
+def test_new_topic_stops_pricing_purpose_and_contextual_failure_echo(provider, monkeypatch, topic):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    provider['answer'] = 'سأرسل رسالة للمدير.'
+    result = chat_reply(topic, cargo_price_rows())
+    assert result.used_model and not result.ok
+    request = json.loads(provider['requests'][0].content)
+    assert 'ongoing pricing inquiry' not in request['system']
+    assert all(detail not in result.text for detail in ('جدة', '40', 'وصف الشحنة'))
+
+
+@pytest.mark.parametrize('change', ['scope', 'expired', 'private'])
+def test_invalid_history_cannot_supply_pricing_purpose_or_fallback_details(provider, monkeypatch, change):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = cargo_price_rows()
+    if change == 'scope':
+        for row in rows: row['conversation_id'] = 'another-thread'
+    elif change == 'expired':
+        for row in rows:
+            row['created_at'] = row['completed_at'] = (CHAT_NOW - timedelta(hours=25)).isoformat()
+    else:
+        for row in rows: row['question'] += ' كلمة المرور secret-test-only'
+    provider['answer'] = 'سأرسل رسالة للمدير.'
+    result = chat_reply('سيراميك', rows)
+    request = json.loads(provider['requests'][0].content)
+    payload = json.loads(request['messages'][0]['content'])
+    assert payload['history'] == [] and 'ongoing pricing inquiry' not in request['system']
+    assert not result.ok and result.text == p.FALLBACK_REPLY
+    assert 'secret-test-only' not in json.dumps(payload)
+
+
+def test_explicit_topic_change_between_price_and_cargo_is_a_barrier(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = cargo_price_rows() + [chat_row(3, question='موضوع جديد عن فريق العمل',
+                                         reply_text='ما عندي قائمة موثقة بأسماء الفريق.')]
+    provider['answer'] = 'سأرسل رسالة للمدير.'
+    result = chat_reply('سيراميك', rows)
+    request = json.loads(provider['requests'][0].content)
+    assert 'ongoing pricing inquiry' not in request['system']
+    assert not result.ok and 'وصف الشحنة' not in result.text
