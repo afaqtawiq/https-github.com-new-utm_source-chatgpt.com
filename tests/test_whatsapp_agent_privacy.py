@@ -1727,3 +1727,37 @@ def test_canonical_identity_never_exempts_a_second_persona_in_same_clause(provid
     result = chat_reply('من معي وهل عندكم نقل؟')
     assert result.used_model and not result.ok and result.reason == 'reply_identity'
     assert result.text.startswith(p.IDENTITY_REPLY) and 'سارة' not in result.text
+
+
+@pytest.mark.parametrize('question',['كم عدد الكراتين','كم الكمية؟','وش وزنها','ما نوع البضاعة','وين البوابة','what is the cargo weight?','how many boxes?'])
+def test_implicit_document_attribute_queries_select_context(question):
+    assert p.screen_question(question).allowed
+    assert p.wants_recent_document(question)
+
+
+@pytest.mark.parametrize('question',['عندي شحنة جديدة كم عدد الكراتين','موضوع ثاني كم الوزن','كم سعر النقل','كم عدد موظفيكم','وش خدماتكم','track my shipment'])
+def test_new_topic_questions_do_not_implicitly_select_old_pdf(question):
+    assert not p.wants_recent_document(question)
+
+
+@pytest.mark.parametrize('question',['ما أفضل نوع شاحنة للسيراميك؟','ما معنى رمز البضاعة؟','what is the best box size?','ما الفرق بين الوزن الصافي والإجمالي؟'])
+def test_general_advice_and_definitions_do_not_select_document_implicitly(question):
+    assert not p.implicit_document_detail(question)
+    assert not p.wants_recent_document(question)
+
+
+def test_implicit_count_uses_newer_user_stated_quantity_without_pdf(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    row=chat_row(question='عندي شحنة جديدة 12 كرتون',reply_text='ما مدينة التحميل والوجهة؟')
+    provider['answer']='حسب وصفك، عدد الكراتين 12.'
+    result=chat_reply('كم عدد الكراتين؟',[row])
+    assert result.ok and result.used_model and result.text==provider['answer']
+
+
+@pytest.mark.parametrize('answer',['اللون أخضر','حسب وصفك، اللون أخضر'])
+def test_implicit_detail_cannot_invent_attribute_from_unrelated_history(provider,monkeypatch,answer):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    row=chat_row(question='عندي شحنة جديدة',reply_text='ما مدينة التحميل والوجهة؟')
+    provider['answer']=answer
+    result=chat_reply('ما لون الصناديق؟',[row])
+    assert not result.ok and result.reason=='unsupported_document_claim'

@@ -266,6 +266,17 @@ async def processing(job):
                     # A newer attachment is no longer eligible for reuse; never
                     # silently substitute an older approved document.
                     unread = {'id':latest['id'],'document_status':'quarantined'}
+            if not quoted and privacy.implicit_document_detail(data.get('question','')):
+                selected = context or unread
+                newer = [entry for entry in conversation_history
+                         if selected and entry['job_id'] > selected['id']]
+                # A full newer text window cannot prove the earlier document
+                # still owns the topic. Do not resurrect it when a topic-shift
+                # marker has fallen outside the retained conversation window.
+                if selected and (any(privacy.document_topic_shift(entry['question']) for entry in newer)
+                        or (len(conversation_history) >= store.MAX_EXCHANGES
+                            and len(newer) == len(conversation_history))):
+                    context,unread = None,None
             if (not quoted and context and data.get('question_kind') == 'conversation' and conversation_history
                     and conversation_history[-1]['job_id'] > context['id']):
                 context = None
