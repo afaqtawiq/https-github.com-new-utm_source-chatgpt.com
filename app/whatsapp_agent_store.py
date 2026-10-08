@@ -285,10 +285,19 @@ def _validate_acceptance(connection, account_id, settings):
 
 
 def _pdf_payload(payload):
+    """Recognize declared PDFs or the exact normalized absent-MIME file candidate.
+
+    Candidate metadata never proves PDF content: usable status, approved byte
+    digest and successful local parsing/checkpoint gates remain mandatory.
+    """
     attachments = payload.get("attachments")
-    return (type(payload.get("attachment_count")) is int and payload["attachment_count"] == 1 and
-            isinstance(attachments, list) and len(attachments) == 1 and
-            isinstance(attachments[0], dict) and attachments[0].get("mime") == "application/pdf")
+    if not (type(payload.get("attachment_count")) is int and payload["attachment_count"] == 1 and
+            isinstance(attachments, list) and len(attachments) == 1 and isinstance(attachments[0], dict)):
+        return False
+    attachment = attachments[0]
+    return ((attachment.get("mime") == "application/pdf" and attachment.get("kind") in (None, "file", "absent")) or
+            (attachment.get("mime") == "unknown" and attachment.get("kind") == "file" and
+             attachment.get("mime_status") == "absent"))
 
 
 def _followup_payload(payload):
@@ -656,20 +665,37 @@ def finish_send(job_id, send_token, *, status, provider_message_id=None,
 
 
 def recent_context(*, account_id, sender, conversation_id, before_job_id=None,
-                   max_age_seconds=86400, db_factory=None, now=None):
+                   message_id=None, max_age_seconds=86400, db_factory=None, now=None):
     """Return the latest original approved PDF, never an inherited followup.
 
     This separately approved document cache uses current sender/scope, current
     digest approval and the original read timestamp. A routine-mode transition
     does not discard a still-approved PDF solely because its generation changed.
+    An explicit message_id is an exact stored platform-ID lookup, never an event
+    alias or a fallback to latest. That quote path additionally requires a current
+    active target and same-generation source, like recent_attachment_outcome.
     """
+    current = _time(now)
     max_age_seconds = max(1, min(int(max_age_seconds), 86400))
-    args = [account_id, sender, conversation_id,
-            _stamp(_time(now) - timedelta(seconds=max_age_seconds)), _stamp(now)]
+    stamp, cutoff = _stamp(current), _stamp(current-timedelta(seconds=max_age_seconds))
+    args = [account_id, sender, conversation_id, cutoff, stamp]
     scope = ""
     if before_job_id is not None:
         scope = " AND j.id<%s"
         args.append(before_job_id)
+    if message_id is not None:
+        _identifier(message_id, "message_id")
+        if type(before_job_id) is not int or before_job_id <= 0:
+            raise ValueError("quoted context requires the current processing before_job_id")
+        scope += """ AND j.message_id=%s AND j.authorization_generation=s.authorization_generation
+            AND j.created_at>%s AND j.created_at<=%s
+            AND EXISTS (SELECT 1 FROM whatsapp_agent_jobs target WHERE target.id=%s
+              AND target.account_id=j.account_id AND target.sender=j.sender
+              AND target.conversation_id=j.conversation_id
+              AND target.authorization_generation=s.authorization_generation
+              AND target.status='processing' AND target.lease_until>%s
+              AND target.created_at>%s AND target.created_at<=%s)"""
+        args.extend((message_id, cutoff, stamp, before_job_id, stamp, cutoff, stamp))
     with (db_factory or database)() as connection:
         rows = connection.execute("""SELECT j.*,s.approved_sha256
             FROM whatsapp_agent_jobs j JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
@@ -706,7 +732,7 @@ def _original_attachment_predicate(connection):
 
 
 def recent_attachment_outcome(*, account_id, sender, conversation_id, before_job_id,
-                              max_age_seconds=86400, db_factory=None, now=None):
+                              message_id=None, max_age_seconds=86400, db_factory=None, now=None):
     """Return the latest original completed attachment checkpoint's ID/status.
 
     The active target and source must share the current enabled authorization
@@ -715,6 +741,8 @@ def recent_attachment_outcome(*, account_id, sender, conversation_id, before_job
     uncertain/failed/blocked reply must not resurrect an older successful PDF.
     Only metadata is selected; document content, captions and URLs never leave
     this helper. Callers must compare source IDs with their approved PDF cache.
+    A supplied message_id matches only that stored platform ID, never an event
+    alias, and an unknown quote returns None without falling back to latest.
     """
     for name, value in (("account_id", account_id), ("sender", sender),
                         ("conversation_id", conversation_id)):
@@ -724,6 +752,13 @@ def recent_attachment_outcome(*, account_id, sender, conversation_id, before_job
     current = _time(now)
     max_age_seconds = max(1, min(int(max_age_seconds), 86400))
     stamp, cutoff = _stamp(current), _stamp(current - timedelta(seconds=max_age_seconds))
+    args = [before_job_id, account_id, sender, conversation_id, stamp, cutoff, stamp,
+            cutoff, stamp, cutoff, stamp]
+    message_filter = ""
+    if message_id is not None:
+        _identifier(message_id, "message_id")
+        message_filter = " AND j.message_id=%s"
+        args.append(message_id)
     with (db_factory or database)() as connection:
         raw = connection.execute("""SELECT j.id,j.document_status
             FROM whatsapp_agent_jobs j
@@ -740,9 +775,7 @@ def recent_attachment_outcome(*, account_id, sender, conversation_id, before_job
               AND j.context_source_job_id IS NULL
               AND j.document_status IN ('ok','quarantined','unavailable')
               AND """ + _ELIGIBLE + " AND " + _original_attachment_predicate(connection) +
-            " ORDER BY j.id DESC LIMIT 1",
-            (before_job_id, account_id, sender, conversation_id, stamp, cutoff, stamp,
-             cutoff, stamp, cutoff, stamp)).fetchone()
+            message_filter + " ORDER BY j.id DESC LIMIT 1", tuple(args)).fetchone()
     return {"id": raw["id"], "document_status": raw["document_status"]} if raw else None
 
 

@@ -78,12 +78,13 @@ def attachment_snapshot(item, index, account):
                 media_id = inbox.canonical_media_identifier('https://zernio.com' + url, account)
         if inbox.canonical_media_identifier(url, account):
             kind = 'canonical_proxy'
-    mime = str(item.get('mimeType') or '').split(';',1)[0].strip().lower()
-    if mime not in ('application/pdf','image/jpeg','image/png','audio/ogg','audio/mpeg'):
-        mime = 'other'
-    return {'index':index,'mime':mime,'media_id':media_id,
+    classification = inbox.pdf_attachment_metadata(item)
+    return {'index':index,**classification,'media_id':media_id,
             'shape':{'payload_present':isinstance(payload,dict),'payload_id_type':type(raw_id).__name__,
-                     'url_kind':kind,'media_id_available':bool(media_id)}}
+                     'url_kind':kind,'media_id_available':bool(media_id),
+                     'attachment_kind':classification['kind'],'mime_status':classification['mime_status'],
+                     'mime_key_present':'mimeType' in item,
+                     'mime_value_type':type(item.get('mimeType')).__name__}}
 
 
 def deterministic_staff_command(text):
@@ -142,10 +143,18 @@ def accept_inbound(payload):
     snapshots = [attachment_snapshot(item, index, who['account_id']) for index,item in enumerate(attachments[:6])]
     decision = (privacy.screen_caption(str(message.get('text') or '')) if snapshots
                 else privacy.screen_question(str(message.get('text') or '')))
+    metadata = payload.get('metadata') or {}
+    quoted = metadata.get('quotedMessage')
+    quoted_id = quoted.get('platformMessageId') if isinstance(quoted,dict) else None
+    # Only Zernio's stored platform ID is documented as matching our ledger.
+    # The raw envelope quotedMessageId may identify another perspective.
+    quoted_id = quoted_id if isinstance(quoted_id,str) and 0 < len(quoted_id) <= 255 else None
+    quote_present = 'quotedMessageId' in metadata or 'quotedMessage' in metadata
     data = {'question':decision.safe_text if decision.allowed else '',
             'question_allowed':decision.allowed,'question_kind':decision.kind,
             'question_reason':decision.reason,'attachments':snapshots,
-            'attachment_count':len(attachments)}
+            'attachment_count':len(attachments),'quoted_reference_present':quote_present,
+            'quoted_platform_message_id':quoted_id}
     with store.database() as c:
         c.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (who['conversation_id'],))
         prior = c.execute('SELECT event_id FROM zernio_reply_events WHERE event_id=%s', (who['event_id'],)).fetchone()
@@ -162,17 +171,23 @@ async def fetch_document(job):
     if data.get('attachment_count') != 1 or len(data.get('attachments', [])) != 1:
         raise inbox.PDFValidationError('metadata', 'count')
     attachment = data['attachments'][0]
-    if attachment['mime'] != 'application/pdf':
+    absent_candidate = (attachment.get('mime') == 'unknown' and attachment.get('kind') == 'file'
+                        and attachment.get('mime_status') == 'absent')
+    declared_pdf = (attachment.get('mime') == 'application/pdf'
+                    and attachment.get('kind') in (None,'file','absent'))
+    if not declared_pdf and not absent_candidate:
         raise inbox.PDFValidationError('metadata', 'mime')
     if job['account_id'] != z.account_id():
         raise HTTPException(409, 'Account changed')
     async with z.client() as c:
         await z.validate_account(c)
         media_id = attachment.get('media_id')
+        if absent_candidate and not media_id:
+            raise HTTPException(404,'Verified file media identifier is unavailable')
         if not media_id:
             observed = await inbox.verified_attachment(c,job['conversation_id'],job['message_id'],attachment['index'])
             media_id = await inbox.resolve_media_identifier(c,observed,job['conversation_id'],job['message_id'],attachment['index'],job['account_id'])
-        content = await inbox.read_pdf(c,media_id,job['account_id'])
+        content = await inbox.read_pdf(c,media_id,job['account_id'],require_structure=absent_candidate)
     if job['account_id'] != z.account_id():
         raise HTTPException(409, 'Account changed')
     return content
@@ -231,23 +246,30 @@ async def processing(job):
     else:
         context = None
         unread = None
+        quote_unavailable = False
         if data.get('question_allowed') and privacy.wants_recent_document(data.get('question','')):
-            latest = await run_in_threadpool(store.recent_attachment_outcome,
-                account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid)
+            quoted_id = data.get('quoted_platform_message_id')
+            quoted = data.get('quoted_reference_present') is True
+            lookup = {'message_id':quoted_id} if quoted and quoted_id else {}
+            latest = (await run_in_threadpool(store.recent_attachment_outcome,
+                account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid,**lookup)
+                if not quoted or quoted_id else None)
+            quote_unavailable = quoted and latest is None
             if latest and latest['document_status'] in ('unavailable','quarantined'):
                 unread = latest
-            context = await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
-                                             conversation_id=job['conversation_id'],before_job_id=jid)
+            context = (await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
+                                             conversation_id=job['conversation_id'],before_job_id=jid,**lookup)
+                       if not quote_unavailable else None)
             if latest and (not context or latest['id'] > context['id']):
                 context = None
                 if latest['document_status'] == 'ok':
                     # A newer attachment is no longer eligible for reuse; never
                     # silently substitute an older approved document.
                     unread = {'id':latest['id'],'document_status':'quarantined'}
-            if (context and data.get('question_kind') == 'conversation' and conversation_history
+            if (not quoted and context and data.get('question_kind') == 'conversation' and conversation_history
                     and conversation_history[-1]['job_id'] > context['id']):
                 context = None
-            if (unread and data.get('question_kind') == 'conversation' and conversation_history
+            if (not quoted and unread and data.get('question_kind') == 'conversation' and conversation_history
                     and conversation_history[-1]['job_id'] > unread['id']):
                 unread = None
         if context:
@@ -256,6 +278,8 @@ async def processing(job):
             # Keep only the failed-read outcome, never failed document content.
             text,digest,source_id = '',None,None
             document_status = unread['document_status']
+        elif quote_unavailable:
+            document_status = 'reference_unavailable'
         else:
             document_status = 'ok' if text else 'none'
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,
@@ -271,6 +295,8 @@ async def processing(job):
             reply = 'ما الذي تريد معرفته؟ أقدر أساعدك بسؤال عن المستند أو استفسار تشغيلي واضح.'
         else:
             reply = 'تحتاج هذه الرسالة مراجعة محلية قبل استخدامها في الفهم الآلي. اكتب السؤال دون أسرار أو بيانات بنكية.'
+    elif document_status == 'reference_unavailable':
+        reply = 'الرسالة المشار إليها لا تتيح لي ملفًا مقروءًا في هذه المحادثة. لم أستخدم مستندًا آخر بدلًا منها؛ يلزم إرفاق الملف نفسه لمراجعته.'
     elif document_status == 'quarantined':
         reply = 'وصل ملف PDF، وأوقفته للمراجعة المحلية قبل مشاركته مع نموذج الفهم. لم أعتمد محتواه أو أسجل منه أي حركة.'
     elif document_status == 'unavailable':
@@ -310,7 +336,7 @@ async def processing(job):
             return
     await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=reply,
         diagnostics={'model_attempted':False,'model_success':False,'model_reason':'document_unread'}
-        if document_status in ('unavailable','quarantined') else {})
+        if document_status in ('unavailable','quarantined','reference_unavailable') else {})
 
 
 async def dispatch(job):
@@ -461,8 +487,10 @@ async def job_page(job_id: int, request: Request):
     read_scope(request,current,account)
     public = {k:job.get(k) for k in ('id','account_id','status','sender','conversation_id','message_id','event_id','read_attempts',
         'authorization_generation','document_sha256','document_status','context_source_job_id','model_started_at','model_completed_at','created_at','diagnostics')}
+    public['quoted_reference_present'] = job['payload'].get('quoted_reference_present') is True
+    public['quoted_stored_id_available'] = bool(job['payload'].get('quoted_platform_message_id'))
     public['attachment_count'] = job['payload'].get('attachment_count')
-    public['attachment_mimes'] = [item.get('mime') if item.get('mime') in ('application/pdf','image/jpeg','image/png','audio/ogg','audio/mpeg','other') else 'other' for item in job['payload'].get('attachments',[])]
+    public['attachment_mimes'] = [item.get('mime') if item.get('mime') in ('application/pdf','image/jpeg','image/png','audio/ogg','audio/mpeg','unknown','other') else 'other' for item in job['payload'].get('attachments',[])]
     public['attachment_shapes'] = [item.get('shape') for item in job['payload'].get('attachments',[])]
     public['provider_message_id'] = (outbox or {}).get('provider_message_id')
     body = '<h2>دليل المعالجة والرد</h2><pre>' + escape(json.dumps(public,ensure_ascii=False,indent=2,default=str)) + '</pre><p>sent تعني قبول المزود فقط؛ وصول الرد يؤكده المستلم أو دليل التسليم.</p>'

@@ -507,7 +507,7 @@ def test_combined_identity_worker_uses_guarded_model_for_other_intent(setup, mon
 @pytest.mark.parametrize('question', ['هذا الملف', 'لخص بيانات الشحنة الموجودة في الملف'])
 def test_failed_attachment_followup_is_local_and_truthful(setup,question):
     bad=payload(201,'لخص الملف',True)
-    bad['message']['attachments'][0].pop('mimeType')
+    bad['message']['attachments'][0]['mimeType']='text/html'
     queued=agent.accept_inbound(bad);assert tick()
     first=store.get_job(queued['job_id'])
     assert first['document_status']=='unavailable'
@@ -536,7 +536,7 @@ def test_newer_failed_attachment_does_not_answer_from_older_pdf(setup):
 
 
 def test_unrelated_chat_after_unread_attachment_keeps_normal_model_path(setup,monkeypatch):
-    bad=payload(221,'لخص الملف',True);bad['message']['attachments'][0].pop('mimeType')
+    bad=payload(221,'لخص الملف',True);bad['message']['attachments'][0]['mimeType']='text/html'
     agent.accept_inbound(bad);assert tick()
     async def chat(question,document_text,**kwargs):
         if kwargs.get('before_request'):await kwargs['before_request']()
@@ -574,7 +574,7 @@ def test_attachment_diagnostics_are_bounded_and_no_urls(web):
 
 
 def test_unread_attachment_followup_never_reserves_model_even_at_limit(setup,monkeypatch):
-    bad=payload(251,'لخص الملف',True);bad['message']['attachments'][0].pop('mimeType')
+    bad=payload(251,'لخص الملف',True);bad['message']['attachments'][0]['mimeType']='text/html'
     agent.accept_inbound(bad);assert tick()
     def forbidden(*args,**kwargs):raise AssertionError('local unread notice must not reserve model')
     monkeypatch.setattr(store,'reserve_model',forbidden)
@@ -615,7 +615,7 @@ def test_newer_unread_attachment_survives_send_uncertainty_and_many_followups(se
 
 
 def test_newer_safe_text_discussion_wins_ambiguous_pronoun_after_failure(setup,monkeypatch):
-    bad=payload(311,'لخص الملف',True);bad['message']['attachments'][0].pop('mimeType')
+    bad=payload(311,'لخص الملف',True);bad['message']['attachments'][0]['mimeType']='text/html'
     agent.accept_inbound(bad);assert tick()
     async def chat(question,document_text,**kwargs):
         if kwargs.get('before_request'):await kwargs['before_request']()
@@ -629,3 +629,74 @@ def test_newer_safe_text_discussion_wins_ambiguous_pronoun_after_failure(setup,m
     explicit=agent.accept_inbound(payload(314,'هذا الملف'));assert tick()
     assert store.get_job(explicit['job_id'])['document_status']=='unavailable'
     assert len(setup['model_calls'])==2
+
+
+@pytest.mark.parametrize('transport_mime',['application/pdf','application/octet-stream'])
+def test_documented_file_without_optional_mime_is_locally_identified(setup,transport_mime):
+    setup['media_mime']=transport_mime
+    incoming=payload(401,'لخص محتوى المستند',True)
+    incoming['message']['attachments'][0].pop('mimeType')
+    queued=agent.accept_inbound(incoming);assert tick()
+    job=store.get_job(queued['job_id'])
+    assert job['payload']['attachments'][0]['mime']=='unknown'
+    assert job['document_status']=='ok' and job['document_sha256']==setup['hash']
+    assert job['diagnostics']['model_success'] is True
+    following=agent.accept_inbound(payload(402,'ما هي البوابة والبضاعة'));assert tick()
+    assert store.get_job(following['job_id'])['context_source_job_id']==queued['job_id']
+
+
+@pytest.mark.parametrize('metadata',[
+    {'quotedMessageId':'message-411'},
+    {'quotedMessage':{'messageId':'message-411'}},
+    {'quotedMessage':{'platformMessageId':'unavailable-message'}},
+    {'quotedMessage':{'platformMessageId':17}},
+])
+def test_unknown_quoted_reference_never_substitutes_latest_pdf(setup,metadata):
+    agent.accept_inbound(payload(411,'لخص الملف',True));assert tick()
+    follow=agent.accept_inbound(payload(412,'هذا الملف',metadata=metadata));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['document_status']=='reference_unavailable' and not job['document_text']
+    assert job['context_source_job_id'] is None and len(setup['model_calls'])==1
+    assert job['diagnostics']['model_success'] is False
+
+
+def test_stored_quoted_platform_id_wins_over_raw_envelope_and_newer_failure(setup):
+    original=agent.accept_inbound(payload(421,'لخص الملف',True));assert tick()
+    bad=payload(422,'لخص الملف',True);bad['message']['attachments'][0]['mimeType']='text/html'
+    agent.accept_inbound(bad);assert tick()
+    quoted=payload(423,'هذا الملف',metadata={'quotedMessageId':'different-envelope-perspective',
+        'quotedMessage':{'messageId':'different-internal-id','platformMessageId':'message-421'}})
+    follow=agent.accept_inbound(quoted);assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['document_status']=='ok' and job['context_source_job_id']==original['job_id']
+    assert len(setup['model_calls'])==2
+
+
+def test_quoted_failed_attachment_is_local_without_network_retry(setup):
+    bad=payload(431,'لخص الملف',True);bad['message']['attachments'][0]['mimeType']='text/html'
+    failed=agent.accept_inbound(bad);assert tick()
+    follow=agent.accept_inbound(payload(432,'هذا الملف',metadata={'quotedMessage':{'platformMessageId':'message-431'}}));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['document_status']=='unavailable'
+    assert job['diagnostics']['unread_source_job_id']==failed['job_id']
+    assert not setup['provider_reads'] and not setup['model_calls']
+
+
+def test_absent_mime_candidate_cannot_resolve_arbitrary_media(setup):
+    incoming=payload(441,'لخص الملف',True)
+    incoming['message']['attachments']=[{'type':'file','url':'https://private.invalid/guessed.pdf'}]
+    queued=agent.accept_inbound(incoming);assert tick()
+    job=store.get_job(queued['job_id'])
+    assert job['document_status']=='unavailable' and not setup['model_calls']
+    assert all('/whatsapp/media/' not in u and '/inbox/' not in u for u in setup['provider_reads'])
+
+
+@pytest.mark.parametrize('kind',['image','audio','share','video','sticker','unsupported_type','made-up'])
+def test_declared_pdf_with_incompatible_kind_cannot_enter_worker_model(setup,kind):
+    incoming=payload(451,'لخص الملف',True)
+    incoming['message']['attachments'][0]['type']=kind
+    queued=agent.accept_inbound(incoming);assert tick()
+    job=store.get_job(queued['job_id'])
+    assert job['document_status']=='unavailable'
+    assert job['diagnostics']['document_failure_stage']=='metadata'
+    assert not setup['provider_reads'] and not setup['model_calls']
