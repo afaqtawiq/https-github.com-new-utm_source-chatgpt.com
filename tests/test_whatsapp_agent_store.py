@@ -1635,3 +1635,159 @@ def test_attachment_read_outcome_is_independent_of_delivery_completion_time(db,c
         connection.execute('UPDATE whatsapp_agent_jobs SET completed_at=%s WHERE id=%s',
                            (completed_at.isoformat() if completed_at else None,source['id']))
     assert attachment_status(db,target)=={'id':source['id'],'document_status':'unavailable'}
+
+
+def absent_mime_pdf_candidate(**changes):
+    return {'question':'What does this document say?','question_allowed':True,'question_kind':'document_question',
+        'attachment_count':1,'attachments':[{'index':0,'mime':'unknown','kind':'file','mime_status':'absent',**changes}]}
+
+
+def quoted_context(db,target,message_id,**kwargs):
+    return store.recent_context(account_id=target['account_id'],sender=target['sender'],
+        conversation_id=target['conversation_id'],before_job_id=target['id'],message_id=message_id,
+        db_factory=db,now=NOW,**kwargs)
+
+
+def test_pdf_payload_accepts_only_exact_normalized_absent_mime_file_candidate():
+    assert store._pdf_payload(absent_mime_pdf_candidate())
+    assert store._pdf_payload(absent_mime_pdf_candidate(mime='application/pdf'))
+
+
+@pytest.mark.parametrize('changes', [
+    {'mime':'image/png'}, {'mime':'application/octet-stream'}, {'mime':'text/plain'},
+    {'mime':None}, {'mime':''}, {'kind':'image'}, {'kind':'video'}, {'kind':None},
+    {'mime_status':'present'}, {'mime_status':'malformed'}, {'mime_status':None},
+    {'mime':'other'}, {'kind':'FILE'},
+])
+def test_pdf_payload_rejects_image_non_pdf_and_malformed_unknown_candidates(changes):
+    assert not store._pdf_payload(absent_mime_pdf_candidate(**changes))
+
+
+@pytest.mark.parametrize('missing',['mime','kind','mime_status'])
+def test_pdf_payload_requires_all_three_absent_mime_candidate_markers(missing):
+    payload=absent_mime_pdf_candidate()
+    del payload['attachments'][0][missing]
+    assert not store._pdf_payload(payload)
+
+
+@pytest.mark.parametrize('document_status,sha256,text',[
+    ('none',None,''),('unavailable',None,''),('quarantined',SHA,''),('ok','b'*64,TEXT),
+])
+def test_absent_mime_candidate_never_bypasses_read_status_and_hash_gates(db,document_status,sha256,text):
+    enable(db)
+    add(db,payload=absent_mime_pdf_candidate())
+    job=claim(db)
+    store.checkpoint_document(job['id'],job['lease_token'],text=text,sha256=sha256,
+        status=document_status,db_factory=db,now=NOW)
+    assert not store.reserve_model(job['id'],job['lease_token'],db_factory=db,now=NOW)
+    assert not store.model_authorized(job['id'],job['lease_token'],db_factory=db,now=NOW)
+    assert store.get_job(job['id'],db_factory=db)['model_started_at'] is None
+
+
+def test_parsed_approved_absent_mime_candidate_supports_context_and_acceptance(db):
+    enable(db)
+    add(db,payload=absent_mime_pdf_candidate())
+    document=claim(db)
+    model(db,document)
+    sent(db,document,generated=True)
+    add(db,2,attachment_count=0)
+    followup=claim(db)
+    source=store.recent_context(account_id='a',sender='s',conversation_id='c',
+        before_job_id=followup['id'],message_id=document['message_id'],db_factory=db,now=NOW)
+    assert source['id']==document['id']
+    checkpoint(db,followup,context_source_job_id=document['id'])
+    assert store.reserve_model(followup['id'],followup['lease_token'],db_factory=db,now=NOW)
+    store.save_model(followup['id'],followup['lease_token'],reply_text='Known document answer',
+        diagnostics={'model_success':True},db_factory=db,now=NOW)
+    sent(db,followup,generated=True)
+    result=store.update_settings('a',mode='routine',acceptance={'owner_receipt_confirmed':True,
+        'document_job_id':document['id'],'followup_job_id':followup['id']},db_factory=db,now=NOW)
+    assert result['mode']=='routine'
+
+
+def test_quoted_attachment_uses_exact_stored_message_id_not_latest_or_event_alias(db):
+    enable(db)
+    first=attachment_outcome(db,1,document_status='ok',payload=absent_mime_pdf_candidate())
+    latest=attachment_outcome(db,2,document_status='unavailable',outcome='uncertain')
+    add(db,1,event='raw-envelope-alias')
+    target=history_target(db)
+    assert attachment_status(db,target)=={'id':latest['id'],'document_status':'unavailable'}
+    assert attachment_status(db,target,message_id=first['message_id'])=={'id':first['id'],'document_status':'ok'}
+    assert quoted_context(db,target,first['message_id'])['id']==first['id']
+    assert attachment_status(db,target,message_id=latest['message_id'])=={'id':latest['id'],'document_status':'unavailable'}
+    assert quoted_context(db,target,latest['message_id']) is None
+    for unknown in ('never-stored-platform-id',first['event_id'],'raw-envelope-alias','m%'):
+        assert attachment_status(db,target,message_id=unknown) is None
+        assert quoted_context(db,target,unknown) is None
+
+
+@pytest.mark.parametrize('field,value', [('account_id','other-account'),('sender','other-sender'),
+                                        ('conversation_id','other-thread')])
+def test_quote_cannot_fetch_source_from_another_scope(db,field,value):
+    enable(db)
+    source=attachment_outcome(db,1,document_status='ok')
+    target=history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET '+field+'=%s WHERE id=%s',(value,source['id']))
+    assert attachment_status(db,target,message_id=source['message_id']) is None
+    assert quoted_context(db,target,source['message_id']) is None
+
+
+@pytest.mark.parametrize('field,value',[
+    ('created_at',(NOW-timedelta(days=1)).isoformat()),
+    ('document_checkpointed_at',(NOW-timedelta(days=1)).isoformat()),
+    ('created_at',(NOW+timedelta(seconds=1)).isoformat()),
+    ('document_checkpointed_at',(NOW+timedelta(seconds=1)).isoformat()),
+    ('authorization_generation',0),
+])
+def test_quote_rejects_stale_future_or_old_generation_source(db,field,value):
+    enable(db)
+    source=attachment_outcome(db,1,document_status='ok')
+    target=history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET '+field+'=%s WHERE id=%s',(value,source['id']))
+    assert attachment_status(db,target,message_id=source['message_id']) is None
+    assert quoted_context(db,target,source['message_id']) is None
+
+
+def test_quote_requires_live_current_target_after_stop_and_reenable(db):
+    enable(db)
+    source=attachment_outcome(db,1,document_status='ok')
+    target=history_target(db)
+    assert quoted_context(db,target,source['message_id'])
+    store.update_settings('a',mode='off',db_factory=db,now=NOW)
+    enable(db)
+    assert attachment_status(db,target,message_id=source['message_id']) is None
+    assert quoted_context(db,target,source['message_id']) is None
+    current=history_target(db,100)
+    assert attachment_status(db,current,message_id=source['message_id']) is None
+    assert quoted_context(db,current,source['message_id']) is None
+    # The separately approved unquoted cache preserves its existing semantics.
+    assert store.recent_context(account_id='a',sender='s',conversation_id='c',
+        before_job_id=current['id'],db_factory=db,now=NOW)['id']==source['id']
+
+
+@pytest.mark.parametrize('message_id',['',12,True,{},[]])
+def test_malformed_explicit_quote_never_becomes_latest_lookup(db,message_id):
+    enable(db)
+    attachment_outcome(db,1,document_status='ok')
+    target=history_target(db)
+    with pytest.raises(ValueError):attachment_status(db,target,message_id=message_id)
+    with pytest.raises(ValueError):quoted_context(db,target,message_id)
+
+
+def test_quoted_pdf_context_requires_active_target(db):
+    enable(db)
+    source=attachment_outcome(db,1,document_status='ok')
+    with pytest.raises(ValueError):
+        store.recent_context(account_id='a',sender='s',conversation_id='c',message_id=source['message_id'],
+            db_factory=db,now=NOW)
+    target=history_target(db)
+    store.prepare_reply(target['id'],target['lease_token'],terminal_status='blocked',db_factory=db,now=NOW)
+    assert quoted_context(db,target,source['message_id']) is None
+
+
+@pytest.mark.parametrize('kind,allowed',[(None,True),('file',True),('absent',True),
+    ('image',False),('audio',False),('share',False),('video',False),('',False)])
+def test_declared_pdf_rejects_explicit_non_file_kind_conflicts(kind,allowed):
+    assert store._pdf_payload(absent_mime_pdf_candidate(mime='application/pdf',kind=kind)) is allowed

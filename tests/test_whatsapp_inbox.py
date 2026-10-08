@@ -670,3 +670,127 @@ def test_octet_parser_resource_cleanup_and_private_environment(monkeypatch,mode)
     assert not os.path.exists(calls['scratch'])
     assert inbox._PDF_REVIEW_SLOT.acquire(blocking=False)
     inbox._PDF_REVIEW_SLOT.release()
+
+
+@pytest.mark.parametrize('item,expected',[
+    ({'type':'file','mimeType':'application/pdf'},('application/pdf','file','declared_pdf')),
+    ({'mimeType':'application/pdf'},('application/pdf','absent','declared_pdf')),
+    ({'type':'file'},('unknown','file','absent')),
+    ({'type':'file','mimeType':None},('unknown','file','absent')),
+    ({'type':'file','mimeType':''},('unknown','file','absent')),
+    ({'type':'file','mimeType':'  '},('unknown','file','absent')),
+    ({'type':'file','mimeType':'application/octet-stream'},('other','file','unsupported')),
+    ({'type':'file','mimeType':'image/png'},('other','file','unsupported')),
+    ({'type':'file','mimeType':['application/pdf']},('other','file','invalid')),
+    ({'type':'file','mimeType':False},('other','file','invalid')),
+    ({'type':'document','mimeType':'application/pdf'},('application/pdf','unknown','declared_pdf')),
+    ({'type':'file','payload':{'mime_type':'application/pdf'},'filename':'private.pdf'},('unknown','file','absent')),
+    ({'type':'private-kind','mimeType':'private-mime','filename':'private.pdf','url':'https://private.invalid'},('other','unknown','unsupported')),
+    (None,('other','unknown','invalid')),
+])
+def test_pdf_metadata_classification_is_allowlisted_and_nonsecret(item,expected):
+    result=inbox.pdf_attachment_metadata(item)
+    assert set(result)=={'mime','kind','mime_status'}
+    assert (result['mime'],result['kind'],result['mime_status'])==expected
+    assert 'private' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('mime_update',[{}, {'mimeType':None}, {'mimeType':''}])
+@pytest.mark.parametrize('response_mime',['application/pdf','application/octet-stream'])
+def test_absent_mime_file_uses_bound_identity_and_actual_pdf_parser(pdf_setup,mime_update,response_mime):
+    import shutil
+    if not shutil.which('pdfinfo'): pytest.skip('Local PDF parser unavailable')
+    client,current,provider,conn,media=pdf_setup
+    item=provider['messages'][0]['attachments'][0];item.pop('mimeType');item.update(mime_update)
+    item['filename']='not-proof-of-format.docx'
+    media['body']=actual_pdf_bytes();media['headers']['content-type']=response_mime
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==200,response.text
+    assert response.content==media['body'] and len(media['requests'])==1
+    assert str(media['requests'][0].url)=='https://zernio.com/api/v1/whatsapp/media/media-123?accountId=account-test'
+    assert not provider['posts']
+
+
+def test_absent_mime_file_manual_link_and_text_review(pdf_setup):
+    import shutil
+    if not shutil.which('pdfinfo') or not shutil.which('pdftotext'):
+        pytest.skip('Local PDF utilities unavailable')
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0].pop('mimeType')
+    media['body']=actual_pdf_bytes()
+    page=client.get('/whatsapp-inbox?conversation=c1')
+    assert 'فحص الملف وتنزيله إن كان PDF' in page.text
+    assert '/whatsapp-inbox/attachment?' in page.text and not media['requests']
+    response=client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'csrf'})
+    assert response.status_code==200,response.text
+    assert 'TEST-OCTET-1' in response.text and not provider['posts']
+
+
+@pytest.mark.parametrize('body',[b'%PDF-1.7\nmalformed private file',b'<html>not a PDF</html>'])
+def test_absent_mime_candidate_never_trusts_pdf_response_header(pdf_setup,body):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0].pop('mimeType')
+    media['body']=body;media['headers']['content-type']='application/pdf'
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==415 and 'private' not in response.text
+    assert len(media['requests'])==1 and not provider['posts']
+
+
+@pytest.mark.parametrize('kind',['image','audio','video','share','sticker','template','unsupported_type','document','File','unknown',None,{}])
+@pytest.mark.parametrize('mime',['application/pdf',None])
+def test_conflicting_or_unknown_attachment_kind_never_becomes_pdf(pdf_setup,kind,mime):
+    client,current,provider,conn,media=pdf_setup
+    item=provider['messages'][0]['attachments'][0]
+    item.update(type=kind,filename='misleading.pdf')
+    if mime is None: item.pop('mimeType')
+    else: item['mimeType']=mime
+    media['body']=actual_pdf_bytes()
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==415 and not media['requests']
+
+
+@pytest.mark.parametrize('mime',['text/html','application/octet-stream','image/png',False,{}])
+def test_explicit_nonpdf_or_invalid_mime_file_rejected_before_fetch(pdf_setup,mime):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0].update(mimeType=mime,filename='misleading.pdf')
+    media['body']=actual_pdf_bytes()
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==415 and not media['requests']
+
+
+def test_absent_mime_and_absent_kind_not_inferred_from_filename(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    item=provider['messages'][0]['attachments'][0];item.pop('mimeType');item.pop('type')
+    item['filename']='not-evidence.pdf';media['body']=actual_pdf_bytes()
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==415
+    assert not media['requests']
+
+
+def test_absent_mime_file_still_requires_resolved_media_identity(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    item=provider['messages'][0]['attachments'][0];item.pop('mimeType')
+    item.update(payload={'id':'../wrong'},url='https://evil.invalid/media',filename='not-evidence.pdf')
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==404
+    assert not media['requests']
+
+
+def test_declared_pdf_without_legacy_kind_remains_compatible(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0].pop('type')
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==200
+
+
+def test_absent_mime_parser_keeps_final_account_guard(pdf_setup,monkeypatch):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments'][0].pop('mimeType')
+    def validate(data):
+        monkeypatch.setenv('WHATSAPP_COMMAND_ACCOUNT_ID','changed-account')
+    monkeypatch.setattr(inbox,'validate_pdf_locally',validate)
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==409 and media['body'] not in response.content
+
+
+@pytest.mark.parametrize('mime',['application/pdf; charset=binary','Application/PDF; name=document.pdf'])
+def test_declared_pdf_parameters_preserve_media_type_normalization(mime):
+    metadata=inbox.pdf_attachment_metadata({'type':'file','mimeType':mime})
+    assert metadata=={'mime':'application/pdf','kind':'file','mime_status':'declared_pdf'}

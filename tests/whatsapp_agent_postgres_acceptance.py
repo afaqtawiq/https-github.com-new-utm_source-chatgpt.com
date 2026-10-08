@@ -563,6 +563,7 @@ def verify(factory):
 
     verify_budget_notices(factory)
     verify_recent_attachment_outcome(factory)
+    verify_quoted_attachment_context(factory)
 
     print('PASS: PostgreSQL duplicate event/message aliases, concurrent SKIP LOCKED claims, '
           'conversation serialization, bounded reads/model budgets, crash checkpoints, '
@@ -948,6 +949,77 @@ def verify_recent_attachment_outcome(factory):
         assert store.recent_attachment_outcome(**{**scope,field:'other'}) is None
     store.update_settings(account,mode='off',db_factory=factory,now=NOW)
     assert store.recent_attachment_outcome(**scope) is None
+
+
+def verify_quoted_attachment_context(factory):
+    """Exact platform-ID quote lookup and absent-MIME parsed-file eligibility."""
+    from app import whatsapp_agent_store as store
+    account,sender,conversation='quoted-attachment-pg','owner','quoted-thread'
+    store.update_settings(account,mode='owner_pilot',pilot_sender=sender,approved_sha256=[SHA],
+        db_factory=factory,now=NOW)
+    candidate={'question':'Review this file','question_allowed':True,'question_kind':'document_question',
+        'attachment_count':1,'attachments':[{'mime':'unknown','kind':'file','mime_status':'absent'}]}
+    followup={**candidate,'attachment_count':0,'attachments':[]}
+    assert store._pdf_payload(candidate)
+    for kind in ('image','audio','share'):
+        assert not store._pdf_payload({**candidate,'attachments':[{'mime':'application/pdf','kind':kind}]})
+
+    def enqueue(message,payload,event=None):
+        with factory() as connection:
+            return store.enqueue(connection,account_id=account,message_id=message,event_id=event or 'event-'+message,
+                sender=sender,conversation_id=conversation,payload=payload,now=NOW)
+    def claim():return store.claim_job(account_id=account,db_factory=factory,now=NOW)
+    def finish(job,status):
+        sending=store.claim_send(account_id=account,db_factory=factory,now=NOW)
+        assert sending and sending['id']==job['id']
+        store.finish_send(job['id'],sending['send_token'],status=status,db_factory=factory,now=NOW)
+
+    enqueue('platform-source-id',candidate)
+    source=claim()
+    store.checkpoint_document(source['id'],source['lease_token'],text=TEXT,sha256=SHA,status='ok',
+        db_factory=factory,now=NOW)
+    assert store.reserve_model(source['id'],source['lease_token'],db_factory=factory,now=NOW)
+    store.save_model(source['id'],source['lease_token'],reply_text='Synthetic verified PDF answer',
+        diagnostics={'model_success':True},db_factory=factory,now=NOW)
+    store.prepare_reply(source['id'],source['lease_token'],db_factory=factory,now=NOW)
+    finish(source,'sent')
+    enqueue('platform-newer-failure',candidate)
+    newer=claim()
+    store.checkpoint_document(newer['id'],newer['lease_token'],text='',sha256=None,status='unavailable',
+        db_factory=factory,now=NOW)
+    store.prepare_reply(newer['id'],newer['lease_token'],reply_text='Synthetic local read failure',
+        db_factory=factory,now=NOW)
+    finish(newer,'uncertain')
+    assert enqueue('platform-source-id',candidate,event='raw-envelope-alias')['id']==source['id']
+    enqueue('platform-current-target',followup)
+    target=claim()
+    scope=dict(account_id=account,sender=sender,conversation_id=conversation,before_job_id=target['id'],
+               db_factory=factory,now=NOW)
+    assert store.recent_attachment_outcome(**scope)=={'id':newer['id'],'document_status':'unavailable'}
+    quoted={**scope,'message_id':'platform-source-id'}
+    assert store.recent_attachment_outcome(**quoted)=={'id':source['id'],'document_status':'ok'}
+    assert store.recent_context(**quoted)['id']==source['id']
+    assert store.recent_context(**{**scope,'message_id':'platform-newer-failure'}) is None
+    for unknown in ('unknown-platform-id','event-platform-source-id','raw-envelope-alias','platform-%'):
+        assert store.recent_attachment_outcome(**{**scope,'message_id':unknown}) is None
+        assert store.recent_context(**{**scope,'message_id':unknown}) is None
+    for field in ('account_id','sender','conversation_id'):
+        assert store.recent_attachment_outcome(**{**quoted,field:'other'}) is None
+        assert store.recent_context(**{**quoted,field:'other'}) is None
+    # Both quote helpers reject stale source timing without latest-source fallback.
+    with factory() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET document_checkpointed_at=%s WHERE id=%s',
+            ((NOW-timedelta(days=1)).isoformat(),source['id']))
+    assert store.recent_attachment_outcome(**quoted) is None and store.recent_context(**quoted) is None
+    with factory() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET document_checkpointed_at=%s WHERE id=%s',(NOW.isoformat(),source['id']))
+    store.update_settings(account,mode='off',db_factory=factory,now=NOW)
+    store.update_settings(account,mode='owner_pilot',pilot_sender=sender,approved_sha256=[SHA],db_factory=factory,now=NOW)
+    assert store.recent_attachment_outcome(**quoted) is None and store.recent_context(**quoted) is None
+    enqueue('new-generation-target',followup)
+    current=claim()
+    current_quote={**quoted,'before_job_id':current['id']}
+    assert store.recent_attachment_outcome(**current_quote) is None and store.recent_context(**current_quote) is None
 
 
 def main():

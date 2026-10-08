@@ -120,10 +120,12 @@ def render_message(message, conversation_id=None, csrf=None):
             continue
         label = escape(str(item.get('filename') or item.get('type') or 'مرفق'))
         label += ' · ' + escape(str(item.get('mimeType') or ''))
+        metadata = pdf_attachment_metadata(item)
         if (conversation_id and isinstance(message.get('id'), str)
-                and str(item.get('mimeType') or '').lower() == 'application/pdf'):
+                and _pdf_metadata_allowed(metadata)):
             query = urlencode({'conversation': conversation_id, 'message': message['id'], 'index': index})
-            label += ' · <a href="/whatsapp-inbox/attachment?' + escape(query) + '">تنزيل PDF للمراجعة</a>'
+            action = 'تنزيل PDF للمراجعة' if metadata['mime_status'] == 'declared_pdf' else 'فحص الملف وتنزيله إن كان PDF'
+            label += ' · <a href="/whatsapp-inbox/attachment?' + escape(query) + '">' + action + '</a>'
             if csrf:
                 label += '<form method="post" action="/whatsapp-inbox/attachment/text?' + escape(query) + '"><input type="hidden" name="csrf" value="' + escape(csrf) + '"><button>قراءة نص الملف محليًا</button></form>'
         rows.append('<li>' + label + '</li>')
@@ -280,6 +282,31 @@ class PDFValidationError(HTTPException):
         super().__init__(415, detail)
 
 
+def pdf_attachment_metadata(item):
+    """Classify documented top-level fields without retaining raw provider data."""
+    if not isinstance(item, dict):
+        return {'mime': 'other', 'kind': 'unknown', 'mime_status': 'invalid'}
+    kinds = ('file', 'image', 'video', 'audio', 'sticker', 'share', 'template', 'unsupported_type')
+    raw_kind = item.get('type')
+    kind = ('absent' if 'type' not in item else
+            raw_kind if isinstance(raw_kind, str) and raw_kind in kinds else 'unknown')
+    raw_mime = item.get('mimeType')
+    if raw_mime is None or (isinstance(raw_mime, str) and not raw_mime.strip()):
+        mime, status = 'unknown', 'absent'
+    elif not isinstance(raw_mime, str):
+        mime, status = 'other', 'invalid'
+    elif raw_mime.split(';',1)[0].strip().lower() == 'application/pdf':
+        mime, status = 'application/pdf', 'declared_pdf'
+    else:
+        mime, status = 'other', 'unsupported'
+    return {'mime': mime, 'kind': kind, 'mime_status': status}
+
+
+def _pdf_metadata_allowed(metadata):
+    return ((metadata['mime_status'] == 'declared_pdf' and metadata['kind'] in ('file', 'absent'))
+            or (metadata['mime_status'] == 'absent' and metadata['kind'] == 'file'))
+
+
 async def verified_attachment(c, cid, message_id, index):
     """Resolve only attachments belonging to a verified private conversation."""
     await verified_conversation(c, cid)
@@ -307,7 +334,7 @@ async def verified_attachment(c, cid, message_id, index):
             if found[0].get('isDeleted') or found[0].get('deliveryStatus') == 'deleted' or not isinstance(attachments, list) or index >= len(attachments):
                 raise HTTPException(404, 'Attachment unavailable')
             item = attachments[index]
-            if not isinstance(item, dict) or str(item.get('mimeType') or '').lower() != 'application/pdf':
+            if not _pdf_metadata_allowed(pdf_attachment_metadata(item)):
                 raise PDFValidationError('metadata', 'mime')
             return item
         pagination = payload.get('pagination') or {}
@@ -366,8 +393,8 @@ async def resolve_media_identifier(c, attachment, cid, message_id, index, accoun
     return media_id
 
 
-async def read_pdf(c, media_id, account):
-    """Read only after the caller verifies attachment metadata is application/pdf."""
+async def read_pdf(c, media_id, account, *, require_structure=False):
+    """Read a bound PDF candidate; absent MIME callers must require structure."""
     # The July 2026 WhatsApp media API streams bytes using the existing server
     # credential. Never request attachment.url/refreshUrl or forward auth to a CDN.
     if not isinstance(media_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,255}', media_id):
@@ -396,7 +423,7 @@ async def read_pdf(c, media_id, account):
             data = b''.join(chunks)
             if not data.startswith(b'%PDF-'):
                 raise PDFValidationError('response', 'signature')
-        if mime == 'application/octet-stream':
+        if require_structure or mime == 'application/octet-stream':
             from starlette.concurrency import run_in_threadpool
             await run_in_threadpool(validate_pdf_locally, data)
         return data
@@ -468,7 +495,8 @@ async def download_attachment(request: Request):
             media_id = await resolve_media_identifier(c, attachment, cid, message_id, index, account)
             if account != z.account_id():
                 raise HTTPException(409, 'Account changed')
-            content = await read_pdf(c, media_id, account)
+            content = await read_pdf(c, media_id, account,
+                require_structure=pdf_attachment_metadata(attachment)['mime_status'] == 'absent')
         if account != z.account_id() or z.session(request)['user_id'] != current['user_id']:
             raise HTTPException(409, 'Session or account changed')
     except (z.WhatsAppBlocked, httpx.HTTPError, TimeoutError):
