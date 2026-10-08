@@ -1369,3 +1369,269 @@ def test_historical_budget_blocks_are_not_reopened_by_notice_migration(db):
     assert historical['status'] == 'blocked' and historical['reply_text'] is None
     with db() as connection:
         assert connection.execute('SELECT COUNT(*) n FROM whatsapp_agent_outbox WHERE job_id=%s', (old['id'],)).fetchone()['n'] == 0
+
+
+def attachment_outcome(db, number, *, document_status='unavailable', now=NOW, account='a',
+                       sender='s', conversation='c', outcome='sent', payload=None, sha256=None):
+    queued = add(db, number, account=account, sender=sender, conversation=conversation, now=now, payload=payload)
+    job = store.claim_job(account_id=account, db_factory=db, now=now)
+    assert job and job['id'] == queued['id']
+    store.checkpoint_document(job['id'], job['lease_token'], text=TEXT if document_status=='ok' else '',
+        sha256=sha256 if sha256 is not None else (SHA if document_status in ('ok','quarantined') else None),
+        status=document_status, db_factory=db, now=now)
+    store.prepare_reply(job['id'], job['lease_token'], reply_text='Synthetic local attachment outcome',
+        db_factory=db, now=now)
+    sending = store.claim_send(account_id=account, db_factory=db, now=now)
+    assert sending and sending['id'] == job['id']
+    store.finish_send(job['id'], sending['send_token'], status=outcome,
+        provider_message_id='synthetic-attachment-'+str(job['id']), db_factory=db, now=now)
+    return store.get_job(job['id'], db_factory=db)
+
+
+def attachment_status(db, target, **kwargs):
+    options = {'account_id':target['account_id'], 'sender':target['sender'],
+               'conversation_id':target['conversation_id'], 'before_job_id':target['id'],
+               'db_factory':db, 'now':NOW, **kwargs}
+    return store.recent_attachment_outcome(**options)
+
+
+@pytest.mark.parametrize('failure',['unavailable','quarantined'])
+def test_latest_failed_attachment_supersedes_older_successful_pdf_metadata(db, failure):
+    enable(db)
+    older = attachment_outcome(db, 1, document_status='ok')
+    latest = attachment_outcome(db, 2, document_status=failure)
+    history_exchange(db, 3, question='Thanks', reply='You are welcome')
+    target = history_target(db)
+    result = attachment_status(db, target)
+    assert result == {'id':latest['id'], 'document_status':failure}
+    # The old PDF cache is intentionally a separate approval path. This new
+    # marker tells the caller it must not silently answer from that older PDF.
+    assert store.recent_context(account_id='a',sender='s',conversation_id='c',
+        before_job_id=target['id'],db_factory=db,now=NOW)['id'] == older['id']
+    assert result['id'] > older['id']
+
+
+def test_latest_success_replaces_failed_attachment_outcome(db):
+    enable(db)
+    attachment_outcome(db, 1, document_status='quarantined')
+    latest = attachment_outcome(db, 2, document_status='ok')
+    target = history_target(db)
+    assert attachment_status(db,target) == {'id':latest['id'],'document_status':'ok'}
+
+
+def test_attachment_outcome_returns_no_body_urls_or_provider_metadata(db):
+    enable(db)
+    source = attachment_outcome(db,1,payload={'question':'PRIVATE_QUESTION','question_allowed':False,
+        'attachment_count':1,'attachments':[{'mime':'application/pdf','url':'https://private.invalid/?token=SECRET'}]})
+    target = history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET document_text=%s,reply_text=%s WHERE id=%s',
+            ('PRIVATE_DOCUMENT_BYTES','PRIVATE_REPLY_BODY',source['id']))
+    result = attachment_status(db,target)
+    assert result == {'id':source['id'],'document_status':'unavailable'}
+    assert not any(value in repr(result) for value in ('PRIVATE_','SECRET','private.invalid','provider'))
+
+
+@pytest.mark.parametrize('scope',[{'account_id':'other'},{'sender':'other'},{'conversation_id':'other'}])
+def test_attachment_outcome_binds_actual_target_scope(db,scope):
+    enable(db)
+    attachment_outcome(db,1)
+    target = history_target(db)
+    assert attachment_status(db,target,**scope) is None
+
+
+def test_attachment_outcome_is_fenced_by_stop_and_new_generation(db):
+    enable(db)
+    attachment_outcome(db,1)
+    target = history_target(db)
+    assert attachment_status(db,target)
+    store.update_settings('a',mode='off',db_factory=db,now=NOW)
+    assert attachment_status(db,target) is None
+    enable(db)
+    assert attachment_status(db,target) is None
+    newer = history_target(db,100)
+    assert attachment_status(db,newer) is None
+
+
+@pytest.mark.parametrize('field', ['created_at','document_checkpointed_at'])
+@pytest.mark.parametrize('time_value', [NOW-timedelta(days=1),NOW+timedelta(seconds=1)])
+def test_attachment_outcome_excludes_old_or_future_source_times(db,field,time_value):
+    enable(db)
+    source = attachment_outcome(db,1)
+    target = history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET '+field+'=%s WHERE id=%s',
+            (time_value.isoformat(),source['id']))
+    assert attachment_status(db,target,max_age_seconds=999999) is None
+
+
+@pytest.mark.parametrize('field',['document_checkpointed_at'])
+def test_attachment_outcome_requires_completed_read_checkpoint(db,field):
+    enable(db)
+    source = attachment_outcome(db,1)
+    target = history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET '+field+'=NULL WHERE id=%s',(source['id'],))
+    assert attachment_status(db,target) is None
+
+
+@pytest.mark.parametrize('outcome',['blocked','failed','uncertain'])
+def test_attachment_outcome_survives_non_sent_attachment_replies(db,outcome):
+    enable(db)
+    source = attachment_outcome(db,1,outcome=outcome)
+    target = history_target(db)
+    assert attachment_status(db,target)=={'id':source['id'],'document_status':'unavailable'}
+
+
+@pytest.mark.parametrize('invalid_target', ['expired','sent','future','old','other_generation'])
+def test_attachment_outcome_requires_current_active_processing_target(db,invalid_target):
+    enable(db)
+    attachment_outcome(db,1)
+    target = history_target(db)
+    statements = {
+        'expired': ('lease_until=%s',NOW.isoformat()),
+        'sent': ('status=%s','sent'),
+        'future': ('created_at=%s',(NOW+timedelta(seconds=1)).isoformat()),
+        'old': ('created_at=%s',(NOW-timedelta(days=1)).isoformat()),
+        'other_generation': ('authorization_generation=%s',target['authorization_generation']-1),
+    }
+    assignment,value = statements[invalid_target]
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET '+assignment+' WHERE id=%s',(value,target['id']))
+    assert attachment_status(db,target) is None
+
+
+def test_attachment_outcome_ignores_inherited_followups_and_nonattachments(db):
+    enable(db)
+    original = attachment_outcome(db,1,document_status='ok')
+    add(db,2,attachment_count=0)
+    inherited = claim(db)
+    checkpoint(db,inherited,context_source_job_id=original['id'])
+    sent(db,inherited)
+    attachment_outcome(db,3,payload=operations_payload())
+    target = history_target(db)
+    assert attachment_status(db,target) == {'id':original['id'],'document_status':'ok'}
+
+
+def test_attachment_outcome_recognizes_non_pdf_and_bounded_multiple_attachment_failure(db):
+    enable(db)
+    latest = attachment_outcome(db,1,payload={'question':'Review attachments','question_allowed':True,
+        'attachment_count':9,'attachments':[{'mime':'image/png','index':i} for i in range(6)]})
+    target = history_target(db)
+    assert attachment_status(db,target) == {'id':latest['id'],'document_status':'unavailable'}
+
+
+def test_attachment_outcome_uses_one_readonly_snapshot(db):
+    enable(db)
+    source = attachment_outcome(db,1)
+    target = history_target(db)
+    statements = []
+    @contextmanager
+    def observed():
+        with db() as connection:
+            class Observed:
+                dialect = getattr(connection,'dialect',None)
+                def execute(self,statement,arguments=()):
+                    statements.append(statement)
+                    return connection.execute(statement,arguments)
+            yield Observed()
+    result = attachment_status(db,target,db_factory=observed)
+    assert result == {'id':source['id'],'document_status':'unavailable'}
+    assert len(statements)==1 and statements[0].lstrip().startswith('SELECT')
+    assert 'FOR UPDATE' not in statements[0]
+    assert 'JOIN whatsapp_agent_settings' in statements[0] and 'target.id=' in statements[0]
+
+
+def test_unapproved_attachment_hash_returns_only_quarantined_status(db):
+    enable(db)
+    source = attachment_outcome(db,1,document_status='quarantined',sha256='b'*64)
+    target = history_target(db)
+    assert source['document_sha256'] not in store.get_settings('a',db_factory=db)['approved_sha256']
+    assert attachment_status(db,target) == {'id':source['id'],'document_status':'quarantined'}
+
+
+@pytest.mark.parametrize('payload', [
+    {'attachment_count':0,'attachments':[]},
+    {'attachment_count':True,'attachments':[{'mime':'application/pdf'}]},
+    {'attachment_count':'1','attachments':[{'mime':'application/pdf'}]},
+    {'attachment_count':1,'attachments':[]},
+    {'attachment_count':1,'attachments':[None,{}]},
+])
+def test_attachment_outcome_requires_actual_attachment_metadata(db,payload):
+    enable(db)
+    attachment_outcome(db,1,payload=payload)
+    target = history_target(db)
+    assert attachment_status(db,target) is None
+
+
+def test_latest_attachment_quota_notice_keeps_only_source_ordering_metadata(db):
+    enable(db)
+    older = attachment_outcome(db,50,document_status='ok')
+    exhaust_owner_budget(db)
+    add(db,100)
+    latest = claim(db)
+    checkpoint(db,latest)
+    assert not store.reserve_model(latest['id'],latest['lease_token'],db_factory=db,now=NOW)
+    sending = store.claim_send(db_factory=db,now=NOW)
+    store.finish_send(latest['id'],sending['send_token'],status='sent',db_factory=db,now=NOW)
+    target = history_target(db,101)
+    result = attachment_status(db,target)
+    assert result == {'id':latest['id'],'document_status':'ok'}
+    assert store.MODEL_BUDGET_NOTICE not in repr(result)
+    context = store.recent_context(account_id='a',sender='s',conversation_id='c',
+        before_job_id=target['id'],db_factory=db,now=NOW)
+    assert context['id']==older['id'] and result['id']!=context['id']
+
+
+def test_attachment_outcome_ignores_a_later_source_than_target(db):
+    enable(db)
+    early = attachment_outcome(db,1)
+    attachment_outcome(db,2)
+    with db() as connection:
+        connection.execute("UPDATE whatsapp_agent_jobs SET status='processing',lease_until=%s WHERE id=%s",
+            ((NOW+timedelta(seconds=300)).isoformat(),early['id']))
+    assert attachment_status(db,early) is None
+
+
+def test_uncertain_new_attachment_failure_still_fences_older_pdf(db):
+    enable(db)
+    older = attachment_outcome(db,1,document_status='ok')
+    failed = attachment_outcome(db,2,document_status='unavailable',outcome='uncertain')
+    target = history_target(db)
+    assert attachment_status(db,target)=={'id':failed['id'],'document_status':'unavailable'}
+    assert store.recent_context(account_id='a',sender='s',conversation_id='c',
+        before_job_id=target['id'],db_factory=db,now=NOW)['id']==older['id']
+
+
+def test_many_attachmentless_failure_followups_cannot_hide_original_failure(db):
+    enable(db)
+    older = attachment_outcome(db,1000,document_status='ok')
+    failed = attachment_outcome(db,1001,document_status='unavailable',outcome='uncertain')
+    for number in range(32):
+        attachment_outcome(db,number,document_status='unavailable',payload=operations_payload())
+    target = history_target(db)
+    assert attachment_status(db,target)=={'id':failed['id'],'document_status':'unavailable'}
+    assert store.recent_context(account_id='a',sender='s',conversation_id='c',
+        before_job_id=target['id'],db_factory=db,now=NOW)['id']==older['id']
+
+
+@pytest.mark.parametrize('source_status',['pending','processing','ready','sending'])
+def test_completed_attachment_read_outcome_does_not_wait_for_outbound_reply(db,source_status):
+    enable(db)
+    source = attachment_outcome(db,1)
+    target = history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET status=%s,completed_at=NULL WHERE id=%s',
+                           (source_status,source['id']))
+    assert attachment_status(db,target)=={'id':source['id'],'document_status':'unavailable'}
+
+
+@pytest.mark.parametrize('completed_at',[NOW-timedelta(days=2),NOW+timedelta(days=1),None])
+def test_attachment_read_outcome_is_independent_of_delivery_completion_time(db,completed_at):
+    enable(db)
+    source = attachment_outcome(db,1)
+    target = history_target(db)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_agent_jobs SET completed_at=%s WHERE id=%s',
+                           (completed_at.isoformat() if completed_at else None,source['id']))
+    assert attachment_status(db,target)=={'id':source['id'],'document_status':'unavailable'}

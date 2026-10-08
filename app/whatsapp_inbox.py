@@ -259,6 +259,27 @@ MAX_PDF_BYTES = 20 * 1024 * 1024
 _PDF_REVIEW_SLOT = threading.BoundedSemaphore(1)
 
 
+class PDFValidationError(HTTPException):
+    """Allowlisted diagnostics only; never include provider or document content."""
+    _DETAILS = {
+        ('metadata', 'count'): 'One PDF per message is required',
+        ('metadata', 'mime'): 'Only verified PDF attachments are supported',
+        ('response', 'encoding'): 'Compressed media is not supported',
+        ('response', 'mime'): 'The media response is not a PDF',
+        ('response', 'signature'): 'Invalid PDF signature',
+        ('parser', 'invalid_pdf'): 'The media could not be validated as a PDF',
+        ('parser', 'busy'): 'Another PDF is being reviewed; try again later',
+        ('parser', 'timeout'): 'PDF validation exceeded the time limit',
+        ('parser', 'unavailable'): 'Local PDF validation is unavailable',
+    }
+
+    def __init__(self, stage, reason):
+        detail = self._DETAILS[(stage, reason)]
+        self.stage = self.diagnostic_stage = stage
+        self.reason = self.diagnostic_reason = reason
+        super().__init__(415, detail)
+
+
 async def verified_attachment(c, cid, message_id, index):
     """Resolve only attachments belonging to a verified private conversation."""
     await verified_conversation(c, cid)
@@ -287,7 +308,7 @@ async def verified_attachment(c, cid, message_id, index):
                 raise HTTPException(404, 'Attachment unavailable')
             item = attachments[index]
             if not isinstance(item, dict) or str(item.get('mimeType') or '').lower() != 'application/pdf':
-                raise HTTPException(415, 'Only verified PDF attachments are supported')
+                raise PDFValidationError('metadata', 'mime')
             return item
         pagination = payload.get('pagination') or {}
         if not pagination.get('hasMore'):
@@ -346,6 +367,7 @@ async def resolve_media_identifier(c, attachment, cid, message_id, index, accoun
 
 
 async def read_pdf(c, media_id, account):
+    """Read only after the caller verifies attachment metadata is application/pdf."""
     # The July 2026 WhatsApp media API streams bytes using the existing server
     # credential. Never request attachment.url/refreshUrl or forward auth to a CDN.
     if not isinstance(media_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,255}', media_id):
@@ -356,10 +378,12 @@ async def read_pdf(c, media_id, account):
             if response.status_code != 200:
                 raise HTTPException(502, 'Attachment is unavailable or expired')
             if response.headers.get('content-encoding', '').strip().lower() not in ('', 'identity'):
-                raise HTTPException(415, 'Compressed media is not supported')
+                raise PDFValidationError('response', 'encoding')
             mime = response.headers.get('content-type', '').split(';', 1)[0].strip().lower()
-            if mime != 'application/pdf':
-                raise HTTPException(415, 'The media response is not a PDF')
+            # The documented authenticated WhatsApp media transport returns
+            # application/octet-stream even for verified PDF attachments.
+            if mime not in ('application/pdf', 'application/octet-stream'):
+                raise PDFValidationError('response', 'mime')
             length = response.headers.get('content-length')
             if length and (not length.isdecimal() or int(length) > MAX_PDF_BYTES):
                 raise HTTPException(413, 'PDF exceeds the download limit')
@@ -371,8 +395,60 @@ async def read_pdf(c, media_id, account):
                 chunks.append(chunk)
             data = b''.join(chunks)
             if not data.startswith(b'%PDF-'):
-                raise HTTPException(415, 'Invalid PDF signature')
-            return data
+                raise PDFValidationError('response', 'signature')
+        if mime == 'application/octet-stream':
+            from starlette.concurrency import run_in_threadpool
+            await run_in_threadpool(validate_pdf_locally, data)
+        return data
+
+
+def validate_pdf_locally(data):
+    """Parse octet-stream PDFs without rendering, OCR, or executing PDF actions."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import tempfile
+    if not data or len(data) > MAX_PDF_BYTES:
+        raise HTTPException(413, 'PDF exceeds the download limit')
+    if not _PDF_REVIEW_SLOT.acquire(blocking=False):
+        raise PDFValidationError('parser', 'busy')
+    # Fixed argv/program, bounded process group, no credentials, no shell and no
+    # document-derived arguments. pdfinfo parses PDF structure, not active content.
+    program = """import os, resource
+resource.setrlimit(resource.RLIMIT_AS, (256*1024*1024, 256*1024*1024))
+resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))
+resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+os.execvp('pdfinfo', ['pdfinfo', '-'])
+"""
+    try:
+        with tempfile.TemporaryDirectory(prefix='afaaq-pdf-validate-') as scratch, tempfile.TemporaryFile() as output:
+            try:
+                process = subprocess.Popen([sys.executable, '-I', '-c', program], stdin=subprocess.PIPE,
+                    stdout=output, stderr=subprocess.DEVNULL, cwd=scratch,
+                    env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C.UTF-8',
+                         'LC_ALL': 'C.UTF-8', 'TMPDIR': scratch},
+                    start_new_session=True, close_fds=True)
+            except OSError:
+                raise PDFValidationError('parser', 'unavailable') from None
+            try:
+                process.communicate(input=data, timeout=15)
+            except subprocess.TimeoutExpired:
+                raise PDFValidationError('parser', 'timeout') from None
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            output.seek(0)
+            result = output.read(65537)
+            if (process.returncode or len(result) > 65536
+                    or not re.search(rb'^Pages:\s*[1-9][0-9]*\s*$', result, re.M)):
+                raise PDFValidationError('parser', 'invalid_pdf')
+    finally:
+        _PDF_REVIEW_SLOT.release()
 
 
 @router.get('/whatsapp-inbox/attachment')
