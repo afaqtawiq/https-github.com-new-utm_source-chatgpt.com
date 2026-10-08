@@ -700,3 +700,106 @@ def test_declared_pdf_with_incompatible_kind_cannot_enter_worker_model(setup,kin
     assert job['document_status']=='unavailable'
     assert job['diagnostics']['document_failure_stage']=='metadata'
     assert not setup['provider_reads'] and not setup['model_calls']
+
+
+def diagnostic_job(setup):
+    setup['media_mime']='text/html'
+    queued=agent.accept_inbound(payload(501,'لخص الملف',True));assert tick()
+    job=store.get_job(queued['job_id'])
+    assert job['document_status']=='unavailable'
+    return job
+
+
+def test_media_diagnostic_is_scoped_read_only_and_does_not_replay(web,setup,monkeypatch):
+    client,current=web;job=diagnostic_job(setup)
+    before=store.get_job(job['id']);outbox=store.get_outbox(job['id'])
+    sent=len(setup['sends']);calls=len(setup['model_calls'])
+    response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=settings_form())
+    assert response.status_code==200 and 'text/html' in response.text
+    assert 'signature' in response.text
+    assert store.get_job(job['id'])==before and store.get_outbox(job['id'])==outbox
+    assert len(setup['sends'])==sent and len(setup['model_calls'])==calls
+    assert 'synthetic-media' not in response.text and 'Authorization' not in response.text
+
+
+@pytest.mark.parametrize('change',['csrf','account','generation','role','owner','mode'])
+def test_media_diagnostic_rejects_invalid_scope_before_provider_read(web,setup,change):
+    client,current=web;job=diagnostic_job(setup);form=settings_form()
+    if change=='csrf':form['csrf']='wrong'
+    elif change=='account':form['account_id']='another'
+    elif change=='generation':form['generation']='0'
+    elif change=='role':current['role']='viewer'
+    elif change=='owner':store.update_settings(ACCOUNT,pilot_sender='966500000002')
+    elif change=='mode':store.update_settings(ACCOUNT,mode='off')
+    setup['provider_reads'].clear()
+    response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=form)
+    assert response.status_code in (403,409)
+    assert not setup['provider_reads']
+
+
+def test_media_diagnostic_only_inspects_previously_unread_attachment(web,setup):
+    client,current=web
+    queued=agent.accept_inbound(payload(511,'لخص الملف',True))
+    response=client.post('/whatsapp-assistant/jobs/'+str(queued['job_id'])+'/media-diagnostic',data=settings_form())
+    assert response.status_code==409 and not setup['provider_reads']
+
+
+def test_media_diagnostic_rechecks_scope_before_media_request(web,setup,monkeypatch):
+    client,current=web;job=diagnostic_job(setup)
+    async def revoke(c):store.update_settings(ACCOUNT,mode='off')
+    async def forbidden(*args,**kwargs):raise AssertionError('revoked scope must not fetch media')
+    monkeypatch.setattr(z,'validate_account',revoke)
+    monkeypatch.setattr(agent.inbox,'inspect_media_response',forbidden)
+    response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=settings_form())
+    assert response.status_code==409
+
+
+def test_media_diagnostic_rechecks_session_before_disclosure(web,setup,monkeypatch):
+    client,current=web;job=diagnostic_job(setup)
+    async def changed(*args,**kwargs):
+        current['user_id']=8
+        return {'status':200,'mime':'application/pdf'}
+    monkeypatch.setattr(agent.inbox,'inspect_media_response',changed)
+    response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=settings_form())
+    assert response.status_code==409 and 'application/pdf' not in response.text
+
+
+def test_media_diagnostic_uses_existing_admin_read_authority_not_send_privilege(web,setup):
+    client,current=web;job=diagnostic_job(setup)
+    current['permission']=False;current['mfa']=False
+    response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=settings_form())
+    assert response.status_code==200
+
+
+@pytest.mark.parametrize('phase',['before_read','before_disclosure'])
+def test_media_diagnostic_rechecks_admin_role(web,setup,monkeypatch,phase):
+    client,current=web;job=diagnostic_job(setup)
+    if phase=='before_read':
+        async def changed(c):current['role']='viewer'
+        monkeypatch.setattr(z,'validate_account',changed)
+        async def forbidden(*args,**kwargs):raise AssertionError('revoked admin must not fetch')
+        monkeypatch.setattr(agent.inbox,'inspect_media_response',forbidden)
+    else:
+        async def changed(*args,**kwargs):
+            current['role']='viewer'
+            return {'status':200,'mime':'application/pdf'}
+        monkeypatch.setattr(agent.inbox,'inspect_media_response',changed)
+    response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=settings_form())
+    assert response.status_code==403 and 'application/pdf' not in response.text
+
+
+@pytest.mark.parametrize('at_read',[1,2,3])
+def test_media_diagnostic_rechecks_role_after_each_settings_await(web,setup,monkeypatch,at_read):
+    client,current=web;job=diagnostic_job(setup);form=settings_form()
+    real=store.get_settings;seen=[];inspections=[]
+    def changing(*args,**kwargs):
+        result=real(*args,**kwargs);seen.append(1)
+        if len(seen)==at_read:current['role']='viewer'
+        return result
+    async def inspect(*args,**kwargs):
+        inspections.append(1);return {'status':200,'mime':'application/pdf'}
+    monkeypatch.setattr(store,'get_settings',changing)
+    monkeypatch.setattr(agent.inbox,'inspect_media_response',inspect)
+    response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=form)
+    assert response.status_code==403 and 'application/pdf' not in response.text
+    assert len(inspections)==(1 if at_read==3 else 0)

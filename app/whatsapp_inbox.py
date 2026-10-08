@@ -393,6 +393,103 @@ async def resolve_media_identifier(c, attachment, cid, message_id, index, accoun
     return media_id
 
 
+def _media_mime_summary(value):
+    if value is None or not value.strip():
+        return 'missing', 'other'
+    mime = value.split(';', 1)[0].strip().lower()
+    # Only a short media-type token may leave this function, never parameters,
+    # arbitrary header text, whitespace, controls, or a provider URL.
+    if (len(mime) > 127 or not re.fullmatch(
+            r'[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*', mime)):
+        return 'invalid', 'other'
+    if mime == 'application/pdf': category = 'pdf'
+    elif mime == 'application/octet-stream': category = 'binary'
+    elif mime == 'application/json' or mime.endswith('+json'): category = 'json'
+    elif mime in ('text/html', 'application/xhtml+xml'): category = 'html'
+    elif mime in ('application/zip', 'application/x-zip-compressed'): category = 'zip'
+    elif mime.split('/', 1)[0] in ('text', 'image', 'audio', 'video'): category = mime.split('/', 1)[0]
+    else: category = 'other'
+    return category, mime
+
+
+def _media_length_summary(value):
+    if value is None:
+        return 'missing', None
+    if not value or not value.isascii() or not value.isdecimal():
+        return 'invalid', None
+    digits = value.lstrip('0') or '0'
+    if len(digits) > len(str(MAX_PDF_BYTES)):
+        return 'over_limit', None
+    length = int(digits)
+    return ('over_limit', None) if length > MAX_PDF_BYTES else ('within_limit', length)
+
+
+def _media_prefix_signature(prefix):
+    if prefix.startswith(b'%PDF-'):
+        return 'pdf'
+    if prefix.startswith((b'PK\x03\x04', b'PK\x05\x06', b'PK\x07\x08')):
+        return 'zip'
+    probe = prefix.removeprefix(b'\xef\xbb\xbf').lstrip(b' \t\r\n').lower()
+    if probe.startswith((b'{', b'[')):
+        return 'json'
+    if probe.startswith((b'<!doctype html', b'<html')):
+        return 'html'
+    return 'other'
+
+
+async def inspect_media_response(c, media_id, account):
+    """One bounded, nonsecret diagnostic read of an already-authorized media ID."""
+    if not isinstance(media_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,255}', media_id):
+        raise HTTPException(404, 'Verified WhatsApp media identifier is unavailable')
+    summary = None
+    try:
+        async with asyncio.timeout(20):
+            async with c.stream('GET', z.BASE + '/whatsapp/media/' + media_id,
+                    params={'accountId': account}, headers={'Accept-Encoding': 'identity'},
+                    follow_redirects=False, timeout=20) as response:
+                mime_category, mime = _media_mime_summary(response.headers.get('content-type'))
+                length_category, length = _media_length_summary(response.headers.get('content-length'))
+                encoding = response.headers.get('content-encoding', '').strip().lower()
+                encoding = (encoding if encoding in ('identity', 'gzip', 'deflate', 'br', 'zstd')
+                            else 'missing' if not encoding else 'other')
+                summary = {'status': response.status_code, 'mime_category': mime_category,
+                    'mime': mime, 'encoding': encoding, 'length_category': length_category,
+                    'length': length, 'signature': 'not_read', 'json_structure': 'not_read'}
+                # Never decode compressed content or follow a redirect. Closing
+                # the stream after one bounded prefix avoids a full media fetch.
+                if 300 <= response.status_code < 400 or encoding not in ('missing', 'identity'):
+                    return summary
+                prefix = b''
+                async for chunk in response.aiter_raw(chunk_size=256):
+                    prefix += chunk[:256 - len(prefix)]
+                    if len(prefix) >= 256:
+                        break
+                summary['signature'] = _media_prefix_signature(prefix)
+                summary['json_structure'] = 'not_json'
+                if summary['signature'] == 'json':
+                    summary['json_structure'] = 'incomplete_or_unknown'
+                    # At the cap we cannot prove EOF without another read.
+                    if len(prefix) < 256:
+                        import json
+                        try:
+                            envelope = json.loads(prefix)
+                        except (ValueError, UnicodeDecodeError, RecursionError):
+                            pass
+                        else:
+                            summary['json_structure'] = 'object' if isinstance(envelope, dict) else 'array'
+                            if isinstance(envelope, dict):
+                                summary['json_key_presence'] = {key: key in envelope for key in ('url', 'error', 'message', 'data')}
+                return summary
+    except (TimeoutError, httpx.TimeoutException):
+        if summary is not None:
+            return summary
+        raise HTTPException(504, 'Media diagnostic timed out') from None
+    except httpx.HTTPError:
+        if summary is not None:
+            return summary
+        raise HTTPException(502, 'Media diagnostic is unavailable') from None
+
+
 async def read_pdf(c, media_id, account, *, require_structure=False):
     """Read a bound PDF candidate; absent MIME callers must require structure."""
     # The July 2026 WhatsApp media API streams bytes using the existing server
