@@ -160,10 +160,10 @@ def accept_inbound(payload):
 async def fetch_document(job):
     data = job['payload']
     if data.get('attachment_count') != 1 or len(data.get('attachments', [])) != 1:
-        raise HTTPException(415, 'One PDF per message is required')
+        raise inbox.PDFValidationError('metadata', 'count')
     attachment = data['attachments'][0]
     if attachment['mime'] != 'application/pdf':
-        raise HTTPException(415, 'Only PDF is available in this document lane')
+        raise inbox.PDFValidationError('metadata', 'mime')
     if job['account_id'] != z.account_id():
         raise HTTPException(409, 'Account changed')
     async with z.client() as c:
@@ -220,21 +220,46 @@ async def processing(job):
             diagnostics = {'reason':'document_read_failed','error_type':type(error).__name__}
             if isinstance(error,HTTPException):
                 diagnostics['http_status'] = error.status_code
+            if isinstance(error,inbox.PDFValidationError) and (error.stage,error.reason) in {
+                    ('metadata','count'),('metadata','mime'),('response','encoding'),
+                    ('response','mime'),('response','signature'),('parser','invalid_pdf'),
+                    ('parser','busy'),('parser','timeout'),('parser','unavailable')}:
+                diagnostics.update(document_failure_stage=error.stage,document_failure_reason=error.reason)
             if isinstance(error,z.WhatsAppPreflightBlocked):
                 diagnostics['provider_status'] = error.diagnostic.get('http_status')
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,diagnostics=diagnostics)
     else:
         context = None
+        unread = None
         if data.get('question_allowed') and privacy.wants_recent_document(data.get('question','')):
+            latest = await run_in_threadpool(store.recent_attachment_outcome,
+                account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid)
+            if latest and latest['document_status'] in ('unavailable','quarantined'):
+                unread = latest
             context = await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
                                              conversation_id=job['conversation_id'],before_job_id=jid)
+            if latest and (not context or latest['id'] > context['id']):
+                context = None
+                if latest['document_status'] == 'ok':
+                    # A newer attachment is no longer eligible for reuse; never
+                    # silently substitute an older approved document.
+                    unread = {'id':latest['id'],'document_status':'quarantined'}
             if (context and data.get('question_kind') == 'conversation' and conversation_history
                     and conversation_history[-1]['job_id'] > context['id']):
                 context = None
+            if (unread and data.get('question_kind') == 'conversation' and conversation_history
+                    and conversation_history[-1]['job_id'] > unread['id']):
+                unread = None
         if context:
             text, digest, source_id = context['document_text'],context['document_sha256'],context['id']
-        document_status = 'ok' if text else 'none'
-        await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id)
+        if unread and (not context or unread['id'] > context['id']):
+            # Keep only the failed-read outcome, never failed document content.
+            text,digest,source_id = '',None,None
+            document_status = unread['document_status']
+        else:
+            document_status = 'ok' if text else 'none'
+        await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,
+            diagnostics={'document_context_reason':'prior_unread_attachment','unread_source_job_id':unread['id']} if unread and document_status in ('unavailable','quarantined') else {})
     if not data.get('question_allowed'):
         if data.get('question_kind') == 'clarify_driver':
             reply = privacy.DRIVER_CLARIFY_REPLY
@@ -283,7 +308,9 @@ async def processing(job):
         except Exception:
             await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='uncertain',diagnostics={'reason':'model_outcome_unknown'})
             return
-    await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=reply)
+    await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=reply,
+        diagnostics={'model_attempted':False,'model_success':False,'model_reason':'document_unread'}
+        if document_status in ('unavailable','quarantined') else {})
 
 
 async def dispatch(job):
@@ -434,6 +461,8 @@ async def job_page(job_id: int, request: Request):
     read_scope(request,current,account)
     public = {k:job.get(k) for k in ('id','account_id','status','sender','conversation_id','message_id','event_id','read_attempts',
         'authorization_generation','document_sha256','document_status','context_source_job_id','model_started_at','model_completed_at','created_at','diagnostics')}
+    public['attachment_count'] = job['payload'].get('attachment_count')
+    public['attachment_mimes'] = [item.get('mime') if item.get('mime') in ('application/pdf','image/jpeg','image/png','audio/ogg','audio/mpeg','other') else 'other' for item in job['payload'].get('attachments',[])]
     public['attachment_shapes'] = [item.get('shape') for item in job['payload'].get('attachments',[])]
     public['provider_message_id'] = (outbox or {}).get('provider_message_id')
     body = '<h2>دليل المعالجة والرد</h2><pre>' + escape(json.dumps(public,ensure_ascii=False,indent=2,default=str)) + '</pre><p>sent تعني قبول المزود فقط؛ وصول الرد يؤكده المستلم أو دليل التسليم.</p>'

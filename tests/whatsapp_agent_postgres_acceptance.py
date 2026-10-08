@@ -562,6 +562,7 @@ def verify(factory):
     assert store.get_settings('settings-cas', db_factory=factory) == current
 
     verify_budget_notices(factory)
+    verify_recent_attachment_outcome(factory)
 
     print('PASS: PostgreSQL duplicate event/message aliases, concurrent SKIP LOCKED claims, '
           'conversation serialization, bounded reads/model budgets, crash checkpoints, '
@@ -897,6 +898,56 @@ def verify_budget_notices(factory):
     assert row(routine)['status']=='blocked' and row(routine)['model_started_at'] is None
     assert not notices(account)
     assert quota_count(account)==50
+
+
+def verify_recent_attachment_outcome(factory):
+    """Exercise the PostgreSQL JSONB predicate and both stale-PDF regressions."""
+    from app import whatsapp_agent_store as store
+    account, sender, conversation = 'attachment-outcome-pg', 'owner', 'attachment-thread'
+    store.update_settings(account,mode='owner_pilot',pilot_sender=sender,approved_sha256=[SHA],
+        db_factory=factory,now=NOW)
+    attachment = {'question':'Review this file','question_allowed':True,'question_kind':'document_question',
+        'attachment_count':1,'attachments':[{'mime':'application/pdf','url':'https://private.invalid/not-returned'}]}
+    followup = {**attachment,'attachment_count':0,'attachments':[]}
+
+    def enqueue_and_claim(message,payload):
+        with factory() as connection:
+            connection.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',(conversation,))
+            store.enqueue(connection,account_id=account,message_id=message,event_id='event-'+message,
+                sender=sender,conversation_id=conversation,payload=payload,now=NOW)
+        job=store.claim_job(account_id=account,db_factory=factory,now=NOW)
+        assert job
+        return job
+
+    def completed_read(message,*,document_status='unavailable',outcome='sent',payload=attachment):
+        job=enqueue_and_claim(message,payload)
+        store.checkpoint_document(job['id'],job['lease_token'],text=TEXT if document_status=='ok' else '',
+            sha256=SHA if document_status=='ok' else None,status=document_status,db_factory=factory,now=NOW)
+        store.prepare_reply(job['id'],job['lease_token'],reply_text='Synthetic local attachment result',
+            db_factory=factory,now=NOW)
+        sending=store.claim_send(account_id=account,db_factory=factory,now=NOW)
+        store.finish_send(job['id'],sending['send_token'],status=outcome,db_factory=factory,now=NOW)
+        return job
+
+    older=completed_read('older-approved-pdf',document_status='ok')
+    newer=completed_read('newer-unread-pdf',outcome='uncertain')
+    for number in range(32):
+        completed_read('attachmentless-followup-'+str(number),payload=followup)
+    target=enqueue_and_claim('current-question',followup)
+    scope=dict(account_id=account,sender=sender,conversation_id=conversation,before_job_id=target['id'],
+               db_factory=factory,now=NOW)
+    expected={'id':newer['id'],'document_status':'unavailable'}
+    assert store.recent_attachment_outcome(**scope)==expected
+    assert store.recent_context(**scope)['id']==older['id']
+    # Completed document-checkpoint evidence does not depend on send success,
+    # job.completed_at, or whether the local response has even been dispatched.
+    with factory() as connection:
+        connection.execute("UPDATE whatsapp_agent_jobs SET status='ready',completed_at=NULL WHERE id=%s",(newer['id'],))
+    assert store.recent_attachment_outcome(**scope)==expected
+    for field in ('account_id','sender','conversation_id'):
+        assert store.recent_attachment_outcome(**{**scope,field:'other'}) is None
+    store.update_settings(account,mode='off',db_factory=factory,now=NOW)
+    assert store.recent_attachment_outcome(**scope) is None
 
 
 def main():

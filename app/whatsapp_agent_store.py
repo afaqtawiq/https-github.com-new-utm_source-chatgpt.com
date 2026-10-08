@@ -688,6 +688,64 @@ def recent_context(*, account_id, sender, conversation_id, before_job_id=None,
     return None
 
 
+def _original_attachment_predicate(connection):
+    """Filter sanitized attachment metadata in SQL, before any row limit."""
+    if getattr(connection, "dialect", None) == "sqlite":
+        return """json_type(j.payload,'$.attachment_count')='integer'
+            AND json_extract(j.payload,'$.attachment_count')>0
+            AND json_type(j.payload,'$.attachments')='array'
+            AND EXISTS (SELECT 1 FROM json_each(j.payload,'$.attachments') attachment
+              WHERE attachment.type='object' AND attachment.value<>'{}')"""
+    return """CASE WHEN jsonb_typeof(j.payload::jsonb->'attachment_count')='number'
+            AND (j.payload::jsonb->>'attachment_count') ~ '^[0-9]+$'
+          THEN (j.payload::jsonb->>'attachment_count')::numeric>0 ELSE FALSE END
+        AND EXISTS (SELECT 1 FROM jsonb_array_elements(
+          CASE WHEN jsonb_typeof(j.payload::jsonb->'attachments')='array'
+            THEN j.payload::jsonb->'attachments' ELSE '[]'::jsonb END) attachment(value)
+          WHERE jsonb_typeof(attachment.value)='object' AND attachment.value<>'{}'::jsonb)"""
+
+
+def recent_attachment_outcome(*, account_id, sender, conversation_id, before_job_id,
+                              max_age_seconds=86400, db_factory=None, now=None):
+    """Return the latest original completed attachment checkpoint's ID/status.
+
+    The active target and source must share the current enabled authorization
+    generation, exact conversation scope and recent non-future timestamps. The
+    read outcome is authoritative independently of outgoing reply delivery: an
+    uncertain/failed/blocked reply must not resurrect an older successful PDF.
+    Only metadata is selected; document content, captions and URLs never leave
+    this helper. Callers must compare source IDs with their approved PDF cache.
+    """
+    for name, value in (("account_id", account_id), ("sender", sender),
+                        ("conversation_id", conversation_id)):
+        _identifier(value, name)
+    if type(before_job_id) is not int or before_job_id <= 0:
+        raise ValueError("before_job_id must identify the current processing job")
+    current = _time(now)
+    max_age_seconds = max(1, min(int(max_age_seconds), 86400))
+    stamp, cutoff = _stamp(current), _stamp(current - timedelta(seconds=max_age_seconds))
+    with (db_factory or database)() as connection:
+        raw = connection.execute("""SELECT j.id,j.document_status
+            FROM whatsapp_agent_jobs j
+            JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
+            JOIN whatsapp_agent_jobs target ON target.id=%s
+              AND target.account_id=j.account_id AND target.sender=j.sender
+              AND target.conversation_id=j.conversation_id
+            WHERE j.account_id=%s AND j.sender=%s AND j.conversation_id=%s
+              AND target.authorization_generation=s.authorization_generation
+              AND target.status='processing' AND target.lease_until>%s
+              AND target.created_at>%s AND target.created_at<=%s
+              AND j.id<target.id AND j.created_at>%s AND j.created_at<=%s
+              AND j.document_checkpointed_at>%s AND j.document_checkpointed_at<=%s
+              AND j.context_source_job_id IS NULL
+              AND j.document_status IN ('ok','quarantined','unavailable')
+              AND """ + _ELIGIBLE + " AND " + _original_attachment_predicate(connection) +
+            " ORDER BY j.id DESC LIMIT 1",
+            (before_job_id, account_id, sender, conversation_id, stamp, cutoff, stamp,
+             cutoff, stamp, cutoff, stamp)).fetchone()
+    return {"id": raw["id"], "document_status": raw["document_status"]} if raw else None
+
+
 MAX_EXCHANGES = 4
 MAX_EXCHANGE_QUESTION_CHARS = 1500
 MAX_EXCHANGE_REPLY_CHARS = 2500

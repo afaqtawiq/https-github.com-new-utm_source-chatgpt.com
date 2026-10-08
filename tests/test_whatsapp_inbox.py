@@ -516,3 +516,157 @@ def test_resolved_media_identity_cannot_change_origin_or_account(pdf_setup,url):
     provider['get_overrides']['/api/v1/inbox/conversations/c1/messages/inbound/attachments/0']=lambda req:httpx.Response(200,json={'url':url})
     assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==404
     assert not media['requests']
+
+
+def actual_pdf_bytes():
+    import io
+    from reportlab.pdfgen.canvas import Canvas
+    output=io.BytesIO(); canvas=Canvas(output)
+    canvas.drawString(50,750,'Synthetic octet-stream PDF. TEST-OCTET-1. No real transaction.')
+    canvas.save()
+    return output.getvalue()
+
+
+@pytest.mark.parametrize('mime',['application/octet-stream','application/octet-stream; charset=binary'])
+def test_actual_pdf_octet_stream_is_locally_validated(pdf_setup,mime):
+    import shutil
+    if not shutil.which('pdfinfo'): pytest.skip('Local PDF parser unavailable')
+    client,current,provider,conn,media=pdf_setup
+    media['headers']['content-type']=mime;media['body']=actual_pdf_bytes()
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==200,response.text
+    assert response.content==media['body'] and response.headers['content-type']=='application/pdf'
+    assert len(media['requests'])==1
+    assert str(media['requests'][0].url)=='https://zernio.com/api/v1/whatsapp/media/media-123?accountId=account-test'
+    assert media['requests'][0].headers['accept-encoding']=='identity'
+    assert response.headers['cache-control']=='no-store' and 'cookie' not in media['requests'][0].headers
+    assert not provider['posts']
+
+
+def test_actual_octet_stream_pdf_supports_existing_local_review(pdf_setup):
+    import shutil
+    if not shutil.which('pdfinfo') or not shutil.which('pdftotext'):
+        pytest.skip('Local PDF utilities unavailable')
+    client,current,provider,conn,media=pdf_setup
+    media['headers']['content-type']='application/octet-stream';media['body']=actual_pdf_bytes()
+    response=client.post('/whatsapp-inbox/attachment/text?conversation=c1&message=inbound&index=0',data={'csrf':'csrf'})
+    assert response.status_code==200,response.text
+    assert 'TEST-OCTET-1' in response.text and not provider['posts']
+
+
+@pytest.mark.parametrize('metadata',[None,{}, {'mimeType':''}, {'mimeType':'application/octet-stream'}, {'mimeType':'text/html'}])
+def test_octet_stream_requires_verified_pdf_metadata(pdf_setup,metadata):
+    client,current,provider,conn,media=pdf_setup
+    provider['messages'][0]['attachments']=[metadata]
+    media['headers']['content-type']='application/octet-stream';media['body']=actual_pdf_bytes()
+    response=client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0')
+    assert response.status_code==415 and not media['requests']
+    async def check():
+        async with z.client() as c: await inbox.verified_attachment(c,'c1','inbound',0)
+    with pytest.raises(inbox.PDFValidationError) as error: asyncio.run(check())
+    assert (error.value.stage,error.value.reason)==('metadata','mime')
+
+
+@pytest.mark.parametrize('mime,encoding,body,pair',[
+    ('application/octet-stream','identity',b'<html>private provider error</html>',('response','signature')),
+    ('application/octet-stream','identity',b'%PDF-1.7\ninvalid private document',('parser','invalid_pdf')),
+    ('text/html','identity',b'%PDF-1.7\nprivate content',('response','mime')),
+    ('application/json','identity',b'%PDF-1.7\nprivate content',('response','mime')),
+    ('','identity',b'%PDF-1.7\nprivate content',('response','mime')),
+    ('application/octet-stream','gzip',b'private compressed data',('response','encoding')),
+    ('application/pdf','identity',b'invalid private signature',('response','signature')),
+])
+def test_pdf_transport_rejections_have_only_fixed_diagnostics(pdf_setup,mime,encoding,body,pair):
+    client,current,provider,conn,media=pdf_setup
+    media.update(body=body);media['headers'].update({'content-type':mime,'content-encoding':encoding})
+    async def check():
+        async with z.client() as c: return await inbox.read_pdf(c,'media-123','account-test')
+    with pytest.raises(inbox.PDFValidationError) as error: asyncio.run(check())
+    exc=error.value
+    assert isinstance(exc,HTTPException) and exc.status_code==415
+    assert (exc.stage,exc.reason)==pair
+    assert (exc.diagnostic_stage,exc.diagnostic_reason)==pair
+    assert 'private' not in exc.detail and body.decode() not in exc.detail
+    assert len(media['requests'])==1
+
+
+@pytest.mark.parametrize('length',[None,'999999999','invalid','-1'])
+def test_octet_stream_remains_bounded_before_parser(pdf_setup,monkeypatch,length):
+    client,current,provider,conn,media=pdf_setup
+    media['headers']['content-type']='application/octet-stream'
+    if length is not None: media['headers']['content-length']=length
+    monkeypatch.setattr(inbox,'MAX_PDF_BYTES',12)
+    def unexpected(data): raise AssertionError('Oversized PDF must never reach parser')
+    monkeypatch.setattr(inbox,'validate_pdf_locally',unexpected)
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==413
+
+
+@pytest.mark.parametrize('status',[301,302,307,308])
+def test_octet_stream_redirects_remain_blocked(pdf_setup,status):
+    client,current,provider,conn,media=pdf_setup
+    media.update(status=status);media['headers'].update({'content-type':'application/octet-stream','location':'https://evil.invalid/private'})
+    assert client.get('/whatsapp-inbox/attachment?conversation=c1&message=inbound&index=0').status_code==502
+    assert len(media['requests'])==1
+
+
+def test_pdf_diagnostics_reject_unlisted_values():
+    error=inbox.PDFValidationError('metadata','count')
+    assert error.status_code==415 and error.reason=='count'
+    with pytest.raises(KeyError): inbox.PDFValidationError('private account','private provider body')
+
+
+def test_octet_parser_busy_and_input_limits(monkeypatch):
+    assert inbox._PDF_REVIEW_SLOT.acquire(blocking=False)
+    try:
+        with pytest.raises(inbox.PDFValidationError) as error: inbox.validate_pdf_locally(b'%PDF-1.7')
+        assert (error.value.stage,error.value.reason)==('parser','busy')
+    finally:
+        inbox._PDF_REVIEW_SLOT.release()
+    monkeypatch.setattr(inbox,'MAX_PDF_BYTES',12)
+    with pytest.raises(HTTPException) as error: inbox.validate_pdf_locally(b'%PDF-1.7 oversized')
+    assert error.value.status_code==413
+
+
+@pytest.mark.parametrize('mode',['success','failure','timeout','malformed','oversize_output','unavailable'])
+def test_octet_parser_resource_cleanup_and_private_environment(monkeypatch,mode):
+    import os
+    import subprocess
+    from pathlib import Path
+    calls={'kills':[],'waits':0}
+    monkeypatch.setenv('ZERNIO_API_KEY','synthetic-secret-never-forward')
+    class Process:
+        pid=999992
+        returncode=1 if mode=='failure' else 0
+        def __init__(self,args,**kwargs):
+            assert args[1:3]==['-I','-c']
+            assert 'RLIMIT_AS, (256*1024*1024, 256*1024*1024)' in args[3]
+            assert 'RLIMIT_CPU, (10, 10)' in args[3] and 'RLIMIT_FSIZE, (65536, 65536)' in args[3]
+            assert "os.execvp('pdfinfo', ['pdfinfo', '-'])" in args[3]
+            assert kwargs['start_new_session'] is True and kwargs['close_fds'] is True
+            assert kwargs['stderr']==subprocess.DEVNULL and 'shell' not in kwargs
+            assert set(kwargs['env'])=={'PATH','LANG','LC_ALL','TMPDIR'}
+            assert 'ZERNIO_API_KEY' not in kwargs['env']
+            calls['scratch']=kwargs['cwd'];assert kwargs['cwd']==kwargs['env']['TMPDIR']
+            Path(calls['scratch'],'temporary-parser-file').write_bytes(b'synthetic private test')
+            if mode=='unavailable': raise OSError('private executable failure')
+            output=(b'Pages: 1\nTitle: private metadata\n' if mode!='malformed' else b'private bad parser output')
+            if mode=='oversize_output': output=b'x'*65537
+            kwargs['stdout'].write(output);kwargs['stdout'].flush()
+        def communicate(self,**kwargs):
+            assert kwargs=={'input':b'%PDF-1.7 test','timeout':15}
+            if mode=='timeout': raise subprocess.TimeoutExpired('private process description',15)
+        def wait(self): calls['waits']+=1
+    monkeypatch.setattr(subprocess,'Popen',Process)
+    monkeypatch.setattr(os,'killpg',lambda pid,sig:calls['kills'].append(pid))
+    if mode=='success':
+        assert inbox.validate_pdf_locally(b'%PDF-1.7 test') is None
+    else:
+        with pytest.raises(inbox.PDFValidationError) as error: inbox.validate_pdf_locally(b'%PDF-1.7 test')
+        expected={'timeout':'timeout','unavailable':'unavailable'}.get(mode,'invalid_pdf')
+        assert (error.value.stage,error.value.reason)==('parser',expected)
+        assert 'private' not in error.value.detail
+    assert calls['kills']==([] if mode=='unavailable' else [999992])
+    assert calls['waits']==(0 if mode=='unavailable' else 1)
+    assert not os.path.exists(calls['scratch'])
+    assert inbox._PDF_REVIEW_SLOT.acquire(blocking=False)
+    inbox._PDF_REVIEW_SLOT.release()

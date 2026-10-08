@@ -51,7 +51,7 @@ def setup(monkeypatch):
         if req.url.path.endswith('/accounts'):
             return httpx.Response(200,json={'accounts':[{'_id':ACCOUNT,'platform':'whatsapp','isActive':True}]})
         if req.url.path.endswith('/whatsapp/media/synthetic-media'):
-            return httpx.Response(200,stream=httpx.ByteStream(state['pdf']),headers={'content-type':'application/pdf'})
+            return httpx.Response(200,stream=httpx.ByteStream(state['pdf']),headers={'content-type':state.get('media_mime','application/pdf')})
         raise AssertionError('Unexpected provider read '+req.url.path)
     monkeypatch.setattr(z,'client',lambda:httpx.AsyncClient(transport=httpx.MockTransport(provider)))
     async def model(question,document_text,**kwargs):
@@ -502,3 +502,130 @@ def test_combined_identity_worker_uses_guarded_model_for_other_intent(setup, mon
     assert privacy.CANONICAL_IDENTITY in job['reply_text'] and 'النقل البري' in job['reply_text']
     assert len(bodies)==1 and json.loads(bodies[0]['messages'][0]['content'])['question']==question
     assert len(setup['sends'])==1 and setup['sends'][0][0]==OWNER
+
+
+@pytest.mark.parametrize('question', ['هذا الملف', 'لخص بيانات الشحنة الموجودة في الملف'])
+def test_failed_attachment_followup_is_local_and_truthful(setup,question):
+    bad=payload(201,'لخص الملف',True)
+    bad['message']['attachments'][0].pop('mimeType')
+    queued=agent.accept_inbound(bad);assert tick()
+    first=store.get_job(queued['job_id'])
+    assert first['document_status']=='unavailable'
+    assert first['diagnostics']['document_failure_stage']=='metadata'
+    assert first['diagnostics']['document_failure_reason']=='mime'
+    following=agent.accept_inbound(payload(202,question));assert tick()
+    job=store.get_job(following['job_id'])
+    assert job['status']=='sent' and job['document_status']=='unavailable'
+    assert job['diagnostics']['unread_source_job_id']==first['id']
+    assert 'لم أتمكن من قراءة' in job['reply_text']
+    assert job['context_source_job_id'] is None and not job['document_text']
+    assert not setup['model_calls'] and not setup['provider_reads']
+
+
+def test_newer_failed_attachment_does_not_answer_from_older_pdf(setup):
+    old=agent.accept_inbound(payload(211,'لخص الملف',True));assert tick()
+    assert store.get_job(old['job_id'])['document_status']=='ok'
+    bad=payload(212,'لخص الملف',True)
+    bad['message']['attachments'][0]['mimeType']='image/jpeg'
+    failed=agent.accept_inbound(bad);assert tick()
+    follow=agent.accept_inbound(payload(213,'ما البوابة في الملف؟'));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['document_status']=='unavailable' and not job['document_text']
+    assert job['diagnostics']['unread_source_job_id']==failed['job_id']
+    assert len(setup['model_calls'])==1
+
+
+def test_unrelated_chat_after_unread_attachment_keeps_normal_model_path(setup,monkeypatch):
+    bad=payload(221,'لخص الملف',True);bad['message']['attachments'][0].pop('mimeType')
+    agent.accept_inbound(bad);assert tick()
+    async def chat(question,document_text,**kwargs):
+        if kwargs.get('before_request'):await kwargs['before_request']()
+        setup['model_calls'].append((question,document_text))
+        return privacy.ReplyResult('ما مدينة التحميل والوجهة؟',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',chat)
+    follow=agent.accept_inbound(payload(222,'كيف أرتب نقل بضاعة؟'));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['document_status']=='none' and job['diagnostics']['model_success'] is True
+    assert len(setup['model_calls'])==1
+
+
+def test_documented_octet_stream_actual_pdf_reaches_approved_extraction(setup):
+    setup['media_mime']='application/octet-stream'
+    queued=agent.accept_inbound(payload(231,'لخص الملف',True));assert tick()
+    job=store.get_job(queued['job_id'])
+    assert job['document_status']=='ok' and job['document_sha256']==setup['hash']
+    assert setup['actual'] in job['document_text']
+    assert job['diagnostics']['model_success'] is True
+
+
+def test_attachment_diagnostics_are_bounded_and_no_urls(web):
+    client,current=web
+    bad=payload(241,'لخص الملف',True)
+    bad['message']['attachments'][0]['mimeType']='application/x-secret-token'
+    queued=agent.accept_inbound(bad);assert tick()
+    response=client.get('/whatsapp-assistant/jobs/'+str(queued['job_id']))
+    assert response.status_code==200
+    assert '&quot;attachment_count&quot;: 1' in response.text
+    assert '&quot;attachment_mimes&quot;' in response.text and '&quot;other&quot;' in response.text
+    assert 'document_failure_stage' in response.text and 'metadata' in response.text
+    assert 'x-secret-token' not in response.text and 'private.invalid' not in response.text
+    assert 'model_attempted' in response.text and 'document_unread' in response.text
+
+
+
+def test_unread_attachment_followup_never_reserves_model_even_at_limit(setup,monkeypatch):
+    bad=payload(251,'لخص الملف',True);bad['message']['attachments'][0].pop('mimeType')
+    agent.accept_inbound(bad);assert tick()
+    def forbidden(*args,**kwargs):raise AssertionError('local unread notice must not reserve model')
+    monkeypatch.setattr(store,'reserve_model',forbidden)
+    follow=agent.accept_inbound(payload(252,'هذا الملف'));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['status']=='sent' and job['model_started_at'] is None
+    assert job['diagnostics']['model_success'] is False
+
+
+def test_quarantined_attachment_followup_does_not_share_document(setup):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    first=agent.accept_inbound(payload(261,'لخص الملف',True));assert tick()
+    following=agent.accept_inbound(payload(262,'هذا الملف'));assert tick()
+    job=store.get_job(following['job_id'])
+    assert job['document_status']=='quarantined' and not job['document_text']
+    assert job['diagnostics']['unread_source_job_id']==first['job_id']
+    assert not setup['model_calls']
+
+
+@pytest.mark.parametrize('uncertain', [False, True])
+def test_newer_unread_attachment_survives_send_uncertainty_and_many_followups(setup,monkeypatch,uncertain):
+    agent.accept_inbound(payload(271,'لخص محتوى المستند',True));assert tick()
+    original_fetch,original_send=agent.fetch_document,z.send
+    async def unread(*args,**kwargs):raise agent.inbox.PDFValidationError('response','mime')
+    async def lost(*args,**kwargs):raise httpx.ReadTimeout('synthetic')
+    monkeypatch.setattr(agent,'fetch_document',unread)
+    if uncertain:monkeypatch.setattr(z,'send',lost)
+    failed=agent.accept_inbound(payload(272,'لخص محتوى المستند',True));assert tick()
+    monkeypatch.setattr(agent,'fetch_document',original_fetch)
+    monkeypatch.setattr(z,'send',original_send)
+    for number in range(273,307):
+        follow=agent.accept_inbound(payload(number,'ما لون الملف؟'));assert tick()
+        job=store.get_job(follow['job_id'])
+        assert job['document_status']=='unavailable'
+        assert job['context_source_job_id'] is None
+        assert job['diagnostics']['unread_source_job_id']==failed['job_id']
+        assert len(setup['model_calls'])==1
+
+
+def test_newer_safe_text_discussion_wins_ambiguous_pronoun_after_failure(setup,monkeypatch):
+    bad=payload(311,'لخص الملف',True);bad['message']['attachments'][0].pop('mimeType')
+    agent.accept_inbound(bad);assert tick()
+    async def chat(question,document_text,**kwargs):
+        if kwargs.get('before_request'):await kwargs['before_request']()
+        setup['model_calls'].append((question,document_text,kwargs))
+        return privacy.ReplyResult('أقدر أشرح لك خطوات تجهيز الشحنة.',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',chat)
+    agent.accept_inbound(payload(312,'كيف أرتب نقل بضاعة؟'));assert tick()
+    following=agent.accept_inbound(payload(313,'وضح لي هذا'));assert tick()
+    job=store.get_job(following['job_id'])
+    assert job['document_status']=='none' and len(setup['model_calls'])==2
+    explicit=agent.accept_inbound(payload(314,'هذا الملف'));assert tick()
+    assert store.get_job(explicit['job_id'])['document_status']=='unavailable'
+    assert len(setup['model_calls'])==2
