@@ -803,3 +803,82 @@ def test_media_diagnostic_rechecks_role_after_each_settings_await(web,setup,monk
     response=client.post('/whatsapp-assistant/jobs/'+str(job['id'])+'/media-diagnostic',data=form)
     assert response.status_code==403 and 'application/pdf' not in response.text
     assert len(inspections)==(1 if at_read==3 else 0)
+
+
+@pytest.mark.parametrize('question',['كم عدد الكراتين','كم وزنها؟','وش نوع البضاعة؟','ما لون الصناديق؟','how many boxes?'])
+def test_natural_document_details_use_actual_pdf_after_delay(setup,monkeypatch,question):
+    from datetime import timedelta
+    first=agent.accept_inbound(payload(601,'لخص محتوى المستند',True));assert tick()
+    real_time=store._time;later=real_time()+timedelta(hours=3)
+    monkeypatch.setattr(store,'_time',lambda value=None:real_time(value) if value is not None else later)
+    follow=agent.accept_inbound(payload(602,question));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['context_source_job_id']==first['job_id'] and job['document_status']=='ok'
+    assert job['payload']['question_kind']=='document_question'
+    assert setup['actual'] in setup['model_calls'][-1][1]
+    assert job['diagnostics']['model_success'] is True
+
+
+def test_new_shipment_topic_prevents_implicit_old_document_answer(setup,monkeypatch):
+    agent.accept_inbound(payload(611,'لخص محتوى المستند',True));assert tick()
+    calls=[]
+    async def chat(question,document_text,**kwargs):
+        if kwargs.get('before_request'):await kwargs['before_request']()
+        calls.append((question,document_text))
+        return privacy.ReplyResult('ما التفاصيل التي تقصدها؟',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',chat)
+    agent.accept_inbound(payload(612,'عندي شحنة جديدة من جدة إلى الدمام'));assert tick()
+    follow=agent.accept_inbound(payload(613,'كم عدد الكراتين'));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['document_status']=='none' and job['context_source_job_id'] is None
+    assert calls[-1][1]==''
+
+
+@pytest.mark.parametrize('boundary',['expired','revoked'])
+def test_natural_count_never_reuses_expired_or_revoked_pdf(setup,monkeypatch,boundary):
+    from datetime import timedelta
+    agent.accept_inbound(payload(621,'لخص محتوى المستند',True));assert tick()
+    if boundary=='expired':
+        real_time=store._time;later=real_time()+timedelta(hours=25)
+        monkeypatch.setattr(store,'_time',lambda value=None:real_time(value) if value is not None else later)
+    else:store.update_settings(ACCOUNT,approved_sha256=['b'*64])
+    seen=[]
+    async def chat(question,document_text,**kwargs):
+        if kwargs.get('before_request'):await kwargs['before_request']()
+        seen.append(document_text)
+        return privacy.ReplyResult('لا توجد بيانات مقروءة متاحة لهذا السؤال.',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',chat)
+    follow=agent.accept_inbound(payload(622,'كم عدد الكراتين'));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert not job['document_text'] and job['context_source_job_id'] is None
+    assert all(not value for value in seen)
+
+
+def test_natural_count_keeps_newer_failure_and_unknown_quote_boundaries(setup):
+    agent.accept_inbound(payload(631,'لخص الملف',True));assert tick()
+    bad=payload(632,'لخص الملف',True);bad['message']['attachments'][0]['mimeType']='text/html'
+    failed=agent.accept_inbound(bad);assert tick()
+    follow=agent.accept_inbound(payload(633,'كم عدد الكراتين'));assert tick()
+    job=store.get_job(follow['job_id'])
+    assert job['document_status']=='unavailable' and job['diagnostics']['unread_source_job_id']==failed['job_id']
+    quoted=agent.accept_inbound(payload(634,'كم عدد الكراتين',metadata={'quotedMessage':{'platformMessageId':'inaccessible'}}));assert tick()
+    assert store.get_job(quoted['job_id'])['document_status']=='reference_unavailable'
+    assert len(setup['model_calls'])==1
+
+
+def test_new_shipment_boundary_cannot_fall_out_of_retained_history(setup,monkeypatch):
+    agent.accept_inbound(payload(641,'لخص الملف',True));assert tick()
+    calls=[]
+    async def chat(question,document_text,**kwargs):
+        if kwargs.get('before_request'):await kwargs['before_request']()
+        calls.append((question,document_text,kwargs))
+        return privacy.ReplyResult('اذكر التفاصيل التي تريد توضيحها.',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',chat)
+    for number,text in enumerate(['عندي شحنة جديدة','من جدة إلى الدمام','سيراميك','حاوية40قدم','12 كرتون','كم عدد الكراتين؟'],642):
+        queued=agent.accept_inbound(payload(number,text));assert tick()
+    job=store.get_job(queued['job_id'])
+    assert job['document_status']=='none' and job['context_source_job_id'] is None
+    assert calls[-1][1]==''
+    assert any(row['question']=='12 كرتون' for row in calls[-1][2]['conversation_history'])
+    explicit=agent.accept_inbound(payload(650,'كم عدد الكراتين في الملف؟'));assert tick()
+    assert store.get_job(explicit['job_id'])['document_status']=='ok'

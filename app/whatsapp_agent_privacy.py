@@ -546,6 +546,45 @@ def _public_knowledge() -> str:
     return '\n'.join(lines)
 
 
+_DOCUMENT_TOPIC_SHIFT = re.compile(
+    r'(?i)(?:(?:عندي|عندنا|لدي|معي|احتاج|ابغي|ابغى|اريد).{0,20}(?:شحنه|حموله|طلب)|'
+    r'(?:شحنه|حموله|طلب|موضوع|سؤال|ملف|مستند)\s+(?:ال)?(?:جديد|اخر|ثاني|مختلف)|'
+    r'(?:غير|نغير|نترك|بعيدا عن)\s*(?:ال)?(?:موضوع|ملف|مستند)|'
+    r'\b(?:new|another|different)\s+(?:shipment|cargo|order|topic|question|document|file)\b|'
+    r'خدماتكم|فريق|موظف|مدير|(?:هل\s*)?عندكم\s*(?:نقل|تخليص|تخزين)|'
+    r'\b(?:your services|your team|your staff)\b)')
+_DOCUMENT_GENERAL = re.compile(r'(?i)(?<!\w)(?:افضل|انسب|معني|معنى|يعني|تعريف|الفرق|فرق|تنصح|نصيحه|مقارنه|recommend|best|meaning|definition|difference)(?!\w)')
+_DOCUMENT_DETAIL = re.compile(
+    r'(?i)(?<!\w)(?:[وبلف]?(?:ال)?)?(?:عدد|كميه|وزن|حجم|طول|عرض|ارتفاع|مقاس|نوع|'
+    r'وصف|لون|بوابه|مسار|وجهه|منشا|معرف|مرجع|رمز|عباره|كراتين|كرتون|صناديق|صندوق)'
+    r'(?:ها|ه|هم|تها|ته)?(?!\w)|'
+    r'\b(?:count|quantity|weight|size|length|width|height|type|description|colou?r|gate|'
+    r'route|destination|origin|identifier|reference|code|phrase|cartons?|boxes?)\b')
+_DETAIL_REQUEST = re.compile(
+    r'(?i)^(?:(?:طيب|تمام|لو سمحت|من فضلك|ممكن|please)\s+)?(?:و|ف)?'
+    r'(?:كم|ما|ماهي|ماهو|وش|ايش|شنو|وين|اين|اي|اذكر|وضح|قول|قولي|'
+    r'what|how many|how much|which|where|tell|describe)(?!\w)')
+
+
+def document_topic_shift(text: object) -> bool:
+    if not isinstance(text,str):
+        return True
+    folded = _fold(text)
+    return bool(_DOCUMENT_TOPIC_SHIFT.search(folded)
+                or _DOCUMENT_GENERAL.search(folded) or _LIVE_STATUS.search(folded) or _pricing_question(text))
+
+
+def implicit_document_detail(text: object) -> bool:
+    """Semantic selection hint only; scope, privacy and actual source stay mandatory."""
+    if not isinstance(text,str):
+        return False
+    folded = _fold(text)
+    return bool(len(folded)<=160 and len(folded.split())<=20
+                and not _DOCUMENT_REFERENCE.search(folded) and not document_topic_shift(text)
+                and _DETAIL_REQUEST.search(folded)
+                and _DOCUMENT_DETAIL.search(folded))
+
+
 def screen_question(text: object) -> ScreenDecision:
     """Screen the current authorized text/caption, never an arbitrary transcript.
 
@@ -602,6 +641,8 @@ def screen_question(text: object) -> ScreenDecision:
         return ScreenDecision(False, reason='unknown_question_content', kind='clarify')
     if _DOCUMENT_REFERENCE.search(_NO_DOCUMENT.sub(' ', folded)):
         return ScreenDecision(True, cleaned, 'natural_document_question', 'document_question')
+    if implicit_document_detail(cleaned):
+        return ScreenDecision(True, cleaned, 'implicit_document_detail', 'document_question')
     if _BUSINESS_TOPIC.search(folded):
         return ScreenDecision(True, cleaned, 'ordinary_business_text', 'operations')
     # Ordinary safe chat, including a single-word follow-up, does not need a
@@ -614,6 +655,19 @@ def screen_caption(text: object) -> ScreenDecision:
     if text is None or (isinstance(text, str) and not text.strip()):
         return screen_question('لخص محتوى المستند.')
     return screen_question(text)
+
+
+def _attributed_user_detail(answer: str, user_text: str) -> bool:
+    value = _fold(answer)
+    prefix = re.match(r'^(?:حسب|بحسب|وفق)\s+(?:وصفك|كلامك|ما\s+ذكرت(?:ه)?)\s*[,،:]?\s*',value)
+    if not prefix:
+        return False
+    def tokens(text):
+        words=re.findall(r'[^\W_]+',_fold(text),re.UNICODE)
+        return {word[2:] if word.startswith('ال') and len(word)>3 else word for word in words}
+    labels=tokens('عدد كمية وزن حجم نوع وصف لون مسار وجهة بوابة مرجع رمز كرتون كراتين صندوق صناديق بضاعة شحنة هو هي فقط من إلى في و')
+    facts=tokens(value[prefix.end():])-labels
+    return bool(facts) and facts<=tokens(user_text)
 
 
 def wants_recent_document(question: object) -> bool:
@@ -1017,8 +1071,9 @@ def _missing_source_fact_claim(value: str) -> bool:
     if _ASSERTED_DOCUMENT_ACCESS.search(folded):
         return True
     for sentence in re.split(r'[.\n]', folded):
+        sentence = re.sub(r'^\s*(?:حسب|بحسب|وفق)\s+(?:وصفك|كلامك|ما\s+ذكرت(?:ه)?)\s*[,،:]?\s*','',sentence)
         if '?' not in sentence and '؟' not in sentence and re.match(
-            r'\s*(?:اللون|المسار|الكميه|البوابه|الحموله|المعرف|المرجع|رقم\s*(?:المستند|الشحنه))\s', sentence):
+            r'\s*(?:عدد|العدد|اللون|المسار|الكميه|البوابه|الحموله|المعرف|المرجع|رقم\s*(?:المستند|الشحنه))\s', sentence):
             return True
     return False
 
@@ -1461,6 +1516,8 @@ The public knowledge is not that document. Do not state or guess its identifier,
 route, quantity, color, gate, cargo, contents or any other document fact. Respond
 naturally to the user's intent; ask a brief clarification or request the needed
 source when necessary. Never claim that an absent document was read.'''
+            if implicit_document_detail(screened_question.safe_text) and checked_history.entries:
+                source_note += '\nYou may restate facts explicitly supplied by the user in history, attributed with حسب وصفك. Do not treat earlier assistant statements as evidence or invent missing values.'
         system = CONVERSATION_SYSTEM + source_note
     else:
         system = SYSTEM
@@ -1515,6 +1572,10 @@ physical dimension only; it never authorizes a price or an approval.'''
         # Ordinary user-stated names/references/counts may be acknowledged, not
         # claimed as independently verified. PDF evidence grounding is unchanged.
         grounding = source_text
+        implicit_user_text = ''
+        if missing_document and implicit_document_detail(screened_question.safe_text):
+            implicit_user_text = '\n'.join(entry.get('user','') for entry in previous.entries)
+            grounding += '\n' + implicit_user_text
         if natural_response and not using_document and not missing_document:
             grounding += '\n' + screened_question.safe_text
             grounding += '\n' + '\n'.join(value for entry in previous.entries for value in entry.values())
@@ -1524,7 +1585,8 @@ physical dimension only; it never authorizes a price or an approval.'''
         answer = output.safe_text if output.allowed else None
         if answer and not using_document and _ASSERTED_DOCUMENT_ACCESS.search(_fold(answer)):
             return finish(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
-        if answer and missing_document and _missing_source_fact_claim(answer):
+        if (answer and missing_document and _missing_source_fact_claim(answer)
+                and not (implicit_user_text and _attributed_user_detail(answer,implicit_user_text))):
             return finish(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
         if answer:
             return finish(answer, True, True, 'model_answer')
