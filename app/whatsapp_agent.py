@@ -500,6 +500,10 @@ async def job_page(job_id: int, request: Request):
         body += '<h3>النص الذي قُرئ فعليًا</h3><pre>' + escape(job['document_text']) + '</pre>'
     if job['payload'].get('attachments'):
         body += '<a href="/whatsapp-assistant/jobs/' + str(job_id) + '/document">تنزيل المستند الأصلي للمراجعة المحلية</a>'
+    if (settings['mode']=='owner_pilot' and job['sender']==settings['pilot_sender']
+            and job['authorization_generation']==settings['authorization_generation']
+            and job['document_status']=='unavailable' and store._pdf_payload(job['payload'])):
+        body += '<form method="post" action="/whatsapp-assistant/jobs/' + str(job_id) + '/media-diagnostic"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '">' + scope_fields(settings) + '<button>فحص بيانات استجابة المرفق فقط</button></form>'
     body += '<form method="post" action="/whatsapp-assistant/accept"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '">' + scope_fields(settings) + '<label>رقم طلب قراءة PDF الناجح<input name="document_job_id" required></label><label>رقم طلب سؤال المتابعة الناجح<input name="followup_job_id" required></label><label><input type="checkbox" name="owner_receipt_confirmed" value="yes" required>أكد المالك وصول الردين ومطابقتهما للملف التجريبي الفعلي.</label><button>اعتماد نجاح الاختبار وتوسيع الردود التشغيلية المصرح بها</button></form>'
     return inbox.page(body)
 
@@ -515,6 +519,50 @@ async def job_document(job_id: int, request: Request):
     read_scope(request,current,account)
     return Response(content,media_type='application/pdf',headers={'Content-Disposition':'attachment; filename="whatsapp-document.pdf"',
         'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"sandbox; default-src 'none'"})
+
+
+def diagnostic_scope(job, settings, account):
+    if (not job or job['account_id'] != account or settings['mode'] != 'owner_pilot'
+            or job['sender'] != settings['pilot_sender']
+            or job['authorization_generation'] != settings['authorization_generation']
+            or job['document_status'] != 'unavailable' or not store._pdf_payload(job['payload'])):
+        raise HTTPException(409,'Current owner attachment scope required')
+    media_id = job['payload']['attachments'][0].get('media_id')
+    if not inbox.media_identifier(media_id):
+        raise HTTPException(404,'Verified media identity unavailable')
+    return media_id
+
+
+@router.post('/whatsapp-assistant/jobs/{job_id}/media-diagnostic')
+async def media_diagnostic(job_id: int, request: Request):
+    """One read-only bounded provider inspection; never invokes the worker."""
+    current = z.session(request)
+    account = z.account_id()
+    form = await inbox.form(request,current)
+    read_scope(request,current,account)
+    if form.get('account_id') != account:
+        raise HTTPException(409,'Account changed')
+    try:
+        generation = int(form['generation'])
+    except (ValueError,KeyError):
+        raise HTTPException(400,'Authorization generation required') from None
+    job = await run_in_threadpool(store.get_job,job_id)
+    settings = await run_in_threadpool(store.get_settings,account)
+    media_id = diagnostic_scope(job,settings,account)
+    if settings['authorization_generation'] != generation:
+        raise HTTPException(409,'Scope changed')
+    read_scope(request,current,account)
+    async with z.client() as c:
+        await z.validate_account(c)
+        latest = await run_in_threadpool(store.get_settings,account)
+        diagnostic_scope(job,latest,account)
+        read_scope(request,current,account)
+        result = await inbox.inspect_media_response(c,media_id,account)
+    latest = await run_in_threadpool(store.get_settings,account)
+    diagnostic_scope(job,latest,account)
+    read_scope(request,current,account)
+    body = '<h2>بيانات استجابة المرفق</h2><p>فحص للنوع والحالة فقط؛ لم يُحلل المستند ولم يُرسل رد.</p><pre>' + escape(json.dumps(result,ensure_ascii=False,indent=2)) + '</pre>'
+    return inbox.page(body)
 
 
 @router.post('/whatsapp-assistant/accept')

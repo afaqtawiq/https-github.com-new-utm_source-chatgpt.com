@@ -794,3 +794,185 @@ def test_absent_mime_parser_keeps_final_account_guard(pdf_setup,monkeypatch):
 def test_declared_pdf_parameters_preserve_media_type_normalization(mime):
     metadata=inbox.pdf_attachment_metadata({'type':'file','mimeType':mime})
     assert metadata=={'mime':'application/pdf','kind':'file','mime_status':'declared_pdf'}
+
+
+def inspect_synthetic_media(media):
+    async def check():
+        async with z.client() as c:
+            return await inbox.inspect_media_response(c,'media-123','account-test')
+    return asyncio.run(check())
+
+
+@pytest.mark.parametrize('mime,body,category,signature',[
+    ('application/pdf',b'%PDF-1.7 synthetic','pdf','pdf'),
+    ('Application/PDF; name="private-file.pdf"',b'%PDF-1.7 synthetic','pdf','pdf'),
+    ('application/octet-stream',b'%PDF-1.7 synthetic','binary','pdf'),
+    ('application/json',b'{"message":"private body"}','json','json'),
+    ('application/problem+json',b'{"error":"private provider error"}','json','json'),
+    ('text/html',b' <!DOCTYPE html><html>private body</html>','html','html'),
+    ('application/zip',b'PK\x03\x04private bytes','zip','zip'),
+    ('image/png',b'\x89PNG\r\nprivate pixels','image','other'),
+    ('text/plain',b'private text','text','other'),
+    ('application/vnd.example+json',b'{"data":null}','json','json'),
+])
+def test_media_inspection_classifies_safe_mime_and_prefix(pdf_setup,mime,body,category,signature):
+    client,current,provider,conn,media=pdf_setup
+    media['headers'].update({'content-type':mime,'content-encoding':'identity','content-length':str(len(body)),
+        'location':'https://private.invalid/?token=secret','set-cookie':'private-session=secret'})
+    media['body']=body
+    result=inspect_synthetic_media(media)
+    assert result['status']==200 and result['mime_category']==category and result['signature']==signature
+    assert result['mime']==mime.split(';',1)[0].strip().lower()
+    assert result['encoding']=='identity' and result['length_category']=='within_limit' and result['length']==len(body)
+    assert 'private' not in json.dumps(result) and 'secret' not in json.dumps(result)
+    assert 'location' not in result and 'set-cookie' not in result
+    assert len(media['requests'])==1 and not provider['posts']
+    request=media['requests'][0]
+    assert str(request.url)=='https://zernio.com/api/v1/whatsapp/media/media-123?accountId=account-test'
+    assert request.headers['accept-encoding']=='identity'
+    assert all(value==20 for value in request.extensions['timeout'].values())
+
+
+@pytest.mark.parametrize('mime,category',[
+    ('','missing'),('application/pdf private-value','invalid'),('https://private.invalid','invalid'),
+    ('application/'+'x'*128,'invalid'),('application/pdf, text/html','invalid'),
+    ('application/pdf\tprivate','invalid'),('application/','invalid'),
+])
+def test_media_inspection_never_exposes_malformed_mime(pdf_setup,mime,category):
+    client,current,provider,conn,media=pdf_setup
+    media['headers']['content-type']=mime
+    result=inspect_synthetic_media(media)
+    assert result['mime_category']==category and result['mime']=='other'
+    assert 'private' not in json.dumps(result)
+
+
+def test_media_inspection_missing_headers_and_new_valid_mime(pdf_setup):
+    client,current,provider,conn,media=pdf_setup
+    media['headers']={}
+    result=inspect_synthetic_media(media)
+    assert (result['mime_category'],result['mime'],result['encoding'],result['length_category'],result['length'])==('missing','other','missing','missing',None)
+    assert result['signature']=='pdf'
+    media['headers']['content-type']='application/x-unusual-document; name="private.pdf"'
+    result=inspect_synthetic_media(media)
+    assert result['mime']=='application/x-unusual-document' and result['mime_category']=='other'
+    assert 'private' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('status',[301,302,303,307,308])
+def test_media_inspection_redirect_never_follows_or_reads_body(pdf_setup,status):
+    client,current,provider,conn,media=pdf_setup
+    media['status']=status;media['headers']['location']='https://private.invalid/?token=secret'
+    result=inspect_synthetic_media(media)
+    assert result['status']==status and result['signature']=='not_read'
+    assert result['json_structure']=='not_read' and 'json_key_presence' not in result
+    assert len(media['requests'])==1 and 'private' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('encoding',['gzip','deflate','br','zstd','private-encoding','gzip, br'])
+def test_media_inspection_compression_never_decodes(pdf_setup,encoding):
+    client,current,provider,conn,media=pdf_setup
+    media['headers']['content-encoding']=encoding;media['body']=b'not valid compressed data'
+    result=inspect_synthetic_media(media)
+    assert result['encoding']==(encoding if encoding in ('gzip','deflate','br','zstd') else 'other')
+    assert result['signature']=='not_read' and 'private' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('value,category,length',[
+    ('0','within_limit',0),('00000256','within_limit',256),('20971520','within_limit',20971520),
+    ('20971521','over_limit',None),('9'*10000,'over_limit',None),
+    ('-1','invalid',None),('private-length','invalid',None),('٠','invalid',None),('', 'invalid',None),
+])
+def test_media_inspection_length_is_bounded_and_nonsecret(pdf_setup,value,category,length):
+    client,current,provider,conn,media=pdf_setup
+    # Non-ASCII cannot be an HTTP header; verify that rejected case directly.
+    if not value.isascii():
+        assert inbox._media_length_summary(value)==(category,length)
+        return
+    media['headers']['content-length']=value
+    result=inspect_synthetic_media(media)
+    assert result['length_category']==category and result['length']==length
+    assert result['signature']=='pdf' and 'private' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('status',[200,400,401,403,404,500,502])
+def test_media_inspection_json_keys_only_for_complete_small_object(pdf_setup,status):
+    client,current,provider,conn,media=pdf_setup
+    media['status']=status;media['headers']['content-type']='application/json'
+    media['body']=b'{"url":"https://private.invalid?token=secret","error":"private error","data":{"private":"value"},"private_key":1}'
+    result=inspect_synthetic_media(media)
+    assert result['status']==status and result['signature']=='json' and result['json_structure']=='object'
+    assert result['json_key_presence']=={'url':True,'error':True,'message':False,'data':True}
+    assert 'private' not in json.dumps(result) and 'secret' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('body,structure',[
+    (b'{"private":"unfinished', 'incomplete_or_unknown'),
+    (b'{"url":"' + b'x'*300 + b'"}', 'incomplete_or_unknown'),
+    (b'{"url":1}'+b' '*247, 'incomplete_or_unknown'),
+    (b'[{"private":"secret"}]', 'array'),
+])
+def test_media_inspection_json_never_reads_more_for_structure(pdf_setup,body,structure):
+    client,current,provider,conn,media=pdf_setup
+    media['headers']['content-type']='application/json';media['body']=body
+    result=inspect_synthetic_media(media)
+    assert result['signature']=='json' and result['json_structure']==structure
+    assert 'json_key_presence' not in result and 'private' not in json.dumps(result)
+
+
+def test_media_inspection_reads_only_256_bytes_and_closes_without_parser(monkeypatch):
+    observed={'chunks':0,'closed':False}
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            observed['chunks']+=1
+            yield b'%PDF-'+b'x'*251
+            raise AssertionError('Must not fetch a second chunk')
+        async def aclose(self): observed['closed']=True
+    def handler(request):
+        return httpx.Response(200,headers={'content-type':'application/pdf','content-length':'999999999'},stream=Stream())
+    def forbidden(*args,**kwargs): raise AssertionError('Diagnostic must never parse or extract')
+    monkeypatch.setattr(inbox,'validate_pdf_locally',forbidden)
+    monkeypatch.setattr(inbox,'extract_pdf_locally',forbidden)
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await inbox.inspect_media_response(c,'media-123','account-test')
+    result=asyncio.run(check())
+    assert result['signature']=='pdf' and result['length_category']=='over_limit'
+    assert observed=={'chunks':1,'closed':True}
+
+
+@pytest.mark.parametrize('error,status',[(httpx.ReadTimeout,504),(httpx.ConnectError,502)])
+def test_media_inspection_transport_error_is_fixed_and_nonsecret(error,status):
+    def handler(request): raise error('private token https://private.invalid',request=request)
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await inbox.inspect_media_response(c,'media-123','account-test')
+    with pytest.raises(HTTPException) as caught: asyncio.run(check())
+    assert caught.value.status_code==status and 'private' not in caught.value.detail
+
+
+def test_media_inspection_prefix_timeout_preserves_safe_headers():
+    observed={'closed':False}
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadTimeout('private token and URL')
+            yield b''
+        async def aclose(self): observed['closed']=True
+    def handler(request):
+        return httpx.Response(200,headers={'content-type':'application/json; token=private'},stream=Stream())
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await inbox.inspect_media_response(c,'media-123','account-test')
+    result=asyncio.run(check())
+    assert result['status']==200 and result['mime']=='application/json' and result['signature']=='not_read'
+    assert result['json_structure']=='not_read' and 'private' not in json.dumps(result)
+    assert observed['closed']
+
+
+@pytest.mark.parametrize('media_id',[None,'../private','https://private.invalid','id?token=secret'])
+def test_media_inspection_rejects_unverified_identity_without_request(media_id):
+    def handler(request): raise AssertionError('Invalid media identity must not be requested')
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await inbox.inspect_media_response(c,media_id,'account-test')
+    with pytest.raises(HTTPException) as caught: asyncio.run(check())
+    assert caught.value.status_code==404
