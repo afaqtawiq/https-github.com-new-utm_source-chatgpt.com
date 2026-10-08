@@ -54,6 +54,18 @@ class WhatsAppSendUncertain(RuntimeError):
         self.http_status = http_status
 
 
+class WhatsAppDocumentSendUncertain(WhatsAppSendUncertain):
+    """A document POST was attempted; durable callers must freeze, never retry."""
+
+    def __init__(self, http_status, reason='uncertain', *, provider_ids=(), public_attachment_url_present=False):
+        if reason not in ('uncertain', 'invalid_receipt', 'receipt_mismatch', 'contradictory_response'):
+            raise ValueError('Invalid document outcome category')
+        super().__init__(http_status)
+        self.reason = reason
+        self.provider_ids = list(provider_ids)
+        self.public_attachment_url_present = bool(public_attachment_url_present)
+
+
 class _TransportState:
     def __init__(self, *, cache=False):
         self.account = account_id()
@@ -462,6 +474,126 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_', expect
             raise WhatsAppSendUncertain(response.status_code)
         return {'provider': 'zernio', 'messages': [{'id': mid}], 'conversation_id': receipt.get('conversationId'),
                 'http_status': response.status_code, 'account_id': batch.account}
+
+
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+
+
+def _document_receipt_ids(receipt):
+    def valid(value):
+        return (isinstance(value, str) and len(value) <= 1024 and '://' not in value
+                and not value.lower().startswith(('http:', 'https:', 'ftp:', 'file:', 'data:', 'mailto:', 'www.', '/'))
+                and re.fullmatch(r'[A-Za-z0-9_.:+/=\-]+', value) is not None)
+    mid = receipt.get('messageId')
+    ids = receipt.get('messageIds', [mid])
+    if (not valid(mid) or not isinstance(ids, list) or not 1 <= len(ids) <= 5
+            or not all(valid(value) for value in ids) or ids[0] != mid or len(set(ids)) != len(ids)):
+        return None
+    return ids
+
+
+async def send_document(recipient, content, filename, caption='', *, expected_account,
+                        expected_conversation, idempotency_key):
+    """One direct multipart PDF POST. Partial/warning results are frozen outcomes."""
+    import unicodedata
+    target = phone(recipient)
+    if (not target or not isinstance(expected_account, str) or not expected_account
+            or expected_account != account_id() or not isinstance(expected_conversation, str)
+            or not expected_conversation or len(expected_conversation) > 255
+            or expected_conversation in ('.', '..')
+            or any(ord(char) < 32 or ord(char) == 127 for char in expected_conversation)):
+        raise WhatsAppBlocked('هوية المستلم أو الحساب أو المحادثة غير صالحة؛ لم يُرسل الملف')
+    if not isinstance(idempotency_key, str) or not re.fullmatch(r'wa-document-[0-9a-f]{64}', idempotency_key):
+        raise WhatsAppBlocked('معرف محاولة إرسال الملف غير صالح')
+    if not isinstance(content, bytes) or not content.startswith(b'%PDF-') or len(content) > MAX_DOCUMENT_BYTES:
+        raise WhatsAppBlocked('يلزم ملف PDF ضمن حد 20 ميجابايت؛ لم يُرسل الملف')
+    if (not isinstance(filename, str) or not 4 < len(filename) <= 180
+            or len(filename.encode('utf-8', errors='replace')) > 255
+            or filename != filename.strip() or not filename.lower().endswith('.pdf')
+            or any(char in '/\\' or unicodedata.category(char).startswith('C') for char in filename)):
+        raise WhatsAppBlocked('اسم ملف PDF غير صالح؛ لم يُرسل الملف')
+    if not isinstance(caption, str) or len(caption) > 1024:
+        raise WhatsAppBlocked('وصف الملف غير صالح؛ لم يُرسل الملف')
+    if _dispatch_guard.get() is None:
+        raise WhatsAppBlocked('يلزم التحقق من صلاحية إرسال الملف قبل المحاولة')
+    from app.whatsapp_inbox import validate_pdf_locally
+    from starlette.concurrency import run_in_threadpool
+    try:
+        await run_in_threadpool(validate_pdf_locally, content)
+    except (HTTPException, ValueError, OSError):
+        raise WhatsAppBlocked('تعذر التحقق المحلي من ملف PDF؛ لم يُرسل الملف') from None
+    async with transport_batch() as batch:
+        # Parsing awaited in a worker: never adopt an account changed while the
+        # reviewed bytes were being checked, including an existing batch scope.
+        if batch.account != expected_account or account_id() != expected_account:
+            raise WhatsAppBlocked('تغير حساب واتساب أثناء مراجعة الملف؛ لم يُرسل الملف')
+        c = await batch.get_client()
+        await validate_account(c)
+        cid = await open_conversation(c, target)
+        if not cid or str(cid) != expected_conversation:
+            raise WhatsAppBlocked('المحادثة تغيرت أو نافذة الرد مغلقة؛ لم يُرسل الملف')
+        path = '/inbox/conversations/' + quote(expected_conversation, safe='') + '/messages'
+        proof = batch.windows.get((target, str(cid)))
+        async with batch.lock:
+            deadline = min(_monotonic() + _READ_BUDGET_SECONDS, batch.deadline)
+            await _wait_ready(batch, path, deadline)
+            _check_window(batch, path, target, cid, proof)
+            guard = _dispatch_guard.get()
+            if guard is None:
+                raise WhatsAppBlocked('صلاحية إرسال الملف لم تعد متاحة؛ لم يُرسل الملف')
+            checked = guard()
+            if inspect.isawaitable(checked):
+                await checked
+            _check_deadline(batch, path, deadline)
+            _check_account(batch, path)
+            _check_window(batch, path, target, cid, proof)
+            # Caller has durably reserved this key and marked its exact reviewed
+            # document as sending. No retry exists beyond this boundary.
+            try:
+                response = await c.post(BASE + path,
+                    data={'accountId': batch.account, 'message': caption},
+                    files={'attachment': (filename, content, 'application/pdf')},
+                    headers={'Idempotency-Key': idempotency_key}, follow_redirects=False)
+            except (httpx.HTTPError, TimeoutError, asyncio.CancelledError):
+                raise WhatsAppDocumentSendUncertain(None) from None
+            _observe_rate(batch, response)
+        status = response.status_code
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        receipt = data.get('data') if isinstance(data, dict) else None
+        provider_ids = _document_receipt_ids(receipt) if isinstance(receipt, dict) else None
+        attachments = receipt.get('attachments', []) if isinstance(receipt, dict) else []
+        public_url = (isinstance(attachments, list) and any(isinstance(item, dict)
+            and isinstance(item.get('url'), str) and bool(item['url']) for item in attachments))
+        acceptance_evidence = ((isinstance(data, dict) and data.get('success') is True)
+            or (isinstance(receipt, dict) and any(receipt.get(key) is not None
+                for key in ('messageId', 'messageIds', 'partialFailure'))) or public_url)
+        if 400 <= status < 500 and status not in (408, 409) and not acceptance_evidence:
+            error = WhatsAppBlocked('رفض مزود واتساب إرسال الملف (HTTP ' + str(status) + ')')
+            error.http_status = status
+            raise error
+        if not 200 <= status < 300:
+            raise WhatsAppDocumentSendUncertain(status,
+                'contradictory_response' if acceptance_evidence else 'uncertain',
+                provider_ids=provider_ids or [], public_attachment_url_present=public_url)
+        if not isinstance(data, dict) or data.get('success') is not True or not isinstance(receipt, dict):
+            raise WhatsAppDocumentSendUncertain(status, 'invalid_receipt',
+                provider_ids=provider_ids or [], public_attachment_url_present=public_url)
+        if public_url:
+            outcome = 'public_link_warning'
+        elif receipt.get('partialFailure') is not None:
+            outcome = 'partial'
+        elif provider_ids is None or not isinstance(attachments, list):
+            raise WhatsAppDocumentSendUncertain(status, 'invalid_receipt', provider_ids=provider_ids or [])
+        elif receipt.get('conversationId', expected_conversation) != expected_conversation:
+            raise WhatsAppDocumentSendUncertain(status, 'receipt_mismatch', provider_ids=provider_ids)
+        else:
+            outcome = 'accepted'
+        return {'status': outcome, 'provider': 'zernio', 'provider_ids': provider_ids or [],
+                'http_status': status, 'account_id': batch.account,
+                'conversation_id': expected_conversation, 'public_attachment_url_present': public_url}
 
 
 def session(request):

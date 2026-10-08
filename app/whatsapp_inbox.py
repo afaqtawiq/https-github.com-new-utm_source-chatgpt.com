@@ -165,6 +165,7 @@ async def inbox(request: Request):
             body += ''.join(render_message(m, cid, current['csrf']) for m in messages) or '<p>لم تظهر رسائل؛ النتيجة لا تثبت عدم وجود تواصل سابق.</p>'
             body += next_link(payload.get('pagination') or {}, conversation=cid)
             body += '<form method="post" action="/whatsapp-inbox/drafts"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '"><input type="hidden" name="conversation" value="' + escape(cid) + '"><label>رد للمراجعة<textarea name="body" maxlength="4000" required></textarea></label><p>لا يُرسل الآن. إرسال الرد بعد المراجعة يحتاج صلاحية المدير والتحقق الإضافي ونافذة 24 ساعة مفتوحة. خارجها يلزم قالب معتمد عبر المسار المخصص.</p><button>حفظ مسودة الرد</button></form>'
+            body += '<form method="post" enctype="multipart/form-data" action="/whatsapp-inbox/documents"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '"><input type="hidden" name="conversation" value="' + escape(cid) + '"><label>ملف PDF للمراجعة <input type="file" name="attachment" accept="application/pdf,.pdf" required></label><label>وصف اختياري<textarea name="caption" maxlength="1024"></textarea></label><p>حتى 20 ميجابايت. يُحفظ مؤقتًا للمراجعة لمدة ساعة؛ لا يُرسل عند الرفع. الإرسال يحتاج التحقق الإضافي ونافذة الرد المفتوحة.</p><button>مراجعة المستند والمستلم</button></form>'
             return page(body)
     except (z.WhatsAppBlocked, httpx.HTTPError):
         return page('<p>تعذرت قراءة المزود. لم يُرسل شيء؛ أعد القراءة لاحقًا.</p>', 503)
@@ -704,3 +705,213 @@ async def review_attachment_text(request: Request):
     for item in pages:
         body += '<article><h3>صفحة ' + escape(str(item['page'])) + '</h3><small>' + escape(str(item['method'])) + '</small><pre>' + escape(str(item['text'])) + '</pre></article>'
     return page(body)
+
+
+async def document_form(request, current):
+    """Bound the entire multipart stream before parsing or private spooling."""
+    from starlette.formparsers import MultiPartParser, MultiPartException
+    from starlette.datastructures import UploadFile
+    from python_multipart.exceptions import MultipartParseError
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'multipart/form-data':
+        raise HTTPException(415, 'Multipart PDF upload required')
+    total = 0
+    async def bounded_stream():
+        nonlocal total
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > MAX_PDF_BYTES + 65536:
+                raise MultiPartException('Upload exceeds limit')
+            yield chunk
+    parser = MultiPartParser(request.headers, bounded_stream(), max_files=1,
+                             max_fields=3, max_part_size=8192)
+    values = None
+    try:
+        values = await parser.parse()
+        if (set(values) != {'csrf', 'conversation', 'caption', 'attachment'}
+                or any(len(values.getlist(key)) != 1 for key in values)):
+            raise HTTPException(400, 'Invalid document form')
+        if values['csrf'] != current['csrf']:
+            raise HTTPException(403)
+        upload = values['attachment']
+        if not isinstance(upload, UploadFile) or upload.content_type not in ('application/pdf', 'application/octet-stream'):
+            raise HTTPException(415, 'A PDF upload is required')
+        data = await upload.read(MAX_PDF_BYTES + 1)
+        if not data or len(data) > MAX_PDF_BYTES:
+            raise HTTPException(413)
+        if not data.startswith(b'%PDF-'):
+            raise HTTPException(415, 'Invalid PDF signature')
+        return field(values['conversation']), values['caption'], upload.filename, data
+    except MultiPartException:
+        raise HTTPException(413, 'Invalid or oversized multipart upload') from None
+    except MultipartParseError:
+        raise HTTPException(400, 'Malformed multipart upload') from None
+    finally:
+        try:
+            if values is not None:
+                await values.close()
+        finally:
+            # Cancellation can interrupt the async close of a spooled upload.
+            # Always close its local handles, even when that await is cancelled.
+            for temporary in parser._files_to_close_on_error:
+                temporary.close()
+
+
+async def document_confirmation(request, actor):
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 8192:
+            raise HTTPException(413)
+        raw.extend(chunk)
+    try:
+        values = parse_qs(raw.decode(), keep_blank_values=True, max_num_fields=8)
+    except (UnicodeDecodeError, ValueError):
+        raise HTTPException(400) from None
+    if any(len(value) != 1 for value in values.values()):
+        raise HTTPException(400)
+    values = {key: value[0] for key, value in values.items()}
+    if values.get('csrf') != actor['csrf']:
+        raise HTTPException(403)
+    return values
+
+
+def document_actor(request, actor, account, *, sending=False):
+    current = send_authority(request) if sending else z.session(request)
+    from app.fine_permissions import has_permission
+    if not has_permission(current, 'send_whatsapp'):
+        raise HTTPException(403, 'Permission required')
+    if current['user_id'] != actor['user_id'] or current['id'] != actor['id'] or z.account_id() != account:
+        raise HTTPException(409, 'Session or account changed')
+    return current
+
+
+@router.post('/whatsapp-inbox/documents')
+async def document_draft(request: Request):
+    from app import whatsapp_document_store as documents
+    from starlette.concurrency import run_in_threadpool
+    actor, account = dict(z.session(request)), z.account_id()
+    document_actor(request, actor, account)
+    cid, caption, filename, content = await document_form(request, actor)
+    document_actor(request, actor, account)
+    await run_in_threadpool(validate_pdf_locally, content)
+    document_actor(request, actor, account)
+    try:
+        async with z.client() as c:
+            await z.validate_account(c)
+            document_actor(request, actor, account)
+            row = await verified_conversation(c, cid)
+    except (z.WhatsAppBlocked, httpx.HTTPError):
+        raise HTTPException(503, 'Unable to verify the current WhatsApp conversation; nothing was sent') from None
+    document_actor(request, actor, account)
+    try:
+        documents.init_storage(db_factory=database)
+        item = documents.create(creator_id=actor['user_id'], account_id=account,
+            conversation_id=cid, recipient=z.phone(row['participantId']), filename=filename,
+            caption=caption, content=content, db_factory=database)
+    except documents.StoreError as error:
+        raise HTTPException(error.status_code, error.reason) from None
+    return RedirectResponse('/whatsapp-inbox/documents/' + item['token'] + ('?recovered=1' if item.get('recovered') else ''), 303)
+
+
+@router.get('/whatsapp-inbox/documents/{token}', response_class=HTMLResponse)
+async def document_preview(token: str, request: Request):
+    from app import whatsapp_document_store as documents
+    actor = dict(z.session(request))
+    documents.init_storage(db_factory=database)
+    item = documents.get(field(token), actor['user_id'], db_factory=database)
+    if not item:
+        raise HTTPException(404)
+    body = '<h2>مراجعة مستند إلى +' + escape(item['recipient']) + '</h2>'
+    if request.query_params.get('recovered') == '1':
+        body += '<p>هذه مسودتك السابقة؛ احتفظنا باسم الملف والوصف الأصليين. راجعها قبل تأكيد الإرسال.</p>'
+    body += '<p>الملف: ' + escape(item['filename']) + '</p><p>الحجم: ' + str(item['byte_count']) + ' بايت</p>'
+    body += '<p>SHA256: ' + escape(item['sha256']) + '</p><pre>' + escape(item['caption']) + '</pre>'
+    body += '<p>الحالة: ' + escape(item['state']) + '</p>'
+    if item.get('provider_ids'):
+        body += '<p>معرفات المزود للمراجعة:</p><pre>' + escape('\n'.join(item['provider_ids'])) + '</pre>'
+    if item['state'] == 'draft':
+        body += '<p><a href="/whatsapp-inbox/documents/' + escape(token) + '/file">تنزيل النسخة المرفوعة للمراجعة</a></p>'
+        body += '<p><a href="/mfa/step-up?' + escape(urlencode({'next': '/whatsapp-inbox/documents/' + token})) + '">التحقق الإضافي قبل الإرسال</a></p>'
+        body += '<form method="post" action="/whatsapp-inbox/documents/' + escape(token) + '/send">'
+        for key, value in {'csrf': actor['csrf'], 'sha256': item['sha256'], 'recipient': item['recipient'], 'account': item['account_id']}.items():
+            body += '<input type="hidden" name="' + key + '" value="' + escape(value) + '">'
+        body += '<p>توثيق المزود يسمح بإرجاع رابط عام للمرفق ولا يحدد هل ينطبق على هذا الرفع المباشر. لا ترسل مستندًا سريًا قبل حسم ذلك.</p><label><input type="checkbox" name="privacy_ack" value="yes" required>أوافق على معالجة هذا الملف المحدد لدى المزود مع احتمال إرجاع رابط عام له</label><label><input type="checkbox" name="confirm" value="yes" required>أوافق على إرسال هذا الملف والوصف إلى الرقم المعروض عبر مزود واتساب</label><button>إرسال المستند مرة واحدة</button></form>'
+        body += '<form method="post" action="/whatsapp-inbox/documents/' + escape(token) + '/cancel"><input type="hidden" name="csrf" value="' + escape(actor['csrf']) + '"><button>إلغاء وحذف النسخة المؤقتة</button></form>'
+    else:
+        body += '<p>accepted تعني قبول المزود فقط. sending أو uncertain أو partial تحتاج مراجعة قبل أي إرسال جديد؛ لا توجد إعادة تلقائية.</p>'
+        if item['state'] == 'public_link_warning' or item.get('provider_status') == 'public_link_warning':
+            body += '<p>أعاد المزود رابطًا للمرفق؛ قد يكون الإرسال قد تم. أوقف أي إرسال آخر لهذا الملف وراجع خصوصية المرفق مع المزود.</p>'
+    return page(body)
+
+
+@router.get('/whatsapp-inbox/documents/{token}/file')
+async def document_file(token: str, request: Request):
+    from app import whatsapp_document_store as documents
+    actor = dict(z.session(request))
+    documents.init_storage(db_factory=database)
+    item = documents.get(field(token), actor['user_id'], include_content=True, db_factory=database)
+    if not item or item['state'] != 'draft' or not item.get('content'):
+        raise HTTPException(404)
+    return Response(item['content'], media_type='application/pdf', headers={
+        'Content-Disposition': "attachment; filename*=UTF-8''" + quote(item['filename'], safe=''),
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer'})
+
+
+@router.post('/whatsapp-inbox/documents/{token}/cancel')
+async def document_cancel(token: str, request: Request):
+    from app import whatsapp_document_store as documents
+    actor, account = dict(z.session(request)), z.account_id()
+    await document_confirmation(request, actor)
+    current = z.session(request)
+    if current['user_id'] != actor['user_id'] or current['id'] != actor['id'] or z.account_id() != account:
+        raise HTTPException(409, 'Session changed')
+    documents.init_storage(db_factory=database)
+    try:
+        documents.cancel(field(token), actor['user_id'], db_factory=database)
+    except documents.StoreError as error:
+        raise HTTPException(error.status_code, error.reason) from None
+    return RedirectResponse('/whatsapp-inbox/documents/' + token, 303)
+
+
+@router.post('/whatsapp-inbox/documents/{token}/send')
+async def document_send(token: str, request: Request):
+    from app import whatsapp_document_store as documents
+    actor, account = dict(send_authority(request)), z.account_id()
+    values = await document_confirmation(request, actor)
+    document_actor(request, actor, account, sending=True)
+    if values.get('confirm') != 'yes' or values.get('privacy_ack') != 'yes':
+        raise HTTPException(400, 'Explicit approval required')
+    if values.get('account') != account:
+        raise HTTPException(409, 'Account changed')
+    try:
+        documents.init_storage(db_factory=database)
+        item = documents.claim(field(token), actor['user_id'],
+            confirmed_sha256=values.get('sha256'), confirmed_recipient=values.get('recipient'),
+            confirmed_account_id=values.get('account'), db_factory=database)
+    except documents.StoreError as error:
+        raise HTTPException(error.status_code, error.reason) from None
+    state, ids = 'uncertain', []
+    try:
+        def authority():
+            document_actor(request, actor, item['account_id'], sending=True)
+            if not documents.send_authorized(token, item['send_token'], db_factory=database):
+                raise z.WhatsAppBlocked('Document draft is no longer authorized')
+        with z.dispatch_guard(authority):
+            result = await z.send_document(item['recipient'], item['content'], item['filename'], item['caption'],
+                expected_account=item['account_id'], expected_conversation=item['conversation_id'],
+                idempotency_key=item['idempotency_key'])
+        ids = result['provider_ids']
+        state = result['status']
+    except z.WhatsAppDocumentSendUncertain as error:
+        ids = error.provider_ids
+        state = ('public_link_warning' if error.public_attachment_url_present else
+                 {'partial_failure': 'partial', 'public_link_warning': 'public_link_warning'}.get(error.reason, 'uncertain'))
+    except (z.WhatsAppBlocked, HTTPException):
+        state = 'blocked'
+    except Exception:
+        state = 'uncertain'
+    try:
+        documents.finish(token, item['send_token'], status=state, provider_ids=ids, db_factory=database)
+    except documents.StoreError as error:
+        # The durable claim remains frozen even if expiry won the race.
+        raise HTTPException(error.status_code, error.reason) from None
+    return RedirectResponse('/whatsapp-inbox/documents/' + token, 303)
