@@ -174,3 +174,8 @@ app.include_router(finance_workspace_router)
 from app.whatsapp_agent import router as whatsapp_agent_router, register_worker as register_whatsapp_agent_worker
 app.include_router(whatsapp_agent_router)
 register_whatsapp_agent_worker(app)
+
+from app.whatsapp_document_review import router as whatsapp_document_review_router
+from app.whatsapp_outgoing_diagnostic import router as whatsapp_outgoing_diagnostic_router
+app.include_router(whatsapp_document_review_router)
+app.include_router(whatsapp_outgoing_diagnostic_router)

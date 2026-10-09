@@ -581,14 +581,18 @@ async def send_document(recipient, content, filename, caption='', *, expected_ac
         if not isinstance(data, dict) or data.get('success') is not True or not isinstance(receipt, dict):
             raise WhatsAppDocumentSendUncertain(status, 'invalid_receipt',
                 provider_ids=provider_ids or [], public_attachment_url_present=public_url)
-        if public_url:
-            outcome = 'public_link_warning'
+        # URL presence is separate privacy evidence. It cannot turn an invalid,
+        # mismatched or partially accepted receipt into a successful receipt.
+        if provider_ids is None or not isinstance(attachments, list):
+            raise WhatsAppDocumentSendUncertain(status, 'invalid_receipt',
+                provider_ids=provider_ids or [], public_attachment_url_present=public_url)
+        elif receipt.get('conversationId', expected_conversation) != expected_conversation:
+            raise WhatsAppDocumentSendUncertain(status, 'receipt_mismatch',
+                provider_ids=provider_ids, public_attachment_url_present=public_url)
         elif receipt.get('partialFailure') is not None:
             outcome = 'partial'
-        elif provider_ids is None or not isinstance(attachments, list):
-            raise WhatsAppDocumentSendUncertain(status, 'invalid_receipt', provider_ids=provider_ids or [])
-        elif receipt.get('conversationId', expected_conversation) != expected_conversation:
-            raise WhatsAppDocumentSendUncertain(status, 'receipt_mismatch', provider_ids=provider_ids)
+        elif public_url:
+            outcome = 'public_link_warning'
         else:
             outcome = 'accepted'
         return {'status': outcome, 'provider': 'zernio', 'provider_ids': provider_ids or [],

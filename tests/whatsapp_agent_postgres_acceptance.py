@@ -564,6 +564,7 @@ def verify(factory):
     verify_budget_notices(factory)
     verify_recent_attachment_outcome(factory)
     verify_quoted_attachment_context(factory)
+    verify_document_reviews(factory)
 
     print('PASS: PostgreSQL duplicate event/message aliases, concurrent SKIP LOCKED claims, '
           'conversation serialization, bounded reads/model budgets, crash checkpoints, '
@@ -1020,6 +1021,179 @@ def verify_quoted_attachment_context(factory):
     current=claim()
     current_quote={**quoted,'before_job_id':current['id']}
     assert store.recent_attachment_outcome(**current_quote) is None and store.recent_context(**current_quote) is None
+
+
+def verify_document_reviews(factory):
+    """Real transactions fence reviewed excerpts without changing global consent."""
+    from app import whatsapp_agent_store as store
+    original_sha = 'b' * 64
+    review_text = 'Synthetic freight summary.\nGoods arrive on Tuesday.'
+    creator = 'synthetic-manager'
+    reviewed_at, later = NOW + timedelta(seconds=1), NOW + timedelta(seconds=2)
+    pdf = {'attachment_count': 1, 'attachments': [{'mime': 'application/pdf'}],
+           'question': 'What does the document say?', 'question_allowed': True,
+           'question_kind': 'document_question'}
+    followup = {**pdf, 'attachment_count': 0, 'attachments': []}
+
+    def enqueue(account, message, payload, now=NOW):
+        with factory() as connection:
+            return store.enqueue(connection, account_id=account, message_id=message,
+                event_id='event-' + message, sender='owner', conversation_id='conversation',
+                payload=payload, now=now)
+
+    def fixture(suffix, *, approve=True, ttl=3600):
+        account = 'document-review-' + suffix
+        settings = store.update_settings(account, mode='owner_pilot', pilot_sender='owner',
+            approved_sha256=[SHA], db_factory=factory, now=NOW)
+        enqueue(account, 'source', pdf)
+        source = store.claim_job(account_id=account, db_factory=factory, now=NOW)
+        store.checkpoint_document(source['id'], source['lease_token'], text='', sha256=original_sha,
+            status='quarantined', diagnostics={'reason': 'unapproved_document_provenance',
+                'document_reason': 'unapproved_document_provenance', 'byte_count': 128},
+            db_factory=factory, now=NOW)
+        store.prepare_reply(source['id'], source['lease_token'], reply_text='Synthetic local review notice',
+            db_factory=factory, now=NOW)
+        sending = store.claim_send(account_id=account, db_factory=factory, now=NOW)
+        source = store.finish_send(source['id'], sending['send_token'], status='sent',
+            diagnostics={'reason': 'provider_accepted'}, db_factory=factory, now=NOW)
+        review = store.stage_document_review(source['id'], creator, review_text,
+            expected_account=account, expected_generation=settings['authorization_generation'],
+            verified_source_sha256=original_sha, ttl_seconds=ttl, db_factory=factory, now=NOW)
+        if approve:
+            review = approve_review(account, settings, review)
+        return account, settings, source, review
+
+    def approve_review(account, settings, review):
+        return store.approve_document_review(review['review_id'], creator, expected_account=account,
+            expected_generation=settings['authorization_generation'], expected_text_sha256=review['text_sha256'],
+            expected_source_sha256=original_sha, db_factory=factory, now=reviewed_at)
+
+    def new_target(account, message='future'):
+        enqueue(account, message, followup, later)
+        return store.claim_job(account_id=account, db_factory=factory, now=later)
+
+    def scope(account, job, **changes):
+        result = dict(account_id=account, sender='owner', conversation_id='conversation',
+            before_job_id=job['id'], db_factory=factory, now=later)
+        result.update(changes)
+        return result
+
+    def checkpoint(job, source, review):
+        return store.checkpoint_document(job['id'], job['lease_token'], text=review_text,
+            sha256=original_sha, status='ok', context_source_job_id=source['id'], review_id=review['review_id'],
+            db_factory=factory, now=later)
+
+    def revoke(account, settings, review):
+        return store.revoke_document_review(review['review_id'], creator, expected_account=account,
+            expected_generation=settings['authorization_generation'], db_factory=factory, now=later)
+
+    # Competing approval transactions may commit the one staged token only once.
+    account, settings, source, review = fixture('approval-race', approve=False)
+    preexisting = new_target(account, 'already-arrived')
+    def compete(_):
+        try:
+            approve_review(account, settings, review)
+            return True
+        except store.StateConflict:
+            return False
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert sum(pool.map(compete, range(4))) == 1
+    assert store.find_review_context(**scope(account, preexisting)) is None
+    store.prepare_reply(preexisting['id'], preexisting['lease_token'], terminal_status='blocked',
+        db_factory=factory, now=later)
+    job = new_target(account)
+    selected = store.find_review_context(**scope(account, job, message_id='source'))
+    assert selected['review_id'] == review['review_id'] and selected['approved_hashes'] == [original_sha]
+    for key in ('account_id', 'sender', 'conversation_id'):
+        assert store.find_review_context(**scope(account, job, **{key: 'other'})) is None
+    for message in ('missing', 'event-source', 'source%'):
+        assert store.find_review_context(**scope(account, job, message_id=message)) is None
+    assert store.get_document_review(review['review_id'], 'other-manager', db_factory=factory, now=later) is None
+    assert store.get_settings(account, db_factory=factory) == settings
+    assert store.get_job(source['id'], db_factory=factory) == source
+
+    # Distinct staged excerpts may race, but only the last serialized approval
+    # remains live. Revoking it cannot resurrect an earlier approved excerpt.
+    account, settings, source, first = fixture('replacement-race')
+    replacements = [store.stage_document_review(source['id'], creator, review_text,
+        expected_account=account, expected_generation=settings['authorization_generation'],
+        verified_source_sha256=original_sha, db_factory=factory, now=NOW) for _ in range(2)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(approve_review, account, settings, entry) for entry in replacements]
+        for future in futures:
+            future.result(timeout=15)
+    rows = [store.get_document_review(entry['review_id'], creator, db_factory=factory, now=later)
+            for entry in [first, *replacements]]
+    assert [row['status'] for row in rows].count('approved') == 1
+    assert [row['status'] for row in rows].count('revoked') == 2
+    current_review = next(row for row in rows if row['status'] == 'approved')
+    job = new_target(account)
+    assert store.find_review_context(**scope(account, job))['review_id'] == current_review['review_id']
+    revoke(account, settings, current_review)
+    assert store.find_review_context(**scope(account, job)) is None
+
+    # Revocation and reservation use the same account lock order; whichever wins,
+    # the immediate model guard observes the committed revocation with no retry.
+    for suffix in ('reserve-first', 'revoke-first'):
+        account, settings, source, review = fixture(suffix)
+        job = new_target(account)
+        checkpoint(job, source, review)
+        def reserve():
+            return store.reserve_model(job['id'], job['lease_token'], db_factory=factory, now=later)
+        actions = (reserve, lambda: revoke(account, settings, review))
+        if suffix == 'revoke-first':
+            actions = tuple(reversed(actions))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(action) for action in actions]
+            for future in futures:
+                future.result(timeout=15)
+        assert not store.model_authorized(job['id'], job['lease_token'], db_factory=factory, now=later)
+        stored = store.get_job(job['id'], db_factory=factory)
+        if stored['status'] == 'processing':
+            assert not store.reserve_model(job['id'], job['lease_token'], db_factory=factory, now=later)
+        assert store.find_review_context(**scope(account, job)) is None
+
+    # The outbox boundary races safely too. A won send claim does not imply that
+    # a later network request is authorized, and cannot be claimed a second time.
+    account, settings, source, review = fixture('send-race')
+    job = new_target(account)
+    checkpoint(job, source, review)
+    assert store.reserve_model(job['id'], job['lease_token'], db_factory=factory, now=later)
+    store.save_model(job['id'], job['lease_token'], reply_text='Synthetic reviewed answer', db_factory=factory, now=later)
+    store.prepare_reply(job['id'], job['lease_token'], db_factory=factory, now=later)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        send_future = pool.submit(store.claim_send, account_id=account, db_factory=factory, now=later)
+        revoke_future = pool.submit(revoke, account, settings, review)
+        sending = send_future.result(timeout=15)
+        revoke_future.result(timeout=15)
+    if sending:
+        assert not store.send_authorized(job['id'], sending['send_token'], db_factory=factory, now=later)
+        store.finish_send(job['id'], sending['send_token'], status='blocked', db_factory=factory, now=later)
+    assert store.claim_send(account_id=account, db_factory=factory, now=later) is None
+    assert store.get_outbox(job['id'], db_factory=factory)['status'] == 'blocked'
+
+    # Expiry, text tampering and source changes are checked inside the joined
+    # authorization statement, not trusted from a previously returned review.
+    for fence in ('expiry', 'text-tamper', 'source-tamper', 'generation'):
+        account, settings, source, review = fixture(fence, ttl=20)
+        job = new_target(account)
+        checkpoint(job, source, review)
+        assert store.reserve_model(job['id'], job['lease_token'], db_factory=factory, now=later)
+        check_at = later
+        if fence == 'expiry':
+            check_at = NOW + timedelta(seconds=20)
+        else:
+            with factory() as connection:
+                if fence == 'text-tamper':
+                    connection.execute("UPDATE whatsapp_agent_document_reviews SET reviewed_text='Different text' WHERE id=%s", (review['id'],))
+                elif fence == 'source-tamper':
+                    connection.execute('UPDATE whatsapp_agent_jobs SET document_sha256=%s WHERE id=%s', ('c' * 64, source['id']))
+                else:
+                    connection.execute('UPDATE whatsapp_agent_settings SET authorization_generation=authorization_generation+1 WHERE account_id=%s', (account,))
+        assert not store.model_authorized(job['id'], job['lease_token'], db_factory=factory, now=check_at)
+        assert store.find_review_context(**scope(account, job, now=check_at)) is None
+        if fence == 'expiry':
+            assert store.get_document_review(review['id'], creator, db_factory=factory, now=check_at)['status'] == 'expired'
 
 
 def main():

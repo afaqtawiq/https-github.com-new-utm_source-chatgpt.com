@@ -230,11 +230,38 @@ def test_document_partial_failure_terminal_result(document_provider,partial):
 
 def test_document_returned_link_warning_without_url(document_provider):
     state=document_provider
-    state['send_data']['data'].update(attachments=[{'type':'file','url':'https://private.invalid/?token=secret'}],partialFailure={'error':'private'})
+    state['send_data']['data'].update(attachments=[{'type':'file','url':'https://private.invalid/?token=secret'}])
     result=send(state)
     assert result['status']=='public_link_warning' and result['public_attachment_url_present'] is True
     assert result['provider_ids']==['wamid-document'] and len(state['posts'])==1
     assert 'private' not in json.dumps(result) and 'secret' not in json.dumps(result)
+
+
+def test_document_public_url_does_not_hide_partial_receipt(document_provider):
+    state=document_provider
+    state['send_data']['data'].update(attachments=[{'url':'https://private.invalid/?token=secret'}],
+                                     partialFailure={'error':'private'})
+    result=send(state)
+    assert result['status']=='partial' and result['public_attachment_url_present'] is True
+    assert result['provider_ids']==['wamid-document'] and len(state['posts'])==1
+    assert 'private' not in json.dumps(result) and 'secret' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('change,reason',[
+    ({'messageId':None},'invalid_receipt'),
+    ({'messageId':'https://private.invalid'},'invalid_receipt'),
+    ({'messageIds':['different']},'invalid_receipt'),
+    ({'conversationId':'different'},'receipt_mismatch'),
+    ({'messageId':None,'partialFailure':{}},'invalid_receipt'),
+    ({'conversationId':'different','partialFailure':{}},'receipt_mismatch'),
+])
+def test_document_public_url_never_hides_uncertain_receipt(document_provider,change,reason):
+    state=document_provider
+    state['send_data']['data'].update(attachments=[{'url':'https://private.invalid/?token=secret'}],**change)
+    with pytest.raises(z.WhatsAppDocumentSendUncertain) as caught: send(state)
+    assert caught.value.reason==reason and caught.value.public_attachment_url_present is True
+    assert len(state['posts'])==1
+    assert 'private' not in json.dumps(vars(caught.value)) and 'secret' not in str(caught.value)
 
 
 def test_document_account_change_during_parser_never_reads_or_posts(document_provider,monkeypatch):

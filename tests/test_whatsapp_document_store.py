@@ -325,3 +325,110 @@ def test_lost_upload_response_recovers_only_same_owner_unexpired_draft_metadata(
     with pytest.raises(store.StoreError):create(db)
     store.finish(row['token'],sending['send_token'],status='uncertain',db_factory=db,now=NOW)
     with pytest.raises(store.StoreError):create(db)
+
+
+@pytest.mark.parametrize('status,reason',[
+    ('uncertain','invalid_receipt'),('uncertain','receipt_mismatch'),
+    ('uncertain','contradictory_response'),('partial',None),('public_link_warning',None),
+])
+def test_receipt_quality_and_privacy_flag_are_independent_frozen_evidence(db,status,reason):
+    row=create(db);sending=claim(db,row)
+    result=store.finish(row['token'],sending['send_token'],status=status,
+        provider_ids=['synthetic-receipt'],public_attachment_url_present=True,
+        receipt_reason=reason,db_factory=db,now=NOW)
+    assert result['state']==status and result['receipt_reason']==reason
+    assert result['public_attachment_url_present'] and result['provider_ids']==['synthetic-receipt']
+    assert raw(db,row['token'])['content_b64'] is None
+    verified=store.get(row['token'],7,require_valid_binding=True,db_factory=db,now=NOW)
+    assert verified['sha256']==row['sha256'] and verified['public_attachment_url_present']
+    with pytest.raises(store.StoreError):claim(db,row)
+    with pytest.raises(store.StoreError):create(db,creator_id=8)
+
+
+def test_late_receipt_privacy_flag_and_first_quality_survive_further_evidence(db):
+    row=create(db);sending=claim(db,row);late=NOW+timedelta(hours=1,seconds=1)
+    first=store.finish(row['token'],sending['send_token'],status='uncertain',
+        provider_ids=['synthetic-receipt'],receipt_reason='receipt_mismatch',
+        public_attachment_url_present=True,db_factory=db,now=late)
+    assert first['state']=='uncertain' and first['public_attachment_url_present']
+    later=store.finish(row['token'],sending['send_token'],status='accepted',
+        provider_ids=['different-receipt'],public_attachment_url_present=False,
+        receipt_reason=None,db_factory=db,now=late)
+    assert later['state']=='uncertain' and later['public_attachment_url_present']
+    assert later['receipt_reason']=='receipt_mismatch' and later['provider_ids']==['synthetic-receipt']
+    assert raw(db,row['token'])['content_b64'] is None
+    with pytest.raises(store.StoreError):create(db,creator_id=8,now=late)
+
+
+def test_late_privacy_evidence_can_be_added_without_replacing_receipt_quality(db):
+    row=create(db);sending=claim(db,row);late=NOW+timedelta(hours=1,seconds=1)
+    first=store.finish(row['token'],sending['send_token'],status='uncertain',
+        provider_ids=['synthetic-receipt'],receipt_reason='invalid_receipt',
+        db_factory=db,now=late)
+    assert not first['public_attachment_url_present']
+    later=store.finish(row['token'],sending['send_token'],status='partial',
+        public_attachment_url_present=True,receipt_reason='partial_failure',db_factory=db,now=late)
+    assert later['state']=='uncertain' and later['public_attachment_url_present']
+    assert later['receipt_reason']=='invalid_receipt' and later['provider_ids']==['synthetic-receipt']
+
+
+@pytest.mark.parametrize('changes',[
+    {'public_attachment_url_present':'https://private.invalid?token=secret'},
+    {'public_attachment_url_present':1}, {'receipt_reason':'https://private.invalid?token=secret'},
+    {'receipt_reason':{'error':'private body'}},
+])
+def test_privacy_receipt_audit_rejects_unbounded_shapes_without_modification(db,changes):
+    row=create(db);sending=claim(db,row);before=raw(db,row['token'])
+    with pytest.raises((store.StoreError,TypeError)):
+        store.finish(row['token'],sending['send_token'],status='uncertain',db_factory=db,now=NOW,**changes)
+    assert raw(db,row['token'])==before
+
+
+@pytest.mark.parametrize('field,value',[
+    ('filename','changed.pdf'),('caption','changed caption'),('account_id','other'),
+    ('conversation_id','other'),('recipient','966500000002'),('sha256','0'*64),('byte_count',1),
+    ('idempotency_key','wa-document-'+'0'*64),
+    ('created_at',(NOW-timedelta(hours=1)).isoformat()),
+    ('expires_at',(NOW+timedelta(hours=2)).isoformat()),
+])
+def test_terminal_diagnostic_get_verifies_immutable_binding_without_mutation(db,field,value):
+    row=create(db);sending=claim(db,row)
+    store.finish(row['token'],sending['send_token'],status='public_link_warning',
+        provider_ids=['synthetic-receipt'],db_factory=db,now=NOW)
+    with db() as connection:
+        connection.execute('UPDATE whatsapp_document_drafts SET '+field+'=%s WHERE token=%s',(value,row['token']))
+    before=raw(db,row['token'])
+    with pytest.raises(store.StoreError) as caught:
+        store.get(row['token'],7,require_valid_binding=True,db_factory=db,now=NOW)
+    assert caught.value.status_code==409 and caught.value.reason=='integrity_failed'
+    assert raw(db,row['token'])==before and before['content_b64'] is None
+
+
+def test_terminal_binding_read_keeps_creator_scoping(db):
+    row=create(db);sending=claim(db,row)
+    store.finish(row['token'],sending['send_token'],status='accepted',
+        provider_ids=['synthetic-receipt'],db_factory=db,now=NOW)
+    assert store.get(row['token'],8,require_valid_binding=True,db_factory=db,now=NOW) is None
+    assert store.get(row['token'],7,require_valid_binding=True,db_factory=db,now=NOW)['state']=='accepted'
+
+
+@pytest.mark.parametrize('state,reason',[
+    ('public_link_warning','public_link_warning'),
+    ('uncertain','late_receipt_public_link_warning'),
+    ('uncertain','integrity_failed_public_link_warning'),
+])
+def test_legacy_privacy_warning_remains_boolean_evidence_after_migration(db,state,reason):
+    row=create(db);sending=claim(db,row)
+    store.finish(row['token'],sending['send_token'],status='public_link_warning',db_factory=db,now=NOW)
+    with db() as connection:
+        connection.execute('''UPDATE whatsapp_document_drafts
+            SET state=%s,reason=%s,public_attachment_url_present=0 WHERE token=%s''',(state,reason,row['token']))
+    result=store.get(row['token'],7,db_factory=db,now=NOW)
+    assert result['public_attachment_url_present'] is True and result['state']==state
+    assert result['receipt_reason'] is None
+
+
+def test_public_privacy_flag_is_boolean_for_rows_without_warnings(db):
+    row=create(db)
+    assert row['public_attachment_url_present'] is False
+    assert store.get(row['token'],7,db_factory=db,now=NOW)['public_attachment_url_present'] is False
