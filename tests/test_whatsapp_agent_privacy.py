@@ -1761,3 +1761,59 @@ def test_implicit_detail_cannot_invent_attribute_from_unrelated_history(provider
     provider['answer']=answer
     result=chat_reply('ما لون الصناديق؟',[row])
     assert not result.ok and result.reason=='unsupported_document_claim'
+
+@pytest.mark.parametrize('direction', ['إلي', 'إلى', 'الي', 'الى'])
+def test_route_spelling_and_question_tail_preserve_only_route(direction):
+    question = f'عندي شحنة من جدة {direction} الدمام إيش تحتاجون عشان تعطوني سعر'
+    assert p._safe_route_excerpt(question) == 'من جدة إلى الدمام'
+    assert p._safe_route_excerpt(f'من جدة {direction} الدمام') == 'من جدة إلى الدمام'
+
+
+@pytest.mark.parametrize('route', ['من جدة إلى الدمام أو الرياض',
+                                 'من جدة إلى الدمام، من تبوك إلى حائل',
+                                 'نقل من جدة إلى الدمام، ومن تبوك إلى حائل كم السعر؟',
+                                 'نقل من جدة إلى الدمام، أو الرياض كم السعر؟'])
+def test_ambiguous_route_is_not_chosen_for_fallback(route):
+    assert p._safe_route_excerpt(route) == ''
+
+
+@pytest.mark.parametrize('quantity', ['٢٥', '25'])
+def test_realistic_price_route_cargo_sequence_uses_grounded_fallback(provider, monkeypatch, quantity):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    first_question = 'عندي شحنة من جدة إلي الدمام إيش تحتاجون عشان تعطوني سعر'
+    provider['answer'] = 'السعر 500 ريال.'
+    first = chat_reply(first_question)
+    assert not first.ok and first.used_model
+    assert 'من جدة إلى الدمام' in first.text
+    assert 'من أي مدينة' not in first.text
+    rows = [chat_row(1, question=first_question, reply_text=first.text)]
+    provider['answer'] = 'من جدة للدمام نقل بري داخلي، وللتسعير محتاجين نوع البضاعة ووزنها/حجمها وتاريخ التحميل تقريبًا، لكن ما عندي صلاحية إصدار سعر هنا.'
+    second = chat_reply('من جدة إلي الدمام', rows)
+    assert second.ok
+    rows.append(chat_row(2, question='من جدة إلي الدمام', reply_text=second.text))
+    provider['answer'] = 'سأعتمد السعر وأرسل العرض.'
+    third = chat_reply(f'بن {quantity} طن', rows)
+    assert not third.ok and third.used_model
+    assert all(part in third.text for part in ('جدة', 'الدمام', 'بن', '25 طن'))
+    assert 'كم وزن' not in third.text and 'مدينتا' not in third.text
+    assert 'التحميل والتفريغ' in third.text
+    request = json.loads(provider['requests'][-1].content)
+    assert 'ongoing pricing inquiry' in request['system']
+    assert len(json.loads(request['messages'][0]['content'])['history']) == 2
+
+
+@pytest.mark.parametrize('question', ['من معي', 'ممكن نتعرف علي فريق عملكم', 'غير الموضوع ما خدماتكم'])
+def test_route_followup_new_topic_does_not_echo_cargo(question):
+    entries = ({'user': 'عندي شحنة من جدة إلي الدمام إيش تحتاجون عشان تعطوني سعر', 'assistant': 'ما نوع الحمولة؟'},)
+    assert not p._reply_pricing_context(question, entries, using_document=False)
+
+
+@pytest.mark.parametrize('answer', ['السعر 25 ريال.', '25 تقريبًا.', 'سأرسل العرض للمدير.'])
+def test_weight_and_role_claim_never_authorize_price_or_send(provider, monkeypatch, answer):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='نقل من جدة إلي الدمام كم السعر؟ الميزانية 25',
+                     reply_text='ما عندي سعر معتمد. ما نوع الحمولة؟')]
+    provider['answer'] = answer
+    result = chat_reply('بن ٢٥ طن', rows)
+    assert result.used_model and not result.ok
+    assert answer not in result.text
