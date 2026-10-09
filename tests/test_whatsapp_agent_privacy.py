@@ -1817,3 +1817,51 @@ def test_weight_and_role_claim_never_authorize_price_or_send(provider, monkeypat
     result = chat_reply('بن ٢٥ طن', rows)
     assert result.used_model and not result.ok
     assert answer not in result.text
+
+
+def test_detail_collection_prompt_and_reply_are_natural_without_repeated_rate_notice(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='عندي شحنة من جدة إلى الدمام إيش تحتاجون عشان تعطوني سعر',
+                     reply_text='ما عندي سعر معتمد. ما نوع البضاعة ووزنها؟'),
+            chat_row(2, question='بن ٢٥ طن', reply_text='ما طريقة التغليف وموعد التحميل؟')]
+    provider['answer'] = 'واضح، البن 25 طن من جدة للدمام. كيف التغليف ومتى موعد التحميل؟'
+    result = chat_reply('الشحنة بن ٢٥ طن من جدة إلى الدمام إيش باقي تحتاجون', rows)
+    assert result.ok and result.used_model and result.text == provider['answer']
+    request = json.loads(provider['requests'][-1].content)
+    assert 'do not repeat that limitation' in request['system']
+    assert 'Never ask again for a known route, cargo or weight' in request['system']
+    assert 'Do not infer vehicle suitability' in request['system']
+    payload = json.loads(request['messages'][0]['content'])
+    assert '25' in payload['question'] and len(payload['history']) == 2
+
+
+@pytest.mark.parametrize('answer', ['السعر 25 ريال.', 'سأحجز مركبة وأرسل السعر.',
+                                   'راجعت النظام والشاحنة متاحة.'])
+def test_detail_style_guidance_preserves_price_action_and_lookup_blocks(provider, monkeypatch, answer):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    provider['answer'] = answer
+    rows = [chat_row(1, question='نقل من جدة إلى الدمام كم السعر',
+                     reply_text='ما عندي سعر معتمد. ما نوع الحمولة؟')]
+    result = chat_reply('بن ٢٥ طن إيش باقي تحتاجون', rows)
+    assert result.used_model and not result.ok
+    assert result.reason in p.REPLY_REJECTION_REASONS
+    assert answer not in result.text
+
+
+def test_route_cargo_packaging_turns_pass_only_scoped_supplied_facts(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='أحتاج نقل من جدة إلى الدمام إيش البيانات المطلوبة للتسعير',
+                     reply_text='ما نوع البضاعة ووزنها؟')]
+    provider['answer'] = 'كيف تغليف البن ومتى موعد التحميل؟'
+    cargo = chat_reply('بن ٢٥ طن', rows)
+    assert cargo.ok
+    rows.append(chat_row(2, question='بن ٢٥ طن', reply_text=cargo.text))
+    provider['answer'] = 'تمام، البن في أكياس. متى موعد التحميل؟'
+    packaging = chat_reply('في أكياس', rows)
+    assert packaging.ok and packaging.used_model
+    request = json.loads(provider['requests'][-1].content)
+    payload = json.loads(request['messages'][0]['content'])
+    assert payload['question'] == 'في أكياس'
+    assert 'جدة' in payload['history'][0]['user'] and 'الدمام' in payload['history'][0]['user']
+    assert payload['history'][1]['user'] == 'بن 25 طن'
+    assert 'collection, not a request for an actual price amount' in request['system']
