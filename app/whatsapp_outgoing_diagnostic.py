@@ -9,6 +9,7 @@ import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hmac
+from html import escape
 import json
 import logging
 import re
@@ -16,7 +17,7 @@ from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse
 
 from app import whatsapp_document_store as documents
 from app import whatsapp_inbox as inbox
@@ -360,8 +361,21 @@ async def outgoing_privacy_diagnostic(token: str, request: Request):
         _fail('diagnostic_timeout', 504)
     except (z.WhatsAppBlocked, httpx.HTTPError):
         _fail('diagnostic_unavailable', 502)
-    return JSONResponse({'scope': 'matched_document_receipt',
+    summary = {'scope': 'matched_document_receipt',
         'file_binding': file_binding, 'origin_category': origin,
-        'anonymous_result': result, 'privacy_assessment': assessment},
+        'anonymous_result': result, 'privacy_assessment': assessment}
+    labels = {'scope': 'نطاق الفحص', 'file_binding': 'مطابقة الملف',
+        'origin_category': 'تصنيف مصدر المرفق', 'anonymous_result': 'نتيجة الفحص دون تسجيل دخول',
+        'privacy_assessment': 'تقييم الخصوصية'}
+    rows = ''.join('<dt>' + labels[key] + '</dt><dd data-field="' + key + '">'
+                   + escape(value) + '</dd>' for key, value in summary.items())
+    return HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><head>'
+        '<meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+        '<title>نتيجة فحص خصوصية المرفق</title></head><body>'
+        '<h1>نتيجة فحص خصوصية المرفق</h1><dl>' + rows + '</dl>'
+        '<p>هذه نتيجة هذا الفحص فقط. وجود رابط لا يثبت أن الملف متاح للعامة، '
+        'والنتيجة غير الحاسمة لا تثبت خصوصيته.</p>'
+        '<p>لم تُحفظ هذه النتيجة. تحديث الصفحة قد يعيد طلب الفحص.</p>'
+        '<a href="/whatsapp-inbox">العودة إلى محادثات واتساب</a></body></html>',
         headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
                  'X-Content-Type-Options': 'nosniff'})
