@@ -6,6 +6,7 @@ No production database, real contacts, public HTTP requests or live SMTP are all
 import asyncio
 import datetime as dt
 import html
+import json
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import formatdate
@@ -44,7 +45,6 @@ def run():
         name, recipient, url = 'Fixture '+slug+' Trading', slug+'@'+slug+'.example.invalid', 'https://'+slug+'.example.invalid/contact'
         value = {'company_name': name, 'recipient': recipient, 'source_url': url, 'identity_name': name,
                  'confidence': 'exact_legal', 'official_source_confirmed': 'yes',
-                 'exclusion_basis': 'owner_confirmed_not_current_customer', 'customer_exclusion_confirmed': 'yes',
                  'subject': 'Introduction: '+name, 'body': 'An introduction only. Reply STOP to opt out.'}
         value.update(changes)
         pages[url] = {'url': url, 'title': name, 'request_text': name+' Official contact: '+recipient,
@@ -64,7 +64,7 @@ def run():
         assert response.status_code == expected, (path, response.status_code, response.text)
         return response
 
-    def create(slug, **changes):
+    def create(slug, expected_relationship='unknown', **changes):
         response = post('/sales-prospects/create', data(slug, **changes))
         mid = int(urlsplit(response.headers['location']).path.rsplit('/', 1)[1])
         m = one('SELECT * FROM outbound_messages WHERE id=?', (mid,))
@@ -72,6 +72,9 @@ def run():
         assert m['mail_user_id'] == uid and m['status'] == 'draft' and not m.get('proposal_text')
         p = one('SELECT * FROM sales_prospects WHERE id=?', (m['prospect_id'],))
         assert p['status'] == 'prospect_verified' and p['source_email'] == p['recipient'] == m['recipient']
+        assert p['relationship_classification'] == expected_relationship and p['relationship_checked_at']
+        assert p['exclusion_basis'] == prospects.RECORD_DERIVED
+        assert m['source_identity_digest'] == prospects.source_identity_digest(p)
         return mid, p
 
     def approve(mid):
@@ -105,7 +108,6 @@ def run():
         assert count('sales_prospects') == 0
         assert client.post('/sales-prospects/create', data={**data('bad-csrf'), 'csrf': 'wrong'}).status_code == 403
         for field, value in [('confidence', 'guess'), ('official_source_confirmed', 'no'),
-                             ('customer_exclusion_confirmed', 'no'), ('exclusion_basis', ''),
                              ('identity_name', 'Unrelated Legal Entity')]:
             invalid = data('invalid-'+field, **{field: value})
             response = client.post('/sales-prospects/create', data={**csrf, **invalid})
@@ -184,27 +186,80 @@ def run():
                     assert exc.status_code == 428
         assert one('SELECT status FROM outbound_messages WHERE id=?', (mid,))['status'] == 'approved'
 
-        # Existing contacts are blocked by destination or legal identity, regardless of status.
-        for kind in ('account-email', 'account-name', 'directory-email', 'directory-name', 'directory-domain', 'account-domain', 'suppression', 'prior-outbound', 'prior-campaign'):
+        # CRM evidence classifies relationships without excluding current customers.
+        # A mixed directory is not proof of either an existing or a new customer.
+        for kind in ('account-email', 'account-name', 'directory-email', 'directory-name', 'directory-domain', 'account-domain'):
             value = data(kind)
             if kind.startswith('account'):
-                execute('INSERT INTO accounts(name,email,created_at,updated_at) VALUES(?,?,?,?)',
+                execute('INSERT INTO accounts(name,email,status,created_at,updated_at) VALUES(?,?,?,?,?)',
                         (value['company_name'] if kind.endswith('name') else 'Existing account fixture',
-                         value['recipient'].upper() if kind.endswith('email') else ('info@'+value['recipient'].split('@')[1] if kind.endswith('domain') else 'other-account@example.invalid'), now, now))
-            elif kind.startswith('directory'):
+                         value['recipient'].upper() if kind.endswith('email') else ('info@'+value['recipient'].split('@')[1] if kind.endswith('domain') else 'other-account@example.invalid'),
+                         'customer', now, now))
+            else:
                 execute('INSERT INTO customer_directory(company_name,email,created_at,updated_at) VALUES(?,?,?,?)',
                         (value['company_name'] if kind.endswith('name') else 'Existing directory fixture',
                          value['recipient'].upper() if kind.endswith('email') else ('info@'+value['recipient'].split('@')[1] if kind.endswith('domain') else 'other-directory@example.invalid'), now, now))
-            elif kind == 'suppression':
+            _, classified = create(kind, expected_relationship='current' if kind.startswith('account') else 'unknown',
+                                   # Stale clients cannot set the relationship or claim owner confirmation.
+                                   customer_exclusion_confirmed='no', exclusion_basis='invented', relationship_classification='prospect')
+            assert json.loads(classified['relationship_evidence'])
+        lead = data('registered-lead')
+        execute('INSERT INTO accounts(name,email,created_at,updated_at) VALUES(?,?,?,?)',
+                (lead['company_name'], lead['recipient'], now, now))
+        _, lead_record = create('registered-lead', expected_relationship='prospect')
+        assert json.loads(lead_record['relationship_evidence'])[0]['status'] == 'lead'
+        overview = client.get('/sales-prospects').text
+        assert 'name="customer_exclusion_confirmed"' not in overview and 'name="exclusion_basis"' not in overview
+        assert 'العلاقة غير معروفة من السجلات' in overview and 'عميل حالي بحسب السجل' in overview
+        detail = client.get('/sales-prospects/'+str(first['id'])).text
+        assert 'العلاقة غير معروفة من السجلات' in detail and 'إقرار مراجعة القائمة' not in detail
+
+        # Suppression, prior campaign/outbound records, and explicit withdrawal remain blockers.
+        for kind in ('suppression', 'prior-outbound', 'prior-campaign', 'stopped', 'withdrawn'):
+            value = data(kind)
+            if kind == 'suppression':
                 suppress(value['recipient'])
             elif kind == 'prior-outbound':
                 execute('INSERT INTO outbound_messages(recipient,subject,body,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
                         (value['recipient'].upper(), 'Legacy campaign', 'Fixture', 'sent', uid, now, now))
-            else:
+            elif kind == 'prior-campaign':
                 prior_campaign(value['recipient'].upper())
+            else:
+                execute('INSERT INTO accounts(name,email,status,created_at,updated_at) VALUES(?,?,?,?,?)',
+                        (value['company_name'], value['recipient'], kind, now, now))
             before = count('sales_prospects'), count('outbound_messages')
             post('/sales-prospects/create', value, 409)
             assert (count('sales_prospects'), count('outbound_messages')) == before
+
+        # Different businesses using Gmail never become the same company by domain.
+        shared = data('shared-provider', recipient='fixture-shared-one@gmail.com')
+        pages[shared['source_url']]['request_text'] = shared['company_name']+' Official contact: '+shared['recipient']
+        execute('INSERT INTO accounts(name,email,domain,status,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                ('Other Shared Mail Fixture', 'fixture-shared-two@gmail.com', 'gmail.com', 'customer', now, now))
+        response = post('/sales-prospects/create', shared)
+        shared_mid = int(urlsplit(response.headers['location']).path.rsplit('/', 1)[1])
+        shared_p = one('SELECT p.* FROM sales_prospects p JOIN outbound_messages m ON m.prospect_id=p.id WHERE m.id=?', (shared_mid,))
+        assert shared_p['relationship_classification'] == 'unknown' and json.loads(shared_p['relationship_evidence']) == []
+        post('/sales-prospects/create', shared, 409)
+        post('/sales-prospects/create', {**shared, 'recipient': 'fixture-unpublished@gmail.com'}, 409)
+        suppress('fixture-suppressed@gmail.com')
+        post('/sales-prospects/create', {**shared, 'recipient': 'fixture-suppressed@gmail.com'}, 409)
+        prior_campaign('fixture-campaigned@gmail.com')
+        post('/sales-prospects/create', {**shared, 'recipient': 'fixture-campaigned@gmail.com'}, 409)
+        # Exact address is evidence; a company-owned official site may publish it.
+        execute('INSERT INTO accounts(name,email,status,created_at,updated_at) VALUES(?,?,?,?,?)',
+                ('Shared Mail Exact Fixture', shared['recipient'].upper(), 'customer', now, now))
+        shared_base = approve(shared_mid)
+        assert one('SELECT relationship_classification FROM sales_prospects WHERE id=?', (shared_p['id'],))['relationship_classification'] == 'current'
+        for field, value in [('source_url', shared['source_url']+'-changed'), ('source_email', 'fixture-substitute@gmail.com'),
+                             ('identity_name', 'Substituted Fixture Company'), ('company_name', 'Substituted Fixture Company'),
+                             ('recipient', 'fixture-substitute@gmail.com')]:
+            execute('UPDATE sales_prospects SET '+field+'=? WHERE id=?', (value, shared_p['id']))
+            post(shared_base+'/send', expected=409)
+            execute('UPDATE sales_prospects SET '+field+'=? WHERE id=?', (shared_p[field], shared_p['id']))
+        pages[shared['source_url']]['request_text'] = shared['company_name']+' Official contact: fixture-substitute@gmail.com'
+        post(shared_base+'/send', expected=409)
+        pages[shared['source_url']]['request_text'] = shared['company_name']+' Official contact: '+shared['recipient']
 
         # Concurrent drafts and normalized recipient casing cannot produce duplicate intro rows.
         race = data('creation-race')
@@ -236,7 +291,8 @@ def run():
             post(base+'/send', expected=409)
         execute('UPDATE stepup_auth SET expires_at=? WHERE session_id=?', (stale_stepup['expires_at'], session['id']))
         approved = one('SELECT * FROM outbound_messages WHERE id=?', (mid,))
-        for field, change in [('subject', 'Post-approval subject'), ('body', 'Post-approval body'), ('proposal_text', 'Injected proposal')]:
+        for field, change in [('subject', 'Post-approval subject'), ('body', 'Post-approval body'), ('proposal_text', 'Injected proposal'),
+                              ('source_identity_digest', None), ('source_identity_digest', ''), ('source_identity_digest', 'modified')]:
             execute('UPDATE outbound_messages SET '+field+'=? WHERE id=?', (change, mid))
             post(base+'/send', expected=409)
             execute('UPDATE outbound_messages SET '+field+'=? WHERE id=?', (approved[field], mid))
@@ -257,23 +313,75 @@ def run():
         post(base+'/send', expected=409)
         pages[first['source_url']] = original_page
 
-        # Exclusions added after approval remain terminal blockers without invoking the provider.
-        for kind in ('suppression', 'account', 'directory', 'campaign', 'outbound'):
+        # Relationship evidence is refreshed immediately before send, after approval.
+        for kind, expected in (('account', 'current'), ('lead', 'prospect'), ('directory', 'unknown')):
+            late_mid, p = create('late-'+kind)
+            late_base = approve(late_mid)
+            prior_check = p['relationship_checked_at']
+            if kind == 'directory':
+                execute('INSERT INTO customer_directory(company_name,email,created_at,updated_at) VALUES(?,?,?,?)',
+                        ('Late directory', p['recipient'], now, now))
+            else:
+                execute('INSERT INTO accounts(name,email,status,created_at,updated_at) VALUES(?,?,?,?,?)',
+                        ('Late account', p['recipient'], 'customer' if kind == 'account' else 'lead', now, now))
+            with patch.object(mail, 'send', return_value='<late-'+kind+'@example.invalid>') as delivered:
+                post(late_base+'/send')
+                delivered.assert_called_once()
+                assert delivered.call_args.args[1] == p['recipient']
+            refreshed = one('SELECT * FROM sales_prospects WHERE id=?', (p['id'],))
+            assert refreshed['relationship_classification'] == expected
+            assert refreshed['relationship_checked_at'] > prior_check
+            assert json.loads(refreshed['relationship_evidence'])
+            assert refreshed['status'] == 'contacted'
+
+        # Withdrawals and duplicate/suppression records added after approval still block.
+        for kind in ('suppression', 'stopped', 'withdrawn', 'crm-withdrawn', 'campaign', 'outbound'):
             late_mid, p = create('late-'+kind)
             late_base = approve(late_mid)
             if kind == 'suppression':
                 suppress(p['recipient'])
-            elif kind == 'account':
-                execute('INSERT INTO accounts(name,email,created_at,updated_at) VALUES(?,?,?,?)', ('Late account', p['recipient'], now, now))
-            elif kind == 'directory':
-                execute('INSERT INTO customer_directory(company_name,email,created_at,updated_at) VALUES(?,?,?,?)', ('Late directory', p['recipient'], now, now))
+            elif kind in ('stopped', 'withdrawn'):
+                execute('UPDATE sales_prospects SET status=? WHERE id=?', (kind, p['id']))
+            elif kind == 'crm-withdrawn':
+                execute('INSERT INTO accounts(name,email,status,created_at,updated_at) VALUES(?,?,?,?,?)',
+                        ('Late withdrawn fixture', p['recipient'], 'withdrawn', now, now))
             elif kind == 'campaign':
                 prior_campaign(p['recipient'], 'pending')
             else:
                 execute('INSERT INTO outbound_messages(recipient,subject,body,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
                         (p['recipient'], 'Other pending outreach', 'Fixture', 'draft', uid, now, now))
-            post(late_base+'/send', expected=409)
+            with patch.object(mail, 'send') as blocked:
+                post(late_base+'/send', expected=409)
+                blocked.assert_not_called()
             assert one('SELECT status FROM outbound_messages WHERE id=?', (late_mid,))['status'] == 'approved'
+
+        # Authored replies cannot revive any normalized terminal state.
+        for i, terminal in enumerate(('stopped', 'withdrawn', 'إيقاف', 'منسحب', ' STOPPED ', 'Withdrawn')):
+            terminal_mid, terminal_p = create('terminal-reply-'+str(i))
+            terminal_base = approve(terminal_mid)
+            execute('UPDATE sales_prospects SET status=? WHERE id=?', (terminal, terminal_p['id']))
+            with db() as c:
+                prospects.ingest_reply(c, {'id': 0, 'user_id': uid, 'manual_reply_address': terminal_p['recipient'],
+                                          'body': 'Thank you for the introduction'}, {'prospect_id': terminal_p['id']})
+            assert one('SELECT status FROM sales_prospects WHERE id=?', (terminal_p['id'],))['status'] == terminal
+            post(terminal_base+'/send', expected=409)
+
+        # Old stored assertions stay historical; migration and validation do not trust or rewrite them.
+        legacy_mid, legacy_p = create('legacy-record')
+        execute('UPDATE sales_prospects SET exclusion_basis=?,relationship_checked_at=NULL WHERE id=?',
+                ('owner_confirmed_not_current_customer', legacy_p['id']))
+        execute('UPDATE outbound_messages SET source_identity_digest=NULL WHERE id=?', (legacy_mid,))
+        prospects.init(); prospects.init()
+        legacy_base = approve(legacy_mid)
+        legacy_message = one('SELECT * FROM outbound_messages WHERE id=?', (legacy_mid,))
+        assert legacy_message['source_identity_digest'] is None
+        with patch.object(mail, 'send', return_value='<legacy-fixture@example.invalid>') as delivered:
+            post(legacy_base+'/send')
+            delivered.assert_called_once()
+        legacy = one('SELECT * FROM sales_prospects WHERE id=?', (legacy_p['id'],))
+        assert legacy['exclusion_basis'] == 'owner_confirmed_not_current_customer'
+        assert legacy['relationship_classification'] == 'unknown' and legacy['relationship_checked_at']
+        post(legacy_base+'/send', expected=409)
 
         # Broader CRM routes must not expose this private mailbox to other admins or sales staff.
         for role in ('sales', 'admin'):
@@ -470,7 +578,7 @@ def run():
         campaign_count = one('SELECT COUNT(*) n FROM customer_campaign_recipients WHERE campaign_id=? AND recipient=?', (race_campaign, race_data['recipient']))['n']
         assert prospect_count + campaign_count == 1, (prospect_count, campaign_count)
 
-    print('PASS: isolated prospect storage, exact official evidence, exclusions and cross-campaign dedupe before draft/send, immutable approval, owner/RBAC/CSRF/MFA enrollment, exact official-only stale-stepup exception, adjacent-route and nonofficial recency guards, unchanged stepup session, single SMTP claim, private escaped provider receipt, provider truth, terminal uncertainty, preserved public-request guard, exact prospect reply linkage, opt-out suppression of approved replies, stopped-state persistence, reciprocal campaign exclusion and no automatic acknowledgement. Live mail: 0.')
+    print('PASS: isolated prospect storage, exact official and shared-mailbox evidence, record-derived current/prospect/unknown classification refreshed at send, terminal withdrawal, preserved legacy history, source-binding approval and cross-campaign dedupe before draft/send, immutable approval, owner/RBAC/CSRF/MFA enrollment, exact official-only stale-stepup exception, adjacent-route and nonofficial recency guards, unchanged stepup session, single SMTP claim, private escaped provider receipt, provider truth, terminal uncertainty, preserved public-request guard, exact prospect reply linkage, opt-out suppression of approved replies, stopped-state persistence, reciprocal campaign exclusion and no automatic acknowledgement. Live mail: 0.')
 
 
 def main():

@@ -12,7 +12,7 @@ def auth(r):
  return s
 def parse(raw): return {k:v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
 def shell(t,b): return '<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(t)+'</title><style>body{font-family:Arial;background:#07131f;color:#eef6fb;margin:0}.w{max-width:1250px;margin:auto;padding:24px}.card{background:#102536;border:1px solid #28475d;border-radius:16px;padding:20px;margin:14px 0}.nav{display:flex;gap:8px;flex-wrap:wrap}.nav a,.btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#18384d;color:white;text-decoration:none;border:0;font-weight:700}.btn{background:#22c55e;color:#04130a;cursor:pointer}.danger{background:#ef4444;color:white}.muted{color:#9fb4c4}input,textarea{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:9px;border:1px solid #36586e;background:#081925;color:white}textarea{min-height:180px}table{width:100%;border-collapse:collapse}td,th{padding:11px;border-bottom:1px solid #28475d;text-align:right}.scroll{overflow:auto}</style><body><div class="w">'+b+'</div></body></html>'
-def nav(): return '<div class="nav"><a href="/sales-center">مركز المبيعات</a><a href="/sales-today">مهام اليوم</a><a href="/sales-copilot">Sales Copilot</a><a href="/outbound">العروض والرسائل</a><a href="/sales-prospects">العملاء المحتملون</a><a href="/approvals">الموافقات</a><a href="/settings/email">إعداد البريد</a></div>'
+def nav(): return '<div class="nav"><a href="/sales-center">مركز المبيعات</a><a href="/sales-today">مهام اليوم</a><a href="/sales-copilot">Sales Copilot</a><a href="/outbound">العروض والرسائل</a><a href="/sales-prospects">التواصل التعريفي</a><a href="/approvals">الموافقات</a><a href="/settings/email">إعداد البريد</a></div>'
 def gmail_ready(uid):
  c=connection(uid);return bool(c and c.get('status')=='connected' and os.getenv('ENABLE_EXTERNAL_ACTIONS','0')=='1')
 @router.post('/outbound/from-opportunity/{oid}')
@@ -78,7 +78,7 @@ def detail(mid:int,request:Request):
  else:
   edit='<div class="card">الحالة: '+esc(m['status'])+(' — لا تعد الإرسال قبل التحقق من سجل البريد' if m['status'] in ('sending','uncertain') else '')+'</div>'
  context='<p>رد عبر البريد الرسمي داخل المحادثة الأصلية · <a href="/official-inbox">العودة إلى الوارد</a></p>' if m.get('reply_inbox_id') else ''
- if m.get('prospect_id'):context+='<p>تعريف أو رد لعميل محتمل، وليس طلب خدمة مؤكدًا · <a href="/sales-prospects/'+str(m['prospect_id'])+'">سجل العميل المحتمل</a></p>'
+ if m.get('prospect_id'):context+='<p>تواصل تعريفي أو رد، وليس طلب خدمة مؤكدًا · <a href="/sales-prospects/'+str(m['prospect_id'])+'">سجل التواصل</a></p>'
  if m['status']=='sent':context+='<p>قبل مزود البريد الرسالة؛ التسليم إلى صندوق المستلم غير مؤكد.</p>'
  if m['status'] in ('sent','sending','uncertain'):
   context+='<div class="card"><b>مزود الإرسال:</b> '+esc(m.get('provider'))+'<br><b>معرف الرسالة:</b> <span dir="ltr">'+esc(m.get('provider_message_id'))+'</span><br><b>وقت قبول المزود:</b> '+esc(m.get('sent_at'))+'</div>'
