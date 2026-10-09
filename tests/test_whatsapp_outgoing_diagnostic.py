@@ -1,6 +1,7 @@
 """Fictional outgoing receipts; every provider and anonymous request is mocked."""
 from contextlib import contextmanager
 from copy import deepcopy
+from html.parser import HTMLParser
 import asyncio
 import hashlib
 import json
@@ -136,6 +137,25 @@ def inspect(state, **updates):
                                 '/privacy-diagnostic', data=form(state, **updates))
 
 
+def summary(response):
+    class Fields(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.values, self.key = {}, None
+        def handle_starttag(self, tag, attrs):
+            if tag == 'dd':
+                self.key = dict(attrs).get('data-field')
+        def handle_data(self, data):
+            if self.key:
+                self.values[self.key] = self.values.get(self.key, '') + data
+        def handle_endtag(self, tag):
+            if tag == 'dd':
+                self.key = None
+    parser = Fields()
+    parser.feed(response.text)
+    return parser.values
+
+
 def attachment(state):
     return state['messages'][0]['attachments'][0]
 
@@ -145,7 +165,7 @@ def test_default_metadata_only_exact_stored_receipt(setup):
     before = dict(state['conn'].execute('SELECT * FROM whatsapp_document_drafts').fetchone())
     response = inspect(state)
     assert response.status_code == 200, response.text
-    assert response.json() == {'scope': 'matched_document_receipt', 'file_binding': 'stored_receipt_only',
+    assert summary(response) == {'scope': 'matched_document_receipt', 'file_binding': 'stored_receipt_only',
         'origin_category': 'canonical_provider_proxy', 'anonymous_result': 'not_requested',
         'privacy_assessment': 'inconclusive'}
     assert len(state['requests']) == 3 and not state['anonymous']
@@ -250,7 +270,7 @@ def test_exact_outgoing_receipt_and_attachment_binding(setup, change, status):
 
 def test_provider_hash_corrobates_local_hash_without_downloading(setup):
     attachment(setup)['sha256'] = setup['item']['sha256']
-    assert inspect(setup).json()['file_binding'] == 'sha256_matched'
+    assert summary(inspect(setup))['file_binding'] == 'sha256_matched'
     assert not setup['anonymous']
 
 
@@ -280,15 +300,15 @@ def test_unknown_urls_never_probed_or_returned(setup, url):
     attachment(setup)['url'] = url
     response = inspect(setup, probe='yes', fictional='yes')
     assert response.status_code == 200
-    assert response.json()['origin_category'] == 'unknown'
-    assert response.json()['anonymous_result'] == 'not_eligible'
+    assert summary(response)['origin_category'] == 'unknown'
+    assert summary(response)['anonymous_result'] == 'not_eligible'
     assert not setup['anonymous'] and 'secret' not in response.text and 'private' not in response.text
 
 
 @pytest.mark.parametrize('url', [None, ''])
 def test_absent_url_is_inconclusive_and_unprobed(setup, url):
     attachment(setup)['url'] = url
-    result = inspect(setup, probe='yes', fictional='yes').json()
+    result = summary(inspect(setup, probe='yes', fictional='yes'))
     assert result['origin_category'] == 'absent' and result['privacy_assessment'] == 'inconclusive'
     assert not setup['anonymous']
 
@@ -296,7 +316,7 @@ def test_absent_url_is_inconclusive_and_unprobed(setup, url):
 def test_future_allowlisted_cdn_classification_never_authorizes_a_probe(setup,monkeypatch):
     monkeypatch.setattr(diagnostic,'_PROVIDER_CDN_HOSTS',frozenset({'cdn.provider.invalid'}))
     attachment(setup)['url']='https://cdn.provider.invalid/private.pdf?token=secret'
-    result=inspect(setup,probe='yes',fictional='yes').json()
+    result=summary(inspect(setup,probe='yes',fictional='yes'))
     assert result['origin_category']=='allowlisted_provider_cdn'
     assert result['anonymous_result']=='not_eligible' and result['privacy_assessment']=='inconclusive'
     assert not setup['anonymous'] and 'secret' not in json.dumps(result)
@@ -310,8 +330,8 @@ def test_fixed_anonymous_no_auth_no_redirect_and_no_privacy_proof(setup, status,
     state['anonymous_headers'] = {'Location': 'http://127.0.0.1/private?token=secret'}
     response = inspect(state, probe='yes', fictional='yes')
     assert response.status_code == 200, response.text
-    assert response.json()['anonymous_result'] == result
-    assert response.json()['privacy_assessment'] == 'inconclusive'
+    assert summary(response)['anonymous_result'] == result
+    assert summary(response)['privacy_assessment'] == 'inconclusive'
     assert len(state['anonymous']) == 1
     request = state['anonymous'][0]
     assert str(request.url) == attachment(state)['url']
@@ -350,8 +370,8 @@ def test_anonymous_reads_only_bounded_prefix_and_reports_observation(setup):
     setup['anonymous_status'] = 200
     response = inspect(setup, probe='yes', fictional='yes')
     assert response.status_code == 200, response.text
-    assert response.json()['anonymous_result'] == 'pdf_prefix_observed'
-    assert response.json()['privacy_assessment'] == 'public_bytes_observed'
+    assert summary(response)['anonymous_result'] == 'pdf_prefix_observed'
+    assert summary(response)['privacy_assessment'] == 'public_bytes_observed'
     assert stream.reads == 4 and stream.closed
     assert '%PDF' not in response.text
 
@@ -368,7 +388,7 @@ def test_denial_redirect_never_reads_body(setup, status):
 def test_compressed_response_never_reads_or_decompresses(setup):
     stream = PrefixStream()
     setup.update(anonymous_stream=stream, anonymous_status=200, anonymous_headers={'content-encoding': 'gzip'})
-    result = inspect(setup, probe='yes', fictional='yes').json()
+    result = summary(inspect(setup, probe='yes', fictional='yes'))
     assert result['anonymous_result'] == 'encoded_response' and stream.reads == 0 and stream.closed
 
 
@@ -376,7 +396,7 @@ def test_compressed_response_never_reads_or_decompresses(setup):
 def test_anonymous_error_sanitized_and_not_retried(setup, error, result):
     setup['anonymous_error'] = error
     response = inspect(setup, probe='yes', fictional='yes')
-    assert response.json()['anonymous_result'] == result
+    assert summary(response)['anonymous_result'] == result
     assert len(setup['anonymous']) == 1 and 'private' not in response.text and 'token' not in response.text
 
 
@@ -427,7 +447,7 @@ def test_whole_diagnostic_has_wall_clock_budget(setup, monkeypatch):
 def test_anonymous_has_separate_wall_clock_budget(setup, monkeypatch):
     monkeypatch.setattr(diagnostic, '_PROBE_SECONDS', 0)
     response = inspect(setup, probe='yes', fictional='yes')
-    assert response.status_code == 200 and response.json()['anonymous_result'] == 'timeout'
+    assert response.status_code == 200 and summary(response)['anonymous_result'] == 'timeout'
     assert len(setup['anonymous']) <= 1 and all(client.is_closed for client in setup['clients'])
 
 
@@ -490,3 +510,18 @@ def test_optional_probe_does_not_change_frozen_send_state(setup):
     assert after == before and after['content_b64'] is None
     assert after['state'] == 'public_link_warning'
     assert hashlib.sha256(b'%PDF-1.7 Synthetic fixture only; no real document.').hexdigest() == after['sha256']
+
+
+def test_result_is_plain_html_without_redirect_script_or_automatic_retry(setup):
+    response = inspect(setup)
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/html')
+    assert 'location' not in response.headers
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    assert '<html lang="ar" dir="rtl">' in response.text
+    assert '<script' not in response.text and '<form' not in response.text
+    assert 'http-equiv' not in response.text
+    assert 'href="/whatsapp-inbox"' in response.text
+    assert 'لم تُحفظ هذه النتيجة' in response.text
+    assert len(summary(response)) == 5
+    assert len(setup['requests']) == 3 and not setup['anonymous']

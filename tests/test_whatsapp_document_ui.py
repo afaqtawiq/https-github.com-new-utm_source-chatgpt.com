@@ -378,7 +378,8 @@ def test_terminal_diagnostic_ui_submits_bound_receipt_and_defaults_to_metadata_o
                         'url':'https://zernio.com/api/v1/whatsapp/media/synthetic-media?accountId=account-test'}]}]
     response=client.post(form['attrs']['action'],data={**fields,'receipt':'synthetic-id'})
     assert response.status_code==200,response.text
-    assert response.json()['anonymous_result']=='not_requested'
+    assert response.headers['content-type'].startswith('text/html')
+    assert '<dd data-field="anonymous_result">not_requested</dd>' in response.text
     assert len(calls)==1 and binding(conn)['state']=='accepted'
     assert not any('/whatsapp/media/' in url for url in provider['gets'])
 
