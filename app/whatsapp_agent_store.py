@@ -17,6 +17,8 @@ import secrets
 
 LEASE_SECONDS = 300
 MAX_READ_ATTEMPTS = 3
+DOCUMENT_REVIEW_TTL_SECONDS = 3600
+MAX_DOCUMENT_REVIEW_TTL_SECONDS = 86400
 DAILY_MODEL_LIMITS = {"owner_pilot": 10, "routine": 50}
 MODEL_BUDGET_NOTICE = ('وصلت رسالتك. وصلنا للحد اليومي للفهم الآلي في التجربة؛ '
                        'يتجدد الساعة ٣ صباحًا بتوقيت السعودية. أرسل سؤالك من جديد بعد ذلك، '
@@ -120,6 +122,7 @@ DDL = (
         document_text TEXT, document_sha256 TEXT, document_status TEXT,
         document_checkpointed_at TIMESTAMPTZ,
         context_source_job_id BIGINT REFERENCES whatsapp_agent_jobs(id),
+        review_id TEXT,
         model_started_at TIMESTAMPTZ, model_completed_at TIMESTAMPTZ,
         reply_text TEXT, diagnostics TEXT NOT NULL DEFAULT '{}',
         idempotency_key TEXT NOT NULL UNIQUE,
@@ -141,10 +144,22 @@ DDL = (
         account_id TEXT NOT NULL, sender TEXT NOT NULL, window_start TIMESTAMPTZ NOT NULL,
         job_id BIGINT NOT NULL UNIQUE REFERENCES whatsapp_agent_jobs(id),
         PRIMARY KEY(account_id,sender,window_start))""",
+    """CREATE TABLE IF NOT EXISTS whatsapp_agent_document_reviews (
+        id TEXT PRIMARY KEY, account_id TEXT NOT NULL, sender TEXT NOT NULL,
+        conversation_id TEXT NOT NULL, source_job_id BIGINT NOT NULL REFERENCES whatsapp_agent_jobs(id),
+        message_id TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+        reviewed_text TEXT NOT NULL, reviewed_text_sha256 TEXT NOT NULL,
+        extraction_sha256 TEXT, authorization_generation BIGINT NOT NULL,
+        creator_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('staged','approved','revoked','expired')),
+        created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+        approved_at TIMESTAMPTZ, approved_text_sha256 TEXT,
+        approved_through_job_id BIGINT, revoked_at TIMESTAMPTZ)""",
     "CREATE INDEX IF NOT EXISTS whatsapp_agent_claim_idx ON whatsapp_agent_jobs(status,id)",
     "CREATE INDEX IF NOT EXISTS whatsapp_agent_scope_idx ON whatsapp_agent_jobs(account_id,sender,conversation_id,id)",
     "CREATE INDEX IF NOT EXISTS whatsapp_agent_budget_idx ON whatsapp_agent_jobs(account_id,model_started_at)",
     "CREATE INDEX IF NOT EXISTS whatsapp_agent_send_idx ON whatsapp_agent_outbox(status,job_id)",
+    "CREATE INDEX IF NOT EXISTS whatsapp_agent_review_scope_idx ON whatsapp_agent_document_reviews(account_id,sender,conversation_id,source_job_id)",
 )
 
 
@@ -163,6 +178,12 @@ def init_storage(*, db_factory=None):
             else:
                 connection.execute("ALTER TABLE " + table +
                     " ADD COLUMN IF NOT EXISTS authorization_generation BIGINT NOT NULL DEFAULT " + str(default))
+        if getattr(connection, "dialect", None) == "sqlite":
+            names = {row["name"] for row in connection.execute("PRAGMA table_info(whatsapp_agent_jobs)").fetchall()}
+            if "review_id" not in names:
+                connection.execute("ALTER TABLE whatsapp_agent_jobs ADD COLUMN review_id TEXT")
+        else:
+            connection.execute("ALTER TABLE whatsapp_agent_jobs ADD COLUMN IF NOT EXISTS review_id TEXT")
         stamp = _stamp(None)
         connection.execute("""UPDATE whatsapp_agent_jobs SET status='blocked',
             lease_token=NULL,lease_until=NULL,updated_at=%s,completed_at=%s
@@ -272,6 +293,7 @@ def _validate_acceptance(connection, account_id, settings):
         followup["payload"].get("question_allowed") is not True or
         followup["payload"].get("question_kind") != "document_question" or
         document["context_source_job_id"] is not None or
+        document.get("review_id") is not None or followup.get("review_id") is not None or
         document["status"] != "sent" or followup["status"] != "sent" or
         document["document_status"] != "ok" or not document["document_text"] or
         not document["document_sha256"] or not document["model_completed_at"] or
@@ -302,6 +324,257 @@ def _pdf_payload(payload):
 
 def _followup_payload(payload):
     return type(payload.get("attachment_count")) is int and payload["attachment_count"] == 0 and payload.get("attachments") == []
+
+
+def _review(connection, review_id, *, lock=False):
+    row = _row(connection.execute("SELECT * FROM whatsapp_agent_document_reviews WHERE id=%s" +
+                (_lock(connection) if lock else ""), (review_id,)).fetchone())
+    if row:
+        row.update(review_id=row["id"], text=row["reviewed_text"], text_sha256=row["reviewed_text_sha256"])
+    return row
+
+
+def _review_source_valid(source, settings, now):
+    """Known original PDF only; a successful local re-read is supplied by staging.
+
+    Quarantine for unknown provenance is reviewable. Failed reading, uncertain
+    extraction and detected sensitive content are not eligible for this path.
+    """
+    if (not source or source.get("context_source_job_id") is not None or source.get("review_id") or
+        source["authorization_generation"] != settings["authorization_generation"] or
+        not _enabled(settings, source) or not _pdf_payload(source["payload"]) or
+        not isinstance(source.get("document_sha256"), str) or
+        not _SHA256.fullmatch(source["document_sha256"]) or
+        not source.get("document_checkpointed_at") or
+        not ((source["status"] == "sent" and source["document_status"] == "ok") or
+             (source["status"] in TERMINAL and source["document_status"] == "quarantined" and
+              source["diagnostics"].get("document_reason", source["diagnostics"].get("reason")) ==
+              "unapproved_document_provenance"))):
+        return False
+    current, cutoff = _time(now), _time(now) - timedelta(days=1)
+    return all(cutoff < _time(source[key]) <= current for key in
+               ("created_at", "document_checkpointed_at"))
+
+
+def _screen_review_text(text, source_sha256):
+    # The exact provenance grant is local to this manager-reviewed excerpt.
+    # It never changes account settings or approves other text from this PDF.
+    from app import whatsapp_agent_privacy as privacy
+    decision = privacy.screen_reviewed_document(text, source_sha256, [source_sha256])
+    return bool(decision.allowed and decision.safe_text == text)
+
+
+def _review_scope(review, source, settings, now):
+    if (not review or not _review_source_valid(source, settings, now) or
+        review["authorization_generation"] != settings["authorization_generation"] or
+        review["source_job_id"] != source["id"] or
+        review["source_sha256"] != source["document_sha256"] or
+        any(review[key] != source[key] for key in
+            ("account_id", "sender", "conversation_id", "message_id")) or
+        not _time(review["created_at"]) <= _time(now) < _time(review["expires_at"]) or
+        _time(review["expires_at"]) > min(_time(review["created_at"]) + timedelta(days=1),
+            _time(source["created_at"]) + timedelta(days=1),
+            _time(source["document_checkpointed_at"]) + timedelta(days=1)) or
+        hashlib.sha256(review["reviewed_text"].encode()).hexdigest() != review["reviewed_text_sha256"]):
+        return False
+    return _screen_review_text(review["reviewed_text"], review["source_sha256"])
+
+
+def _review_valid(review, source, settings, target, now, *, checkpoint=True):
+    if (not _review_scope(review, source, settings, now) or review["status"] != "approved" or
+        not review["approved_at"] or review["approved_through_job_id"] is None or
+        review["approved_text_sha256"] != review["reviewed_text_sha256"] or
+        not _time(review["created_at"]) <= _time(review["approved_at"]) <= _time(now) or
+        target["id"] <= max(source["id"], review["approved_through_job_id"]) or
+        not _time(review["approved_at"]) <= _time(target["created_at"]) <= _time(now) or
+        target["authorization_generation"] != review["authorization_generation"] or
+        any(target[key] != review[key] for key in ("account_id", "sender", "conversation_id")) or
+        not _followup_payload(target["payload"]) or target["payload"].get("question_allowed") is not True):
+        return False
+    return not checkpoint or (
+        target.get("review_id") == review["id"] and target["context_source_job_id"] == source["id"] and
+        target["document_status"] == "ok" and target["document_sha256"] == review["source_sha256"] and
+        target["document_text"] == review["reviewed_text"] and
+        target["document_checkpointed_at"] is not None and
+        _time(target["document_checkpointed_at"]) == _time(source["document_checkpointed_at"]))
+
+
+def _review_permitted(connection, job, settings, now):
+    if not job.get("review_id"):
+        return False
+    review = _review(connection, job["review_id"])
+    source = _job(connection, review["source_job_id"]) if review else None
+    return _review_valid(review, source, settings, job, now)
+
+
+def _review_settings(connection, account_id, generation, now):
+    _identifier(account_id, "expected_account")
+    if type(generation) is not int or generation < 1:
+        raise ValueError("expected_generation must be a positive integer")
+    settings = _settings(connection, account_id, now=now, lock=True)
+    if settings["authorization_generation"] != generation:
+        raise StateConflict("settings authorization changed; reload before submitting")
+    return settings
+
+
+def stage_document_review(source_job_id, creator_id, text, *, expected_account,
+                          expected_generation, verified_source_sha256, extraction_sha256=None,
+                          ttl_seconds=DOCUMENT_REVIEW_TTL_SECONDS, db_factory=None, now=None):
+    """Stage exact locally verified nonsensitive excerpts without admitting them.
+
+    The caller must locally fetch and parse the canonical original attachment,
+    verify its byte digest, and establish that text contains only ordered whole
+    lines of that extraction. This function independently checks DLP and scope.
+    No source job, existing inbound message or global hash approval is changed.
+    """
+    _identifier(creator_id, "creator_id")
+    if type(source_job_id) is not int or source_job_id <= 0:
+        raise ValueError("source_job_id must be positive")
+    verified_source_sha256 = _sha(verified_source_sha256)
+    extraction_sha256 = _sha(extraction_sha256, optional=True)
+    if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_DOCUMENT_REVIEW_TTL_SECONDS:
+        raise ValueError("review TTL must be between one second and 24 hours")
+    if not isinstance(text, str) or not _screen_review_text(text, verified_source_sha256):
+        raise ValueError("review text must be exact, bounded and pass local privacy checks")
+    now = _time(now)
+    with (db_factory or database)() as connection:
+        settings = _review_settings(connection, expected_account, expected_generation, now)
+        source = _job(connection, source_job_id, lock=True)
+        if (not _review_source_valid(source, settings, now) or source["account_id"] != expected_account or
+            source["document_sha256"] != verified_source_sha256):
+            raise StateConflict("original PDF scope, provenance or availability changed")
+        expires_at = min(now + timedelta(seconds=ttl_seconds),
+                         _time(source["created_at"]) + timedelta(days=1),
+                         _time(source["document_checkpointed_at"]) + timedelta(days=1))
+        review_id = secrets.token_hex(32)
+        connection.execute("""INSERT INTO whatsapp_agent_document_reviews
+            (id,account_id,sender,conversation_id,source_job_id,message_id,source_sha256,
+             reviewed_text,reviewed_text_sha256,extraction_sha256,authorization_generation,
+             creator_id,status,created_at,expires_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'staged',%s,%s)""",
+            (review_id, source["account_id"], source["sender"], source["conversation_id"], source["id"],
+             source["message_id"], verified_source_sha256, text, hashlib.sha256(text.encode()).hexdigest(),
+             extraction_sha256, expected_generation, creator_id, _stamp(now), _stamp(expires_at)))
+        return _review(connection, review_id)
+
+
+def get_document_review(review_id, creator_id, *, db_factory=None, now=None):
+    """Private exact review for its creator, never a diagnostics projection."""
+    _identifier(review_id, "review_id")
+    _identifier(creator_id, "creator_id")
+    with (db_factory or database)() as connection:
+        connection.execute("""UPDATE whatsapp_agent_document_reviews SET status='expired'
+            WHERE id=%s AND creator_id=%s AND status IN ('staged','approved') AND expires_at<=%s""",
+            (review_id, creator_id, _stamp(now)))
+        review = _review(connection, review_id)
+        return review if review and review["creator_id"] == creator_id else None
+
+
+def approve_document_review(review_id, creator_id, *, expected_account, expected_generation,
+                            expected_text_sha256, expected_source_sha256, db_factory=None, now=None):
+    """Approve only the exact staged content/scope shown by the manager UI.
+
+    Settings-row serialization captures an inbound high-watermark atomically:
+    even already queued messages with the same timestamp cannot use this grant.
+    """
+    _identifier(review_id, "review_id")
+    _identifier(creator_id, "creator_id")
+    expected_text_sha256, expected_source_sha256 = _sha(expected_text_sha256), _sha(expected_source_sha256)
+    now = _time(now)
+    with (db_factory or database)() as connection:
+        settings = _review_settings(connection, expected_account, expected_generation, now)
+        review = _review(connection, review_id, lock=True)
+        source = _job(connection, review["source_job_id"]) if review else None
+        if (not review or review["creator_id"] != creator_id or review["account_id"] != expected_account or
+            review["status"] != "staged" or review["reviewed_text_sha256"] != expected_text_sha256 or
+            review["source_sha256"] != expected_source_sha256 or not _review_scope(review, source, settings, now)):
+            raise StateConflict("review is no longer the exact current staged document")
+        watermark = connection.execute("SELECT COALESCE(MAX(id),0) AS n FROM whatsapp_agent_jobs").fetchone()["n"]
+        # A new exact excerpt replaces this source's earlier admissions. Old
+        # content cannot silently return when the newest review is revoked.
+        connection.execute("""UPDATE whatsapp_agent_document_reviews SET status='revoked',revoked_at=%s
+            WHERE source_job_id=%s AND account_id=%s AND sender=%s AND conversation_id=%s
+              AND authorization_generation=%s AND status='approved' AND id<>%s""",
+            (_stamp(now), review["source_job_id"], review["account_id"], review["sender"],
+             review["conversation_id"], expected_generation, review_id))
+        connection.execute("""UPDATE whatsapp_agent_document_reviews SET status='approved',
+            approved_at=%s,approved_text_sha256=%s,approved_through_job_id=%s WHERE id=%s""",
+            (_stamp(now), expected_text_sha256, watermark, review_id))
+        return _review(connection, review_id)
+
+
+def revoke_document_review(review_id, creator_id, *, expected_account, expected_generation,
+                           db_factory=None, now=None):
+    """Fence later model/send admissions; an already in-flight call cannot be undone."""
+    _identifier(review_id, "review_id")
+    _identifier(creator_id, "creator_id")
+    with (db_factory or database)() as connection:
+        _review_settings(connection, expected_account, expected_generation, now)
+        review = _review(connection, review_id, lock=True)
+        if not review or review["creator_id"] != creator_id or review["account_id"] != expected_account:
+            raise StateConflict("review is not owned by this manager and account")
+        if review["status"] in {"staged", "approved"}:
+            connection.execute("""UPDATE whatsapp_agent_document_reviews SET status='revoked',revoked_at=%s
+                WHERE id=%s""", (_stamp(now), review_id))
+        return _review(connection, review_id)
+
+
+# Explicit projection makes source, review, settings and active job one statement
+# snapshot in the immediate network guards, including under READ COMMITTED.
+_REVIEW_FIELDS = ("id", "account_id", "sender", "conversation_id", "source_job_id", "message_id",
+    "source_sha256", "reviewed_text", "reviewed_text_sha256", "authorization_generation", "creator_id",
+    "status", "created_at", "expires_at", "approved_at", "approved_text_sha256", "approved_through_job_id")
+_SOURCE_FIELDS = ("id", "account_id", "sender", "conversation_id", "message_id", "authorization_generation",
+    "status", "document_status", "document_sha256", "context_source_job_id", "review_id", "payload",
+    "diagnostics", "created_at", "document_checkpointed_at")
+_REVIEW_PROJECTION = ",".join(["r." + key + " AS r_" + key for key in _REVIEW_FIELDS] +
+                              ["src." + key + " AS src_" + key for key in _SOURCE_FIELDS])
+_REVIEW_JOINS = """ LEFT JOIN whatsapp_agent_document_reviews r ON r.id=j.review_id
+    LEFT JOIN whatsapp_agent_jobs src ON src.id=r.source_job_id """
+
+
+def _joined_review_permitted(row, now, *, checkpoint=True):
+    if not row or not row.get("r_id"):
+        return False
+    review = {key: row["r_" + key] for key in _REVIEW_FIELDS}
+    source = _row({key: row["src_" + key] for key in _SOURCE_FIELDS}) if row.get("src_id") else None
+    settings = {**row, "authorization_generation": row["current_generation"]}
+    return _review_valid(review, source, settings, row, now, checkpoint=checkpoint)
+
+
+def find_review_context(*, account_id, sender, conversation_id, before_job_id,
+                        message_id=None, db_factory=None, now=None):
+    """Return an approved excerpt only for a future active inbound in exact scope."""
+    for name, value in (("account_id", account_id), ("sender", sender), ("conversation_id", conversation_id)):
+        _identifier(value, name)
+    if type(before_job_id) is not int or before_job_id <= 0:
+        raise ValueError("before_job_id must identify the current processing job")
+    scope, args = "", [before_job_id, account_id, sender, conversation_id, _stamp(now), _stamp(now)]
+    if message_id is not None:
+        _identifier(message_id, "message_id")
+        scope = " AND r.message_id=%s"
+        args.append(message_id)
+    with (db_factory or database)() as connection:
+        rows = connection.execute("""SELECT j.*,s.mode,s.pilot_sender,s.approved_sha256,
+            s.authorization_generation AS current_generation,""" + _REVIEW_PROJECTION + """
+            FROM whatsapp_agent_jobs j JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
+            JOIN whatsapp_agent_document_reviews r ON r.account_id=j.account_id
+              AND r.sender=j.sender AND r.conversation_id=j.conversation_id
+            JOIN whatsapp_agent_jobs src ON src.id=r.source_job_id
+            WHERE j.id=%s AND j.account_id=%s AND j.sender=%s AND j.conversation_id=%s
+              AND j.status='processing' AND j.lease_until>%s
+              AND r.status='approved' AND r.expires_at>%s""" + scope +
+            " ORDER BY r.source_job_id DESC,r.approved_at DESC,r.id DESC", tuple(args)).fetchall()
+    for raw in rows:
+        row = _row(raw)
+        if _joined_review_permitted(row, now, checkpoint=False):
+            return {"id": row["r_source_job_id"], "source_job_id": row["r_source_job_id"],
+                    "message_id": row["r_message_id"], "document_text": row["r_reviewed_text"],
+                    "document_sha256": row["r_source_sha256"], "document_status": "ok",
+                    "document_checkpointed_at": row["src_document_checkpointed_at"],
+                    "review_id": row["r_id"], "reviewed_text_sha256": row["r_reviewed_text_sha256"],
+                    "approved_hashes": [row["r_source_sha256"]]}
+    return None
 
 
 def enqueue(connection, *, account_id, message_id, event_id, sender,
@@ -442,17 +715,33 @@ def claim_job(*, account_id=None, db_factory=None, now=None):
 
 
 def checkpoint_document(job_id, lease_token, *, text, sha256, status, diagnostics=None,
-                        context_source_job_id=None, db_factory=None, now=None):
+                        context_source_job_id=None, review_id=None, db_factory=None, now=None):
     if not isinstance(text, str) or len(text) > 100000:
         raise ValueError("safe document text must be a bounded string")
     _identifier(status, "document status")
     sha256 = _sha(sha256, optional=not bool(text))
     with (db_factory or database)() as connection:
+        settings = None
+        if review_id is not None:
+            _identifier(review_id, "review_id")
+            initial = _job(connection, job_id)
+            if not initial:
+                raise StateConflict("job does not exist")
+            settings = _settings(connection, initial["account_id"], now=now, lock=True)
         job = _leased(connection, job_id, lease_token, now)
         if job["model_started_at"]:
             raise StateConflict("document checkpoint is immutable after model reservation")
         checkpointed_at = _stamp(now)
-        if context_source_job_id is not None:
+        if review_id is not None:
+            review = _review(connection, review_id)
+            source = _job(connection, context_source_job_id) if context_source_job_id is not None else None
+            candidate = {**job, "review_id": review_id, "context_source_job_id": context_source_job_id,
+                         "document_text": text, "document_sha256": sha256, "document_status": status,
+                         "document_checkpointed_at": source["document_checkpointed_at"] if source else None}
+            if not _review_valid(review, source, settings, candidate, now):
+                raise StateConflict("review no longer authorizes this exact future document context")
+            checkpointed_at = source["document_checkpointed_at"]
+        elif context_source_job_id is not None:
             source = _job(connection, context_source_job_id)
             if (not source or source["id"] >= job["id"] or source["status"] != "sent" or
                 any(source[key] != job[key] for key in ("account_id", "sender", "conversation_id")) or
@@ -464,9 +753,9 @@ def checkpoint_document(job_id, lease_token, *, text, sha256, status, diagnostic
                 raise StateConflict("context source has expired")
             checkpointed_at = source["document_checkpointed_at"]
         connection.execute("""UPDATE whatsapp_agent_jobs SET document_text=%s,document_sha256=%s,
-            document_status=%s,document_checkpointed_at=%s,context_source_job_id=%s,
+            document_status=%s,document_checkpointed_at=%s,context_source_job_id=%s,review_id=%s,
             diagnostics=%s,updated_at=%s WHERE id=%s""", (text, sha256, status, checkpointed_at,
-            context_source_job_id, _diagnostics(job["diagnostics"], diagnostics), _stamp(now), job_id))
+            context_source_job_id, review_id, _diagnostics(job["diagnostics"], diagnostics), _stamp(now), job_id))
         return _job(connection, job_id)
 
 
@@ -499,7 +788,8 @@ def reserve_model(job_id, lease_token, *, db_factory=None, now=None):
         if job["context_source_job_id"] is not None and _time(job["document_checkpointed_at"]) <= cutoff:
             _terminal(connection, job, "blocked", now, {"reason": "document_context_expired"})
             return False
-        if not _model_input_permitted(job, settings):
+        if not _model_input_permitted(job, settings,
+                review_authorized=_review_permitted(connection, job, settings, now)):
             has_document = bool(job["document_sha256"] or job["document_text"]) or job["context_source_job_id"] is not None
             reason = (("pilot_provenance_not_approved" if settings["mode"] == "owner_pilot" else "document_provenance_not_approved")
                       if has_document else "ordinary_text_not_eligible")
@@ -627,7 +917,8 @@ def claim_send(*, account_id=None, db_factory=None, now=None):
         if not _budget_notice_current(job, now, mode=settings['mode']):
             _terminal(connection, job, 'blocked', now, {'reason': 'budget_notice_window_expired'})
             return None
-        if job["model_started_at"] and not _model_input_permitted(job, settings):
+        if (job["model_started_at"] or job.get("review_id")) and not _model_input_permitted(job, settings,
+                review_authorized=_review_permitted(connection, job, settings, now)):
             has_document = bool(job["document_sha256"] or job["document_text"]) or job["context_source_job_id"] is not None
             reason = (("pilot_provenance_not_approved" if settings["mode"] == "owner_pilot" else "document_provenance_not_approved")
                       if has_document else "ordinary_text_not_eligible")
@@ -871,7 +1162,7 @@ def get_outbox(job_id, *, db_factory=None):
                                        (job_id,)).fetchone())
 
 
-def _model_input_permitted(job, settings):
+def _model_input_permitted(job, settings, *, review_authorized=False):
     """Distinguish approved document evidence from screened no-document text.
 
     The source-absent exception cannot reinterpret any attached document or
@@ -880,6 +1171,8 @@ def _model_input_permitted(job, settings):
     PDF/followup evidence required for routine activation.
     """
     has_document = bool(job["document_text"] or job["document_sha256"]) or job["context_source_job_id"] is not None
+    if job.get("review_id"):
+        return bool(review_authorized)
     if has_document:
         return (job["document_status"] == "ok" and bool(job["document_text"]) and
                 job["document_sha256"] in settings["approved_sha256"])
@@ -890,11 +1183,11 @@ def _model_input_permitted(job, settings):
             isinstance(question, str) and bool(question.strip()))
 
 
-def _guard_permitted(row, *, model):
+def _guard_permitted(row, *, model, review_authorized=False):
     if not row or not _enabled(row, row):
         return False
-    if model or row["model_started_at"]:
-        return _model_input_permitted(row, row)
+    if model or row["model_started_at"] or row.get("review_id"):
+        return _model_input_permitted(row, row, review_authorized=review_authorized)
     # Local safe failure replies are permitted without a model reservation;
     # rejected attachment hashes alone do not become document content.
     return not row["document_text"] or (
@@ -911,11 +1204,10 @@ def model_authorized(job_id, lease_token, *, db_factory=None, now=None):
     if not lease_token:
         return False
     with (db_factory or database)() as connection:
-        row = _row(connection.execute("""SELECT j.sender,j.document_text,
-            j.document_sha256,j.document_status,j.model_started_at,j.context_source_job_id,j.payload,
-            s.mode,s.pilot_sender,s.approved_sha256
+        row = _row(connection.execute("""SELECT j.*,s.mode,s.pilot_sender,s.approved_sha256,
+            s.authorization_generation AS current_generation,""" + _REVIEW_PROJECTION + """
             FROM whatsapp_agent_jobs j
-            JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
+            JOIN whatsapp_agent_settings s ON s.account_id=j.account_id""" + _REVIEW_JOINS + """
             WHERE j.id=%s AND j.status='processing' AND j.lease_token=%s
               AND j.authorization_generation=s.authorization_generation
               AND j.lease_until>%s AND j.model_started_at IS NOT NULL
@@ -924,7 +1216,8 @@ def model_authorized(job_id, lease_token, *, db_factory=None, now=None):
               AND j.model_completed_at IS NULL""",
             (job_id, lease_token, _stamp(now), _stamp(_time(now)-timedelta(days=1)),
              _stamp(_time(now)-timedelta(days=1)))).fetchone())
-        return bool(_guard_permitted(row, model=True))
+        return bool(_guard_permitted(row, model=True,
+            review_authorized=_joined_review_permitted(row, now)))
 
 
 def send_authorized(job_id, send_token, *, db_factory=None, now=None):
@@ -937,12 +1230,11 @@ def send_authorized(job_id, send_token, *, db_factory=None, now=None):
     if not send_token:
         return False
     with (db_factory or database)() as connection:
-        row = _row(connection.execute("""SELECT j.sender,j.document_text,j.diagnostics,
-            j.document_sha256,j.document_status,j.model_started_at,j.context_source_job_id,j.payload,
-            s.mode,s.pilot_sender,s.approved_sha256
+        row = _row(connection.execute("""SELECT j.*,s.mode,s.pilot_sender,s.approved_sha256,
+            s.authorization_generation AS current_generation,""" + _REVIEW_PROJECTION + """
             FROM whatsapp_agent_jobs j
             JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
-            JOIN whatsapp_agent_outbox o ON o.job_id=j.id
+            JOIN whatsapp_agent_outbox o ON o.job_id=j.id""" + _REVIEW_JOINS + """
             WHERE j.id=%s AND j.status='sending' AND o.status='sending'
               AND j.authorization_generation=s.authorization_generation
               AND o.send_token=%s AND j.lease_until>%s AND o.lease_until>%s
@@ -950,7 +1242,8 @@ def send_authorized(job_id, send_token, *, db_factory=None, now=None):
             (job_id, send_token, _stamp(now), _stamp(now),
              _stamp(_time(now)-timedelta(days=1)))).fetchone())
         return bool(row and _budget_notice_current(row, now, mode=row['mode'])
-                    and _guard_permitted(row, model=False))
+                    and _guard_permitted(row, model=False,
+                        review_authorized=_joined_review_permitted(row, now)))
 
 
 def claim_legacy(connection, *, account_id, message_id, event_id, sender,

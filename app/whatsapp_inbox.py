@@ -838,8 +838,21 @@ async def document_preview(token: str, request: Request):
         body += '<form method="post" action="/whatsapp-inbox/documents/' + escape(token) + '/cancel"><input type="hidden" name="csrf" value="' + escape(actor['csrf']) + '"><button>إلغاء وحذف النسخة المؤقتة</button></form>'
     else:
         body += '<p>accepted تعني قبول المزود فقط. sending أو uncertain أو partial تحتاج مراجعة قبل أي إرسال جديد؛ لا توجد إعادة تلقائية.</p>'
-        if item['state'] == 'public_link_warning' or item.get('provider_status') == 'public_link_warning':
+        if item.get('receipt_reason'):
+            body += '<p>نتيجة التحقق من إيصال المزود: ' + escape(item['receipt_reason']) + '</p>'
+        if item.get('public_attachment_url_present') or item['state'] == 'public_link_warning' or item.get('provider_status') == 'public_link_warning':
             body += '<p>أعاد المزود رابطًا للمرفق؛ قد يكون الإرسال قد تم. أوقف أي إرسال آخر لهذا الملف وراجع خصوصية المرفق مع المزود.</p>'
+    if item['state'] in ('accepted','partial','uncertain','public_link_warning') and item.get('provider_ids'):
+        body += '<h3>فحص خصوصية المرفق المرسل</h3><p>يفحص الإيصال المحدد فقط، دون إعادة إرسال الملف.</p>'
+        body += '<p><a href="/mfa/step-up?' + escape(urlencode({'next':'/whatsapp-inbox/documents/' + token})) + '">التحقق الإضافي قبل فحص الخصوصية</a></p>'
+        body += '<form method="post" action="/whatsapp-inbox/documents/' + escape(token) + '/privacy-diagnostic">'
+        for key, value in {'csrf':actor['csrf'],'sha256':item['sha256'],'account':item['account_id'],
+                           'conversation':item['conversation_id'],'recipient':item['recipient']}.items():
+            body += '<input type="hidden" name="' + key + '" value="' + escape(str(value)) + '">'
+        body += '<label>الإيصال<select name="receipt">'
+        for receipt in item['provider_ids']:
+            body += '<option value="' + escape(receipt) + '">' + escape(receipt) + '</option>'
+        body += '</select></label><label><input type="checkbox" name="probe" value="yes">اختبار وصول مجهول محدود إذا كان الرابط تابعًا لمسار المزود الموثق</label><label><input type="checkbox" name="fictional" value="yes">هذا ملف تجريبي وهمي غير حساس، وأوافق على اختبار وصوله دون تسجيل دخول</label><button>فحص بيانات الخصوصية</button></form>'
     return page(body)
 
 
@@ -890,6 +903,7 @@ async def document_send(token: str, request: Request):
     except documents.StoreError as error:
         raise HTTPException(error.status_code, error.reason) from None
     state, ids = 'uncertain', []
+    public_url_present, receipt_reason = False, None
     try:
         def authority():
             document_actor(request, actor, item['account_id'], sending=True)
@@ -901,16 +915,21 @@ async def document_send(token: str, request: Request):
                 idempotency_key=item['idempotency_key'])
         ids = result['provider_ids']
         state = result['status']
+        public_url_present = result.get('public_attachment_url_present') is True
     except z.WhatsAppDocumentSendUncertain as error:
         ids = error.provider_ids
-        state = ('public_link_warning' if error.public_attachment_url_present else
-                 {'partial_failure': 'partial', 'public_link_warning': 'public_link_warning'}.get(error.reason, 'uncertain'))
+        state = 'uncertain'
+        public_url_present = error.public_attachment_url_present
+        receipt_reason = error.reason if error.reason in {
+            'partial_failure','public_link_warning','invalid_receipt','receipt_mismatch','contradictory_response','conversation_mismatch',
+            'provider_error','redirect','network_error','malformed_response'} else 'uncertain'
     except (z.WhatsAppBlocked, HTTPException):
         state = 'blocked'
     except Exception:
         state = 'uncertain'
     try:
-        documents.finish(token, item['send_token'], status=state, provider_ids=ids, db_factory=database)
+        documents.finish(token, item['send_token'], status=state, provider_ids=ids,
+            public_attachment_url_present=public_url_present,receipt_reason=receipt_reason,db_factory=database)
     except documents.StoreError as error:
         # The durable claim remains frozen even if expiry won the race.
         raise HTTPException(error.status_code, error.reason) from None

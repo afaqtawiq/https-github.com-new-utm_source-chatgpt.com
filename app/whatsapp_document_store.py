@@ -132,6 +132,10 @@ def _public(row, *, content=None, include_content=False, send_token=False):
     receipt=reason.removeprefix('late_receipt_') if reason.startswith('late_receipt_') else reason
     result['provider_status']=receipt if receipt in TERMINAL_SEND_STATES else (
         'public_link_warning' if reason=='integrity_failed_public_link_warning' else None)
+    # Old terminal rows predate the separate audit flag. Their recorded warning
+    # remains privacy evidence after migration, independent of receipt quality.
+    result['public_attachment_url_present']=bool(result.get('public_attachment_url_present')) or (
+        result.get('state')=='public_link_warning' or result['provider_status']=='public_link_warning')
     for key in ('created_at','expires_at','updated_at','confirmed_at','sending_at','completed_at'):
         if result.get(key) is not None:
             result[key]=_stamp(result[key])
@@ -170,6 +174,14 @@ def init_storage(*,db_factory=None):
     with (db_factory or database)() as connection:
         for statement in DDL:
             connection.execute(statement)
+        for name, definition in (('public_attachment_url_present', 'INTEGER NOT NULL DEFAULT 0'),
+                                 ('receipt_reason', 'TEXT')):
+            if getattr(connection, 'dialect', None) == 'sqlite':
+                columns = {row['name'] for row in connection.execute('PRAGMA table_info(whatsapp_document_drafts)').fetchall()}
+                if name not in columns:
+                    connection.execute('ALTER TABLE whatsapp_document_drafts ADD COLUMN ' + name + ' ' + definition)
+            else:
+                connection.execute('ALTER TABLE whatsapp_document_drafts ADD COLUMN IF NOT EXISTS ' + name + ' ' + definition)
 
 
 def _creator_lock(connection,creator,now,*,create=False):
@@ -303,7 +315,7 @@ def create(*,creator_id,account_id,conversation_id,recipient,filename,content,ca
         return _public(_row(connection,token))
 
 
-def get(token,creator_id,*,include_content=False,db_factory=None,now=None):
+def get(token,creator_id,*,include_content=False,require_valid_binding=False,db_factory=None,now=None):
     creator=_creator(creator_id)
     if not isinstance(token,str) or not _TOKEN.fullmatch(token):
         return None
@@ -312,6 +324,8 @@ def get(token,creator_id,*,include_content=False,db_factory=None,now=None):
         row=_row(connection,token,creator=creator,lock=True)
         if not row:
             return None
+        if require_valid_binding and not _valid_binding(row):
+            raise StoreError(409, 'integrity_failed')
         row=_expire(connection,row,current)
         content=None
         if row['state'] in ('draft','sending'):
@@ -383,10 +397,18 @@ def _provider_ids(values):
     return safe
 
 
-def finish(token,send_token,*,status,provider_ids=(),db_factory=None,now=None):
+def finish(token,send_token,*,status,provider_ids=(),public_attachment_url_present=False,
+           receipt_reason=None,db_factory=None,now=None):
     if status not in TERMINAL_SEND_STATES:
         raise StoreError(400,'invalid_terminal_state')
     ids=_provider_ids(provider_ids)
+    if type(public_attachment_url_present) is not bool:
+        raise StoreError(400, 'invalid_privacy_flag')
+    if receipt_reason is not None and (not isinstance(receipt_reason, str) or receipt_reason not in {
+            'partial_failure', 'public_link_warning', 'invalid_receipt','receipt_mismatch','contradictory_response',
+            'conversation_mismatch', 'provider_error', 'redirect', 'network_error',
+            'malformed_response', 'uncertain'}):
+        raise StoreError(400, 'invalid_receipt_reason')
     current=_now(now)
     error=None;result=None
     with (db_factory or database)() as connection:
@@ -411,6 +433,12 @@ def finish(token,send_token,*,status,provider_ids=(),db_factory=None,now=None):
             result=_public(_terminal(connection,row,'uncertain','integrity_failed_public_link_warning' if status=='public_link_warning' else 'integrity_failed',current,provider_ids=ids))
         else:
             result=_public(_terminal(connection,row,status,status,current,provider_ids=ids))
+        if result is not None:
+            connection.execute('''UPDATE whatsapp_document_drafts
+                SET public_attachment_url_present=CASE WHEN public_attachment_url_present=1 OR %s=1 THEN 1 ELSE 0 END,
+                    receipt_reason=COALESCE(receipt_reason,%s) WHERE token=%s''',
+                (int(public_attachment_url_present or status=='public_link_warning'),receipt_reason,token))
+            result=_public(_row(connection,token))
     if error:raise error
     return result
 

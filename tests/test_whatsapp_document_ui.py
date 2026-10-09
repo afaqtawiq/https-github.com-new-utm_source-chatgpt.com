@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from reportlab.pdfgen.canvas import Canvas
 from app import whatsapp_inbox as inbox
 from app import zernio_whatsapp as z
+from app import whatsapp_outgoing_diagnostic as outgoing_diagnostic
 from test_zernio_whatsapp import provider
 
 REAL_DOCUMENT_SEND = z.send_document
@@ -51,7 +52,7 @@ def ui(monkeypatch, provider):
         calls.append((recipient, content, filename, caption, kwargs))
         return {'status':'accepted','provider_ids':['synthetic-id']}
     monkeypatch.setattr(z, 'send_document', send)
-    app=FastAPI(); app.include_router(inbox.router)
+    app=FastAPI(); app.include_router(inbox.router); app.include_router(outgoing_diagnostic.router)
     with TestClient(app) as client: yield client,actor,provider,conn,calls
     conn.close()
 
@@ -265,3 +266,130 @@ def test_interrupted_upload_recovers_owned_draft_without_changing_review(ui):
     preview=client.get(second.headers['location'])
     assert 'Original description' in preview.text and 'Replacement must not overwrite' not in preview.text
     assert not calls
+
+
+@pytest.mark.parametrize('reason',['invalid_receipt','receipt_mismatch','contradictory_response','uncertain'])
+def test_public_url_uncertainty_preserves_reason_and_privacy_independently(ui,monkeypatch,reason):
+    client,actor,provider,conn,calls=ui
+    content=pdf();path=upload(client,content).headers['location'];row=binding(conn)
+    async def uncertain(*args,**kwargs):
+        calls.append(1)
+        raise z.WhatsAppDocumentSendUncertain(200,reason,provider_ids=['synthetic-receipt'],
+                                            public_attachment_url_present=True)
+    monkeypatch.setattr(z,'send_document',uncertain)
+    response=client.post(path+'/send',data=confirmation(row),follow_redirects=False)
+    assert response.status_code==303,response.text
+    result=binding(conn)
+    assert result['state']=='uncertain' and result['receipt_reason']==reason
+    assert result['public_attachment_url_present'] and result['content_b64'] is None
+    assert client.post(path+'/send',data=confirmation(row)).status_code==409
+    assert upload(client,content).status_code==409 and len(calls)==1
+
+
+@pytest.mark.parametrize('status',['partial','public_link_warning'])
+def test_valid_partial_or_warning_retains_separate_privacy_evidence(ui,monkeypatch,status):
+    client,actor,provider,conn,calls=ui
+    path=upload(client).headers['location'];row=binding(conn)
+    async def sent(*args,**kwargs):
+        calls.append(1)
+        return {'status':status,'provider_ids':['synthetic-receipt'],'public_attachment_url_present':True}
+    monkeypatch.setattr(z,'send_document',sent)
+    assert client.post(path+'/send',data=confirmation(row),follow_redirects=False).status_code==303
+    result=binding(conn)
+    assert result['state']==status and result['public_attachment_url_present']
+    assert result['receipt_reason'] is None and result['content_b64'] is None
+    assert client.post(path+'/send',data=confirmation(row)).status_code==409 and len(calls)==1
+
+
+@pytest.mark.parametrize('change,status,reason',[
+    ({'partialFailure':{}},'partial',None),
+    ({'conversationId':'different'},'uncertain','receipt_mismatch'),
+    ({'messageId':None},'uncertain','invalid_receipt'),
+    ({'messageIds':['different']},'uncertain','invalid_receipt'),
+    ({'conversationId':'different','partialFailure':{}},'uncertain','receipt_mismatch'),
+])
+def test_real_transport_public_url_receipt_quality_survives_durable_ui(ui,monkeypatch,change,status,reason):
+    import httpx
+    from datetime import datetime,timezone
+    client,actor,provider,conn,calls=ui
+    content=pdf();path=upload(client,content).headers['location'];row=binding(conn);posts=[]
+    receipt={'messageId':'synthetic-receipt','conversationId':'c1',
+             'attachments':[{'url':'https://private.invalid?token=secret'}],**change}
+    def handler(request):
+        if request.method=='POST':
+            posts.append(request)
+            assert binding(conn)['state']=='sending'
+            return httpx.Response(200,json={'success':True,'data':receipt})
+        if request.url.path.endswith('/accounts'):
+            return httpx.Response(200,json={'accounts':[{'_id':'account-test','platform':'whatsapp','isActive':True}]})
+        if request.url.path.endswith('/messages'):
+            return httpx.Response(200,json={'messages':[{'direction':'incoming','senderId':'966500000001',
+                'accountId':'account-test','conversationId':'c1','createdAt':datetime.now(timezone.utc).isoformat()}]})
+        return httpx.Response(200,json={'data':provider['conversations'],'pagination':{'hasMore':False}})
+    monkeypatch.setattr(z,'client',lambda:httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(z,'send_document',REAL_DOCUMENT_SEND)
+    response=client.post(path+'/send',data=confirmation(row),follow_redirects=False)
+    assert response.status_code==303,response.text
+    result=binding(conn)
+    assert result['state']==status and result['receipt_reason']==reason
+    assert result['public_attachment_url_present'] and result['content_b64'] is None
+    assert len(posts)==1 and content in posts[0].content
+    assert client.post(path+'/send',data=confirmation(row)).status_code==409
+    assert len(posts)==1
+    preview=client.get(path)
+    assert 'private.invalid' not in preview.text and 'secret' not in preview.text
+    assert 'private.invalid' not in str(result) and 'secret' not in str(result)
+
+
+def diagnostic_form(html):
+    from html.parser import HTMLParser
+    class Forms(HTMLParser):
+        def __init__(self):
+            super().__init__();self.forms=[];self.current=None
+        def handle_starttag(self,tag,attrs):
+            attrs=dict(attrs)
+            if tag=='form':self.current={'attrs':attrs,'inputs':[],'receipts':[]}
+            elif self.current is not None and tag=='input':self.current['inputs'].append(attrs)
+            elif self.current is not None and tag=='option':self.current['receipts'].append(attrs.get('value'))
+        def handle_endtag(self,tag):
+            if tag=='form' and self.current is not None:
+                self.forms.append(self.current);self.current=None
+    parser=Forms();parser.feed(html)
+    return [form for form in parser.forms if form['attrs'].get('action','').endswith('/privacy-diagnostic')]
+
+
+def test_terminal_diagnostic_ui_submits_bound_receipt_and_defaults_to_metadata_only(ui):
+    client,actor,provider,conn,calls=ui
+    path=upload(client).headers['location'];row=binding(conn)
+    assert not diagnostic_form(client.get(path).text)
+    assert client.post(path+'/send',data=confirmation(row),follow_redirects=False).status_code==303
+    forms=diagnostic_form(client.get(path).text)
+    assert len(forms)==1 and forms[0]['attrs']['method']=='post'
+    form=forms[0];assert form['receipts']==['synthetic-id']
+    fields={entry['name']:entry['value'] for entry in form['inputs'] if entry.get('type')=='hidden'}
+    assert fields=={'csrf':'csrf','sha256':row['sha256'],'account':row['account_id'],
+                    'conversation':row['conversation_id'],'recipient':row['recipient']}
+    checks=[entry for entry in form['inputs'] if entry.get('type')=='checkbox']
+    assert {entry['name'] for entry in checks}=={'probe','fictional'}
+    assert all('checked' not in entry for entry in checks)
+    provider['messages']=[{'id':'synthetic-id','accountId':row['account_id'],
+        'conversationId':row['conversation_id'],'direction':'outgoing',
+        'attachments':[{'type':'file','mimeType':'application/pdf',
+                        'url':'https://zernio.com/api/v1/whatsapp/media/synthetic-media?accountId=account-test'}]}]
+    response=client.post(form['attrs']['action'],data={**fields,'receipt':'synthetic-id'})
+    assert response.status_code==200,response.text
+    assert response.json()['anonymous_result']=='not_requested'
+    assert len(calls)==1 and binding(conn)['state']=='accepted'
+    assert not any('/whatsapp/media/' in url for url in provider['gets'])
+
+
+def test_terminal_diagnostic_form_requires_fresh_mfa_at_submission(ui):
+    client,actor,provider,conn,calls=ui
+    path=upload(client).headers['location'];row=binding(conn)
+    assert client.post(path+'/send',data=confirmation(row),follow_redirects=False).status_code==303
+    actor['mfa']=False
+    form=diagnostic_form(client.get(path).text)[0]
+    fields={entry['name']:entry['value'] for entry in form['inputs'] if entry.get('type')=='hidden'}
+    before=len(provider['gets'])
+    assert client.post(form['attrs']['action'],data={**fields,'receipt':'synthetic-id'}).status_code==428
+    assert len(provider['gets'])==before and len(calls)==1

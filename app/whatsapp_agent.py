@@ -200,6 +200,8 @@ async def processing(job):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
     text, digest, source_id = '', None, None
+    review_id = None
+    model_hashes = settings['approved_sha256']
     conversation_history = ()
     conversation_scope = None
     if data.get('question_allowed') and data.get('question_kind') in ('operations','conversation','document_question'):
@@ -211,6 +213,13 @@ async def processing(job):
     if job.get('document_checkpointed_at'):
         text, digest, source_id = job.get('document_text') or '', job.get('document_sha256'), job.get('context_source_job_id')
         document_status = job.get('document_status')
+        if job.get('review_id'):
+            reviewed = await run_in_threadpool(store.find_review_context,
+                account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],
+                before_job_id=jid)
+            if not reviewed or reviewed['review_id'] != job['review_id']:
+                raise store.StateConflict('Reviewed document authorization changed')
+            review_id, model_hashes = reviewed['review_id'], reviewed['approved_hashes']
     elif data.get('attachments'):
         try:
             content = await fetch_document(job)
@@ -242,6 +251,7 @@ async def processing(job):
                 diagnostics.update(document_failure_stage=error.stage,document_failure_reason=error.reason)
             if isinstance(error,z.WhatsAppPreflightBlocked):
                 diagnostics['provider_status'] = error.diagnostic.get('http_status')
+        diagnostics['document_reason'] = diagnostics['reason']
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,diagnostics=diagnostics)
     else:
         context = None
@@ -260,6 +270,11 @@ async def processing(job):
             context = (await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
                                              conversation_id=job['conversation_id'],before_job_id=jid,**lookup)
                        if not quote_unavailable else None)
+            reviewed = (await run_in_threadpool(store.find_review_context,
+                account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],
+                before_job_id=jid,**lookup) if not quote_unavailable else None)
+            if reviewed and (not context or reviewed['id'] >= context['id']):
+                context = reviewed
             if latest and (not context or latest['id'] > context['id']):
                 context = None
                 if latest['document_status'] == 'ok':
@@ -285,6 +300,9 @@ async def processing(job):
                 unread = None
         if context:
             text, digest, source_id = context['document_text'],context['document_sha256'],context['id']
+            review_id = context.get('review_id')
+            if review_id:
+                model_hashes = context['approved_hashes']
         if unread and (not context or unread['id'] > context['id']):
             # Keep only the failed-read outcome, never failed document content.
             text,digest,source_id = '',None,None
@@ -293,7 +311,7 @@ async def processing(job):
             document_status = 'reference_unavailable'
         else:
             document_status = 'ok' if text else 'none'
-        await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,
+        await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,review_id=review_id,
             diagnostics={'document_context_reason':'prior_unread_attachment','unread_source_job_id':unread['id']} if unread and document_status in ('unavailable','quarantined') else {})
     if not data.get('question_allowed'):
         if data.get('question_kind') == 'clarify_driver':
@@ -333,7 +351,7 @@ async def processing(job):
                 if not allowed or z.account_id() != job['account_id']:
                     raise store.StateConflict('Model scope changed before request')
             result = await privacy.understand(data['question'],text,history=(),document_sha256=digest,
-                                             approved_hashes=settings['approved_sha256'],before_request=model_guard,
+                                             approved_hashes=model_hashes,before_request=model_guard,reviewed_excerpt=bool(review_id),
                                              conversation_history=conversation_history,conversation_scope=conversation_scope)
             await run_in_threadpool(store.save_model,jid,lease,reply_text=result.text,
                                     diagnostics={'model_success':bool(result.ok and result.used_model),
@@ -497,7 +515,7 @@ async def job_page(job_id: int, request: Request):
     settings = await run_in_threadpool(store.get_settings,account)
     read_scope(request,current,account)
     public = {k:job.get(k) for k in ('id','account_id','status','sender','conversation_id','message_id','event_id','read_attempts',
-        'authorization_generation','document_sha256','document_status','context_source_job_id','model_started_at','model_completed_at','created_at','diagnostics')}
+        'authorization_generation','document_sha256','document_status','context_source_job_id','review_id','model_started_at','model_completed_at','created_at','diagnostics')}
     public['quoted_reference_present'] = job['payload'].get('quoted_reference_present') is True
     public['quoted_stored_id_available'] = bool(job['payload'].get('quoted_platform_message_id'))
     public['attachment_count'] = job['payload'].get('attachment_count')
@@ -511,6 +529,11 @@ async def job_page(job_id: int, request: Request):
         body += '<h3>النص الذي قُرئ فعليًا</h3><pre>' + escape(job['document_text']) + '</pre>'
     if job['payload'].get('attachments'):
         body += '<a href="/whatsapp-assistant/jobs/' + str(job_id) + '/document">تنزيل المستند الأصلي للمراجعة المحلية</a>'
+    if (settings['mode']=='routine' and job.get('document_sha256')
+            and job['authorization_generation']==settings['authorization_generation']
+            and job['payload'].get('attachments') and job['document_status'] in ('ok','quarantined')
+            and store._review_source_valid(job, settings, None)):
+        body += '<p><a href="/whatsapp-assistant/jobs/' + str(job_id) + '/review">مراجعة مقتطف محدد للمشاركة مع نموذج الفهم</a></p>'
     if (settings['mode']=='owner_pilot' and job['sender']==settings['pilot_sender']
             and job['authorization_generation']==settings['authorization_generation']
             and job['document_status']=='unavailable' and store._pdf_payload(job['payload'])):
