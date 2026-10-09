@@ -1217,6 +1217,10 @@ def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
         if re.search(r'تخليص|جمرك', value):
             return CUSTOMS_PRICE_REVIEW_REPLY
         if re.search(r'نقل|شحن|حموله|بكام|بكم', value):
+            route = _safe_route_excerpt(question)
+            if route:
+                return ('فهمت أن المسار ' + route + '. ما عندي سعر نقل معتمد أقدمه لك. '
+                        'ما نوع الحمولة ووزنها أو حجمها، ومتى موعد التحميل؟')
             return TRANSPORT_PRICE_REVIEW_REPLY
         return 'ما عندي سعر معتمد لهذه الخدمة. ما تفاصيل الخدمة المطلوبة؟'
     if re.search(r'فريق\s*(?:عمل|العمل|كم)|فريقكم|اعضاء\s*الفريق|اسماء\s*(?:الفريق|الموظفين)', value):
@@ -1237,9 +1241,20 @@ def _safe_detail_excerpt(text: str) -> bool:
 def _safe_route_excerpt(text: str) -> str:
     if not screen_question(text).allowed:
         return ''
-    match = re.search(r'\bمن\s+([\u0621-\u064a ]{2,40}?)\s+(?:إلى|الي|الى)\s+'
-                      r'([\u0621-\u064a ]{2,40}?)(?=\s+(?:كم|بكم|وش|ما|السعر|سعر|التكلفة|التكلفه)\b|[؟?.،]|$)', text)
-    if not match or any(len(part.split()) > 3 for part in match.groups()):
+    # Normalize only the direction word; preserve the user's city spelling.
+    # Question/condition tails are not part of a destination. Multiple routes
+    # are ambiguous, so never silently choose one for a fallback.
+    normalized = re.sub(r'(?<!\w)(?:إلى|إلي|الى|الي)(?!\w)', 'إلى', text)
+    if (len(re.findall(r'(?<!\w)[وف]?من\s+', normalized)) != 1
+            or re.search(r'(?<!\w)(?:او|أو|ثم)(?!\w)', normalized)):
+        return ''
+    matches = list(re.finditer(r'\bمن\s+([\u0621-\u064a ]{2,40}?)\s+إلى\s+'
+                      r'([\u0621-\u064a ]{2,40}?)(?=\s+(?:كم|بكم|وش|ما|إيش|ايش|أيش|ايه|عشان|السعر|سعر|التكلفة|التكلفه)\b|[؟?.،]|$)', normalized))
+    if len(matches) != 1:
+        return ''
+    match = matches[0]
+    if any(len(part.split()) > 3 or re.search(r'(?<!\w)(?:او|أو|ثم|الي|الى)(?!\w)', _fold(part))
+           for part in match.groups()):
         return ''
     return 'من ' + match[1].strip() + ' إلى ' + match[2].strip()
 
