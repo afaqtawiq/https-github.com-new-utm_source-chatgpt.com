@@ -837,6 +837,62 @@ Never invent document access, source facts, operational status or private data.
 No links, credentials, bank/card details, private health/minor/asset information,
 JSON, code or markup in your reply. Output only the natural, short Arabic reply.'''
 
+# Public guidance reviewed 2026-10-10. Kept separate from the pinned company
+# excerpt and from PDF provenance; never treat it as the user's shipment record.
+_CUSTOMS_GUIDANCE_SYSTEM = '''
+VERIFIED GENERAL SAUDI CUSTOMS GUIDANCE (reviewed 2026-10-10):
+ZATCA Import Instructions, updated 2026-08-31:
+https://zatca.gov.sa/ar/RulesRegulations/Taxes/Pages/customs-bussiness/import-pages/Import-Instructions.aspx
+For imports into Saudi Arabia the core documents are the commercial invoice and
+bill of lading. A certificate of origin is not mandatory when a fixed origin
+marking meeting the applicable requirements exists; do not omit that condition.
+Additional registrations, certificates and permits depend on the goods, their
+verified HS classification and the responsible authority. Never guess an HS
+code, tariff, tax, exemption, clearance deadline or permission for a product.
+Required documents and the customs declaration should be prepared through
+Fasah/the authorized broker before arrival; this is advance preparation guidance,
+not a claim that this assistant filed anything or a promised clearance time.
+SASO guidance on shipment certificates (updated 2026-05-04):
+https://www.saso.gov.sa/ar/mediacenter/news/Pages/saso-news-1483.aspx
+https://www.saso.gov.sa/ar/eservices/Pages/MainEServicesDetails.aspx?serviceid=397
+For products within SASO/Saber's applicable scope, check the current product
+classification and relevant conformity/shipment requirements before declaring a
+specific certificate necessary. Do not apply a blanket Saber rule to every good
+or confuse product conformity and shipment certificates.
+Imports, exports and transit are different customs movements. Do not present
+this import checklist as export or transit requirements. If movement or Saudi
+destination is unclear, qualify the import explanation or clarify that detail.
+For an explicitly foreign destination, refer to its customs requirements rather
+than applying the Saudi import checklist.
+ZATCA national-product export guide (reviewed 2026-10-10):
+https://eservices.zatca.gov.sa/sites/sc/ar/CustomsGuideNew/HQweb/Pages/newGuide1438/تصدير-المنتجات-الوطنية.aspx
+This guide is ONLY for national products, not re-export or temporary export.
+It lists invoice, origin certificate and bill of lading. For national goods
+with non-removable origin and producer-name markings, the origin certificate
+exception is conditional on the guide's local-invoice/customs-declaration rule.
+Restricted goods need the relevant permits. The described sequence is customs
+declaration, supporting documents, risk-based inspection, applicable other
+charges, then departure authorization. Describe it without claiming execution.
+ZATCA transit guide (reviewed 2026-10-10):
+https://eservices.zatca.gov.sa/sites/sc/ar/CustomsGuideNew/HQweb/Pages/newGuide1438/إجراءات-البضائع-العابرة---ترانزيت.aspx
+Transit uses a bill of lading for sea/air or a cargo manifest for land; an
+invoice is required if available. Non-regular sea services have a separate
+manifest provision. The process describes declaration, documents, risk-based
+inspection and customs seals, a guarantee accepted by customs and applicable
+other charges, then exit authorization. These are procedural requirements,
+not a promise of clearance, a guaranteed time, a fee amount or a financial
+undertaking by the assistant. Do not apply transit rules to import/export.
+Answer the document-requirement question with the known general requirements,
+then ask only missing goods type, transport mode or arrival port, at most two
+details. Preserve user-stated origin and timing without asking again.
+Earlier assistant claims are not evidence. This is a general requirements
+question, not a request to read an attachment: do not demand an uploaded file.
+Procedural descriptions such as needing importer registration or a customs
+broker authorization are information, not an offer to perform the procedure.
+Never promise to register, authorize, file, upload, clear, send, pay or act for
+the user. Do not ask them to upload arbitrary documents for review in this lane.
+Do not copy source URLs into the reply; name ZATCA or SASO briefly if useful.'''
+
 _COMMITMENT = re.compile(
     r'(?i)(?:\b(?:sent|send|contacted|contact|booked|booking|approved|approve|paid|pay|'
     r'posted|updated|deleted|guarantee|guaranteed|promise|confirmed|will|shall|'
@@ -896,6 +952,20 @@ _NOMINAL_PROCESS = re.compile(
     r'(?P<boundary>^|[.!؟?،؛;\n])\s*[وف]?(?:اعتماد|تاكيد|التواصل|الحجز|التسجيل|الارسال)'
     r'(?=(?:\s+[\u0621-\u064a]+){1,8}\s+(?:يتطلب|تتطلب|يحتاج|تحتاج|يساعد|تساعد|'
     r'يتوقف|تتوقف|قد\s*(?:يوفر|توفر|يساعد|تساعد))(?!\w))')
+_CUSTOMS_PROCEDURAL_NOUN = (
+    r'(?:تسجيل\s+(?:المستورد|المنتج|المنتجات)(?:\s+في\s+(?:فسح|سابر))?|'
+    r'تفويض\s+المخلص(?:\s+الجمركي)?|تقديم\s+(?:المستندات|البيان\s+الجمركي)|'
+    r'ضمانا?\s+تقبله\s+الجمارك)'
+)
+_CUSTOMS_PROCEDURAL_REQUIREMENT = re.compile(
+    r'(?P<head>(?:^|[.!؟?،؛;\n])\s*[وف]?(?:قد\s*)?'
+    r'(?:تحتاج|يحتاج\s+المستورد|يلزم|يتطلب\s+(?:الاستيراد|التخليص)|'
+    r'تشمل\s+متطلبات\s+(?:الاستيراد|التخليص)|تتطلب\s+اجراءات\s+الترانزيت)\s*(?:الي\s*)?)'
+    r'(?P<nouns>' + _CUSTOMS_PROCEDURAL_NOUN +
+    r'(?:\s+و' + _CUSTOMS_PROCEDURAL_NOUN + r'){0,3})(?!\w)')
+_CUSTOMS_PROCEDURAL_ACTION_TAIL = re.compile(
+    r'(?<!\w)(?:[وف]?(?:(?:سا|سن|ا|ن|با|بن)(?:سجل|فعل)|ب(?:سدد|دفع))'
+    r'(?:ه|ها|هم|ك|كم)?|علينا|علي\s*حسابنا)(?!\w)')
 _LIVE_AVAILABILITY_ASSERTION = re.compile(
     r'(?:^|[.!؟?،؛;\n]|\b(?:لكن|ولكن)\s+|\s+و(?=الشحنات|شحنات|لا\s*توجد))\s*'
     r'(?:(?:نعم|اكيد)\s*)?(?:'
@@ -919,6 +989,9 @@ def _capability_action_text(value: str) -> str:
     # A nominal subject explaining a prerequisite is not an actor's approval
     # or promise. Replace only the noun; later actions and claims stay visible.
     value = _NOMINAL_PROCESS.sub(lambda match: match['boundary'] + 'الاجراء', value)
+    # Replace only bounded procedural NOUN phrases under a requirement
+    # predicate. Every later verb/object/compound promise remains visible.
+    value = _CUSTOMS_PROCEDURAL_REQUIREMENT.sub(lambda match: match['head'] + 'اجراءات المتطلبات', value)
     value = _DENIED_CAPABILITY_PREDICATE.sub('المعلومات غير متاحه', value)
     value = _NEGATED_KNOWLEDGE_PREDICATE.sub('المعلومات غير متاحه', value)
     value = _CONFIRMATION_PREREQUISITE.sub('تحتاج مراجعه', value)
@@ -1163,6 +1236,10 @@ def _price_commitment(value: str, *, pricing_context: bool = False, grounding: s
     that a price is unavailable, but cannot launder a later positive promise.
     """
     folded = _fold(value)
+    # A fixed origin/producer marking describes the goods, not an approved
+    # invoice price. Normalize only that adjective, retaining every price tail.
+    folded = re.sub(r'(?P<mark>دلاله\s*(?:ال)?منشا(?:\s*واسم\s*المنتج)?)\s*'
+                    r'(?:ال)?ثابت(?:ه|ين)?(?!\w)', r'\g<mark> موضحه', folded)
     amount_text = folded
     source = _fold(grounding)
     # A source-grounded physical measurement/count is not a monetary quote. This
@@ -1251,14 +1328,17 @@ _DESCRIPTIVE_PREFIX_WORDS = {
 # Natural conversation is not a third-person document extract. Pronouns and
 # future morphology alone say nothing about external execution. Match complete
 # operational predicates instead; clarification clauses are not status proof.
-_OPERATION_STEM = r'(?:قوم|تولي|تعهد|لتزم|ؤكد|وكد|وعد|ضمن|رتب|نسق|جهز|ستلم|ستقبل|ستعلم|بحث|فحص|تابع|راجع|تحقق|تكفل|نفذ|عمل|باشر|شحن|سلم|نقل|وصل)'
+_OPERATION_STEM = r'(?:قوم|تولي|تعهد|لتزم|ؤكد|وكد|وعد|ضمن|رتب|نسق|جهز|ستلم|ستقبل|ستعلم|بحث|فحص|تابع|راجع|تحقق|تكفل|نفذ|عمل|باشر|شحن|سلم|نقل|وصل|خلص|صدر|رفع|فوض|سدد)'
+_CUSTOMS_FILING_CLAIM = re.compile(
+    r'(?<!\w)[وف]?(?:(?:سا|سن|سي|ست)قدم(?:ه|ها|هم|لك|ك)?(?!\w)|'
+    r'(?:ا|ن)قدم\s+(?:البيان|المستندات|الطلب|طلب\s*التخليص)(?!\w))')
 _OPERATION_PRESENT = re.compile(
     r'(?<!\w)[وف]?(?:[ب]?[ان]|س[انيت])' + _OPERATION_STEM + r'(?:ه|ها|هم|لك|ك)?(?!\w)')
 _OPERATION_PAST = re.compile(
-    r'(?<!\w)[وف]?(?:استلم|استقبل|فحص|راجع|تحقق|رتب|نسق|جهز|نفذ|عمل|باشر|شحن|سلم|نقل|وصل|تولي)'
+    r'(?<!\w)[وف]?(?:استلم|استقبل|فحص|راجع|تحقق|رتب|نسق|جهز|نفذ|عمل|باشر|شحن|سلم|نقل|وصل|تولي|خلص|قدم|اصدر|رفع|فوض)'
     r'(?:ت|نا|وا)(?:ه|ها|هم)?(?!\w)')
 _OPERATION_PASSIVE = re.compile(
-    r'(?<!\w)[وف]?(?:تم|سيتم|جرى|جري)\s*(?:استلام|استقبال|فحص|نقل|توصيل|تسليم|شحن|مراجعه|تجهيز|ترتيب)(?!\w)')
+    r'(?<!\w)[وف]?(?:تم|سيتم|جرى|جري)\s*(?:ال)?(?:استلام|استقبال|فحص|نقل|توصيل|تسليم|شحن|مراجعه|تجهيز|ترتيب|تخليص|تقديم|اصدار|رفع|تفويض|تسجيل)(?!\w)')
 _UNDERTAKING_CLAIM = re.compile(r'(?<!\w)[وف]?(?:قمت|قمنا|متعهده?|ملتزمه?)(?!\w)')
 _EPISTEMIC_QUESTION = re.compile(
     r'^(?:[وف]?هل|[وف]?تقصد|[وف]?تقصدي|[وف]?تسأل|[وف]?تسال|'
@@ -1297,7 +1377,7 @@ def _conversation_execution_claim(value: str) -> bool:
                 r'\s+(?!(?:انا|نحن|سوف|راح)\b)[\u0621-\u064a]{2,}(?!\w)',
                 'تفاصيل الاستلام', operational_clause)
         # Even an interrogative/conditional offer to execute is unsupported.
-        if _OPERATION_PRESENT.search(operational_clause):
+        if _OPERATION_PRESENT.search(operational_clause) or _CUSTOMS_FILING_CLAIM.search(operational_clause):
             return True
         # Asking whether a third party received cargo, or explicitly saying
         # that this is unknown, does not assert that it happened.
@@ -1316,6 +1396,131 @@ def _no_live_log_fallback(question: str, *, using_document: bool, reason: str) -
             and re.search(r'اليوم|الان|حاليا|استقبال|استلام|المتاح|متاح|عندكم', value)):
         return LIVE_LOG_UNAVAILABLE_REPLY
     return FALLBACK_REPLY
+
+
+def _customs_requirement_context(question: str, entries: tuple[dict[str, str], ...] = ()) -> dict | None:
+    """Use only a bounded suffix of independently screened user statements.
+
+    This is a conversational selection hint, never a customs determination or
+    permission. No assistant assertion supplies origin, movement or goods.
+    """
+    current = _fold(question)
+    requirements_now = bool(re.search(r'مطلوب|متطلب|اجراء|اوراق|مستند|وثائق', current))
+    if not requirements_now:
+        # A new information question is not a continuation merely because an
+        # old turn mentioned customs. Short cargo/mode/port answers may be.
+        if (re.search(r'[؟?]', question) or re.search(
+                r'^(?:(?:طيب|تمام)\s*)?(?:ما|ماهي|ماهو|هل|كيف|وين|اين|متي|وش|ايش|كم|ليش|اخبرني|عرفني)(?!\w)', current)
+                or re.search(r'خدماتكم|مكتبكم|عنكم|فريق|طقس|مطعم|مباراه', current)
+                or len(current.split()) > 16):
+            return None
+        detail = bool(re.search(r'بضاع|حمول|شحن|بحري|جوي|بري|ميناء|مطار|منفذ', current))
+        asked_detail = bool(entries and re.search(r'نوع\s*البضاعه|طريقه\s*الشحن|منفذ\s*(?:الوصول|العبور|التصدير)',
+                                                  _fold(entries[-1].get('assistant', ''))))
+        if not detail and not (asked_detail and len(current.split()) <= 6):
+            return None
+    texts = []
+    for entry in entries[-MAX_CONVERSATION_EXCHANGES:]:
+        if set(entry) != {'user', 'assistant'} or not screen_question(entry['user']).allowed:
+            continue
+        text = entry['user']
+        if re.search(r'موضوع\s*(?:اخر|جديد)|غير\s*الموضوع|طقس|مطعم|مباراه|فريق\s*العمل', _fold(text)):
+            texts = []
+        else:
+            texts.append(text)
+    correction = bool(re.search(r'^(?:لا\b|تصحيح\b|اقصد\b)|(?<!\w)(?:ليس|ليست|بل)(?!\w)', current))
+    if correction:
+        texts = []
+    texts.append(question)
+    folded = _fold('\n'.join(texts))
+    if _DOCUMENT_REFERENCE.search(_NO_DOCUMENT.sub(' ', current)):
+        return None
+    if re.search(r'موضوع\s*(?:اخر|جديد)|غير\s*الموضوع|طقس|مطعم|مباراه|فريق\s*العمل', current):
+        return None
+    if not re.search(r'مطلوب|متطلب|اجراء|اوراق|مستند|وثائق', folded):
+        return None
+    if not re.search(r'جمرك|تخليص|استيراد|تصدير|ترانزيت|عبور|(?:شحنه|حموله|بضاعه).{0,45}من\s+', folded):
+        return None
+    # A clearly new shipment resets earlier cargo/route facts.
+    for index, text in enumerate(texts[1:], 1):
+        if re.search(r'(?:شحنه|حموله)\s*(?:جديده|اخري|ثانيه)', _fold(text)):
+            texts = texts[index:]
+    folded = _fold('\n'.join(texts))
+    movements = {name for name, pattern in (
+        ('import', r'استيراد|وارده'), ('export', r'تصدير|صادره|من\s*السعوديه\s*(?:الي|لل)'),
+        ('transit', r'ترانزيت|عبور|عابره')) if re.search(pattern, folded)}
+    destinations = []
+    for text in texts:
+        match = re.search(r'(?:من\s+[\u0621-\u064a ]{2,35}?\s+الي\s+|'
+                          r'(?:الشحن|الشحنه)\s+الي\s+|وجهتها\s+)'
+                          r'(?P<destination>[\u0621-\u064a]+(?:\s+[\u0621-\u064a]+){0,2})', _fold(text))
+        if match:
+            destinations.append(match['destination'])
+    saudi_destination = bool(destinations and re.search(r'السعوديه|المملكه|جده|الدمام|الرياض|الجبيل|ينبع|جازان', destinations[-1]))
+    foreign_destination = bool(destinations and not saudi_destination)
+    movement = ('ambiguous' if len(movements) > 1 else next(iter(movements)) if movements
+                else 'import' if re.search(r'من\s+الصين', folded) else 'unknown')
+    if foreign_destination and movement == 'import':
+        movement = 'foreign'
+    goods = any(bool(re.search(r'(?:البضاعه|بضاعتي|حمولتي|نوعها)\s+(?:(?:هي|عباره\s*عن)\s*)?'
+                          r'(?!المطلوبه\b|ايه\b|ايش\b|وش\b|من\b)[\u0621-\u064a]{2,}', _fold(text)))
+                for text in texts)
+    modes = {name for name, pattern in (
+        ('sea', r'(?<!\w)(?:بحري|البحري|بحرا|بالبحر)(?!\w)'),
+        ('air', r'(?<!\w)(?:جوي|الجوي|جوا|بالطائره)(?!\w)'),
+        ('land', r'(?<!\w)(?:بري|البري|برا|بالبر)(?!\w)')) if re.search(pattern, folded)}
+    mode_name = next(iter(modes)) if len(modes) == 1 else ''
+    mode = bool(mode_name)
+    port = bool(re.search(r'(?:ميناء|مطار|منفذ)\s+(?!(?:الوصول|الدخول|وصول|دخول|المطلوب|غير|ما|هو)\b)[\u0621-\u064a]{2,}', folded))
+    known_details = re.split(r'(?<!\w)بل(?!\w)', folded)[-1] if correction else folded
+    china = bool(re.search(r'من\s+الصين', known_details)
+                 and not re.search(r'(?:ليس|ليست|مش|مو|غير).{0,25}من\s+الصين', known_details))
+    return {'movement': movement, 'china': china,
+            'next_week': bool(re.search(r'الاسبوع\s*(?:القادم|الجاي|المقبل)', known_details)
+                              and not re.search(r'(?:ليس|ليست|مش|مو|غير).{0,20}الاسبوع', known_details)),
+            'goods': goods, 'mode': mode, 'mode_name': mode_name, 'port': port,
+            'export_kind': ('reexport' if re.search(r'اعاده\s*تصدير|اعاده\s*التصدير', folded)
+                            else 'temporary' if re.search(r'تصدير\s*(?:ال)?م[ؤو]قت', folded) else 'national_or_unknown'),
+            'saudi_destination': saudi_destination}
+
+
+def _customs_failure_reply(question: str, entries: tuple[dict[str, str], ...] = ()) -> str | None:
+    context = _customs_requirement_context(question, entries)
+    if not context:
+        return None
+    movement = context['movement']
+    if movement in ('unknown', 'ambiguous'):
+        return 'المستندات المطلوبة تختلف باختلاف الإجراء الجمركي. هل الشحنة واردة إلى السعودية، صادرة منها، أم عابرة؟'
+    if movement == 'foreign':
+        return 'للشحنة المتجهة خارج السعودية، يلزم الرجوع إلى متطلبات جمارك دولة الوصول؛ قائمة الاستيراد السعودي لا تنطبق عليها تلقائيًا.'
+    if movement == 'import':
+        known = ('من الصين ' if context['china'] else '') + ('الأسبوع القادم ' if context['next_week'] else '')
+        intro = 'بالنسبة لشحنتك ' + known.strip() + '، ' if known else ''
+        scope = 'للاستيراد إلى السعودية، ' if context['saudi_destination'] else 'إذا كانت الشحنة واردة إلى السعودية، '
+        answer = (intro + scope + 'الأساس هو الفاتورة التجارية وبوليصة الشحن. '
+            'شهادة المنشأ غير إلزامية عند وجود دلالة منشأ ثابتة مستوفية للاشتراطات؛ '
+            'وقد تُطلب شهادات أو مستندات إضافية حسب البضاعة والجهة المختصة.')
+    elif movement == 'export':
+        if context['export_kind'] in ('reexport', 'temporary'):
+            label = 'إعادة التصدير' if context['export_kind'] == 'reexport' else 'التصدير المؤقت'
+            answer = label + ' له متطلبات مستقلة؛ قائمة تصدير المنتجات الوطنية لا تكفي لتحديد مستنداته، ويلزم توضيح وضع البضاعة وإجراءها الجمركي.'
+        else:
+            answer = ('إذا كانت البضاعة منتجات وطنية، فمستندات التصدير تشمل الفاتورة وبوليصة الشحن وشهادة المنشأ. '
+                'توجد حالة استثناء لشهادة المنشأ عند ثبوت دلالة المنشأ واسم المنتج بطريقة غير قابلة للنزع، '
+                'مع الفاتورة المحلية والبيان الجمركي وفق شروط الهيئة. التصاريح الإضافية تعتمد على نوع البضاعة.')
+    else:
+        transport = {'sea': 'للترانزيت البحري، مستند النقل بوليصة الشحن',
+                     'air': 'للترانزيت الجوي، مستند النقل بوليصة الشحن',
+                     'land': 'للترانزيت البري، مستند النقل بيان الحمولة «المنافيست»'}
+        answer = (transport.get(context['mode_name'],
+            'للترانزيت، مستند النقل بوليصة الشحن للبحر والجو، وبيان الحمولة «المنافيست» للبر')
+            + '، والفاتورة إن وجدت. وتختلف ضوابط العبور بحسب وسيلة النقل ومنافذه.')
+    missing = [label for key, label in (('goods', 'نوع البضاعة'), ('mode', 'طريقة الشحن'),
+                                        ('port', 'منفذ الوصول' if movement == 'import' else 'منفذ العبور' if movement == 'transit' else 'منفذ التصدير'))
+               if not context[key]]
+    if missing:
+        answer += ' ما ' + ' و'.join(missing[:2]) + '؟'
+    return answer
 
 
 def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
@@ -1370,6 +1575,9 @@ def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
                         'ما نوع الحمولة ووزنها أو حجمها، ومتى موعد التحميل؟')
             return TRANSPORT_PRICE_REVIEW_REPLY
         return 'ما عندي سعر معتمد لهذه الخدمة. ما تفاصيل الخدمة المطلوبة؟'
+    customs = _customs_failure_reply(question, safe_entries)
+    if customs:
+        return customs
     if re.search(r'فريق\s*(?:عمل|العمل|كم)|فريقكم|اعضاء\s*الفريق|اسماء\s*(?:الفريق|الموظفين)', value):
         return TEAM_INFORMATION_REPLY
     return _no_live_log_fallback(question, using_document=using_document, reason=reason)
@@ -1440,6 +1648,9 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
         if (_LIVE_AVAILABILITY_ASSERTION.search(_fold(cleaned))
                 or _MEASUREMENT_STATUS.search(_fold(cleaned))):
             return ScreenDecision(False, reason='reply_action_live_status', kind='reply')
+        if (_CUSTOMS_PROCEDURAL_REQUIREMENT.search(action_text)
+                and _CUSTOMS_PROCEDURAL_ACTION_TAIL.search(action_text)):
+            return ScreenDecision(False, reason='reply_action_commitment', kind='reply')
         action_text = _capability_action_text(action_text)
         if _ONWARD_ACTION_INTENT.search(action_text):
             return ScreenDecision(False, reason='reply_action_onward', kind='reply')
@@ -1687,6 +1898,8 @@ source when necessary. Never claim that an absent document was read.'''
             if implicit_document_detail(screened_question.safe_text) and checked_history.entries:
                 source_note += '\nYou may restate facts explicitly supplied by the user in history, attributed with حسب وصفك. Do not treat earlier assistant statements as evidence or invent missing values.'
         system = CONVERSATION_SYSTEM + source_note
+        if not using_document and _customs_requirement_context(screened_question.safe_text, previous.entries):
+            system += _CUSTOMS_GUIDANCE_SYSTEM
     else:
         system = SYSTEM
     money_targets = (_reviewed_money_targets(screened_question.safe_text)
@@ -1715,7 +1928,13 @@ physical dimension only; it never authorizes a price or an approval.'''
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     model = os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5').strip()
     if not key or not re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model):
-        return finish(FALLBACK_REPLY, False, False, 'model_unavailable')
+        fallback = (_customs_failure_reply(screened_question.safe_text, previous.entries)
+                    if not using_document else None)
+        return finish(fallback or FALLBACK_REPLY, False, False, 'model_unavailable')
+    def model_failure(reason):
+        fallback = (_customs_failure_reply(screened_question.safe_text, previous.entries)
+                    if not using_document else None)
+        return finish(fallback or FALLBACK_REPLY, True, False, reason)
     body = {
         'model': model,
         'max_tokens': MAX_TOKENS,
@@ -1741,15 +1960,15 @@ physical dimension only; it never authorizes a price or an approval.'''
             })
             response.raise_for_status()
         if len(response.content) > MAX_PROVIDER_BYTES:
-            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return model_failure('invalid_model_response')
         data = response.json()
         if not isinstance(data, dict) or data.get('stop_reason') != 'end_turn':
-            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return model_failure('invalid_model_response')
         content = data.get('content')
         if not isinstance(content, list) or not 1 <= len(content) <= 4:
-            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return model_failure('invalid_model_response')
         if any(not isinstance(part, dict) or part.get('type') != 'text' or not isinstance(part.get('text'), str) for part in content):
-            return finish(FALLBACK_REPLY, True, False, 'invalid_model_response')
+            return model_failure('invalid_model_response')
         # Ordinary user-stated names/references/counts may be acknowledged, not
         # claimed as independently verified. PDF evidence grounding is unchanged.
         grounding = source_text
@@ -1786,8 +2005,8 @@ physical dimension only; it never authorizes a price or an approval.'''
     except httpx.TimeoutException:
         if in_before_request:
             raise
-        return finish(FALLBACK_REPLY, True, False, 'provider_timeout')
+        return model_failure('provider_timeout')
     except (httpx.HTTPError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         if in_before_request:
             raise
-        return finish(FALLBACK_REPLY, True, False, 'provider_error')
+        return model_failure('provider_error')
