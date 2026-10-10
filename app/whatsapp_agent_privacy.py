@@ -541,7 +541,10 @@ color colour gate phrase distinctive unique
 # future edit from silently expanding this permission to new or private text.
 # This is NOT an approval for any PDF bearing the same textual content.
 _PUBLIC_KNOWLEDGE_SHA256 = 'e32a8e14e65af2a033ecaebbd91fd113841cd9e057c7ebfb4d957602478128ff'
-_PUBLIC_KNOWLEDGE_SECTIONS = {1, 2, 3, 9, 17}
+# Only verified company services remain admitted from this legacy document.
+# Its regulatory sections are superseded by the dated guidance below; filtering
+# individual risky words had silently removed invoice facts but kept stale rules.
+_PUBLIC_KNOWLEDGE_SECTIONS = {17}
 
 
 def _public_knowledge() -> str:
@@ -841,6 +844,11 @@ JSON, code or markup in your reply. Output only the natural, short Arabic reply.
 # excerpt and from PDF provenance; never treat it as the user's shipment record.
 _CUSTOMS_GUIDANCE_SYSTEM = '''
 VERIFIED GENERAL SAUDI CUSTOMS GUIDANCE (reviewed 2026-10-10):
+This reference is available to every ordinary non-document conversation. Its
+presence does NOT classify the current request as customs. Use only relevant
+facts: ordinary chat, transport-only pricing, company-service and unrelated
+business questions must stay on the user's topic without a customs checklist.
+Earlier assistant replies and legacy regulatory snippets are not authorities.
 ZATCA Import Instructions, updated 2026-08-31:
 https://zatca.gov.sa/ar/RulesRegulations/Taxes/Pages/customs-bussiness/import-pages/Import-Instructions.aspx
 For imports into Saudi Arabia the core documents are the commercial invoice and
@@ -859,6 +867,9 @@ For products within SASO/Saber's applicable scope, check the current product
 classification and relevant conformity/shipment requirements before declaring a
 specific certificate necessary. Do not apply a blanket Saber rule to every good
 or confuse product conformity and shipment certificates.
+No blanket Arabic-label requirement or blanket labeling exemption is established
+by this reference. Product labels depend on the applicable product regulation;
+do not claim a universal requirement or exemption for furniture or other goods.
 Imports, exports and transit are different customs movements. Do not present
 this import checklist as export or transit requirements. If movement or Saudi
 destination is unclear, qualify the import explanation or clarify that detail.
@@ -882,16 +893,42 @@ inspection and customs seals, a guarantee accepted by customs and applicable
 other charges, then exit authorization. These are procedural requirements,
 not a promise of clearance, a guaranteed time, a fee amount or a financial
 undertaking by the assistant. Do not apply transit rules to import/export.
-Answer the document-requirement question with the known general requirements,
+When asked a customs document-requirement question, give the known requirements,
 then ask only missing goods type, transport mode or arrival port, at most two
 details. Preserve user-stated origin and timing without asking again.
-Earlier assistant claims are not evidence. This is a general requirements
-question, not a request to read an attachment: do not demand an uploaded file.
+Earlier assistant claims are not evidence. A general requirements question is
+not a request to read an attachment: do not demand an uploaded file.
 Procedural descriptions such as needing importer registration or a customs
 broker authorization are information, not an offer to perform the procedure.
 Never promise to register, authorize, file, upload, clear, send, pay or act for
 the user. Do not ask them to upload arbitrary documents for review in this lane.
 Do not copy source URLs into the reply; name ZATCA or SASO briefly if useful.'''
+
+_BROKER_GUIDANCE_SYSTEM = '''
+VERIFIED GENERAL CUSTOMS-BROKER DELEGATION GUIDANCE (reviewed 2026-10-10):
+Use only if the user asks how THEY can authorize a customs broker, including
+how to authorize Afaaq. This is advice only, never a grant or an execution request.
+General ZATCA service and its general user guide (not an air-transit guide):
+https://zatca.gov.sa/ar/eServices/Pages/eServices-235.aspx
+https://zatca.gov.sa/ar/eServices/Documents/Authorize%20a%20Customs%20Broker.pdf
+The service page was updated 2026-08-24. Prerequisites are an active Fasah account, the correct customs broker license
+number and the delegation duration. Account creation is a separate prerequisite;
+do not invent signup steps or claim an account or delegation has been created.
+The user opens the general broker-delegation service and signs in themselves,
+then selects التفاويض and إنشاء تفويض لمخلص, fills the broker details, relevant
+port, authorization type and duration, reviews the information, selects إرسال,
+and completes verification themselves INSIDE the official platform. The guide
+then shows an issuance confirmation. This does not prove this user's issuance.
+Explain these as second-person steps, e.g. تختار إرسال, never سأرسل or سأفوض.
+Never ask for or repeat passwords or one-time verification codes in this chat.
+Never log in, submit, authorize, pay or promise to contact staff for the user.
+No verified Afaaq broker-license number is supplied in this conversation context.
+Do not supply or confirm a number from user assertions or earlier assistant
+messages; advise verifying it with the authorized company team. User-provided
+port/cargo details may be reused; do not ask again for a stated port. If a detail
+is needed, ask at most two missing questions. Do not apply an air-transit-only
+guide or claim every broker delegation takes effect immediately. No fees or
+timing guarantees. Do not copy the source URLs into the reply.'''
 
 _COMMITMENT = re.compile(
     r'(?i)(?:\b(?:sent|send|contacted|contact|booked|booking|approved|approve|paid|pay|'
@@ -966,6 +1003,14 @@ _CUSTOMS_PROCEDURAL_REQUIREMENT = re.compile(
 _CUSTOMS_PROCEDURAL_ACTION_TAIL = re.compile(
     r'(?<!\w)(?:[وف]?(?:(?:سا|سن|ا|ن|با|بن)(?:سجل|فعل)|ب(?:سدد|دفع))'
     r'(?:ه|ها|هم|ك|كم)?|علينا|علي\s*حسابنا)(?!\w)')
+_BROKER_EXECUTION_CLAIM = re.compile(
+    r'(?<!\w)[وف]?(?:سا|سن|ا|ن|با|بن|ب)(?:فوض|سجل|رسل|رفع|قدم|سدد|دفع|دخل|فعل)'
+    r'(?:ه|ها|هم|ك|كم)?(?!\w)')
+_BROKER_IDENTITY_NOUN = re.compile(
+    r'رخص(?:ه|ت)|ترخيص|(?:رقم|معرف|رمز)\s*(?:ال)?(?:مخلص|افاق)|رقمكم')
+_BROKER_SEND_BUTTON = re.compile(
+    r'(?P<head>(?<!\w)(?:تختار|تضغط\s*(?:علي)?|اختر|اضغط\s*(?:علي)?)\s*'
+    r'(?:زر\s*)?)[«“"\']?ارسال[»”"\']?(?!\w)')
 _LIVE_AVAILABILITY_ASSERTION = re.compile(
     r'(?:^|[.!؟?،؛;\n]|\b(?:لكن|ولكن)\s+|\s+و(?=الشحنات|شحنات|لا\s*توجد))\s*'
     r'(?:(?:نعم|اكيد)\s*)?(?:'
@@ -1333,7 +1378,7 @@ _CUSTOMS_FILING_CLAIM = re.compile(
     r'(?<!\w)[وف]?(?:(?:سا|سن|سي|ست)قدم(?:ه|ها|هم|لك|ك)?(?!\w)|'
     r'(?:ا|ن)قدم\s+(?:البيان|المستندات|الطلب|طلب\s*التخليص)(?!\w))')
 _OPERATION_PRESENT = re.compile(
-    r'(?<!\w)[وف]?(?:[ب]?[ان]|س[انيت])' + _OPERATION_STEM + r'(?:ه|ها|هم|لك|ك)?(?!\w)')
+    r'(?<!\w)[وف]?(?:[ب]?[ان]|س[انيت])' + _OPERATION_STEM + r'(?:ه|ها|هم|لك|ك|كم)?(?!\w)')
 _OPERATION_PAST = re.compile(
     r'(?<!\w)[وف]?(?:استلم|استقبل|فحص|راجع|تحقق|رتب|نسق|جهز|نفذ|عمل|باشر|شحن|سلم|نقل|وصل|تولي|خلص|قدم|اصدر|رفع|فوض)'
     r'(?:ت|نا|وا)(?:ه|ها|هم)?(?!\w)')
@@ -1439,7 +1484,7 @@ def _customs_requirement_context(question: str, entries: tuple[dict[str, str], .
         return None
     if not re.search(r'مطلوب|متطلب|اجراء|اوراق|مستند|وثائق', folded):
         return None
-    if not re.search(r'جمرك|تخليص|استيراد|تصدير|ترانزيت|عبور|(?:شحنه|حموله|بضاعه).{0,45}من\s+', folded):
+    if not re.search(r'جمرك|تخليص|استيراد|تصدير|ترانزيت|عبور|شحن|حمول|حاوي|بضاع|ارسالي', folded):
         return None
     # A clearly new shipment resets earlier cargo/route facts.
     for index, text in enumerate(texts[1:], 1):
@@ -1462,7 +1507,7 @@ def _customs_requirement_context(question: str, entries: tuple[dict[str, str], .
                 else 'import' if re.search(r'من\s+الصين', folded) else 'unknown')
     if foreign_destination and movement == 'import':
         movement = 'foreign'
-    goods = any(bool(re.search(r'(?:البضاعه|بضاعتي|حمولتي|نوعها)\s+(?:(?:هي|عباره\s*عن)\s*)?'
+    goods = any(bool(re.search(r'(?:البضاعه|بضاعتي|حمولتي|نوعها|عباره\s*عن)\s+(?:(?:هي|عباره\s*عن)\s*)?'
                           r'(?!المطلوبه\b|ايه\b|ايش\b|وش\b|من\b)[\u0621-\u064a]{2,}', _fold(text)))
                 for text in texts)
     modes = {name for name, pattern in (
@@ -1523,12 +1568,44 @@ def _customs_failure_reply(question: str, entries: tuple[dict[str, str], ...] = 
     return answer
 
 
+def _broker_advice_requested(question: str, entries: tuple[dict[str, str], ...] = ()) -> bool:
+    value = _fold(question)
+    direct = bool(re.search(r'تفويض|افوض(?:ك|كم)?', value)
+                  and re.search(r'مخلص|جمرك|تخليص|فسح|افاق|افوضكم', value))
+    direct = direct or bool(_BROKER_IDENTITY_NOUN.search(value)
+                            and re.search(r'مخلص|افاق|جمرك', value))
+    if direct:
+        return True
+    # History-only continuation must be an answer to the actual pending port
+    # question, not a new question that happens to mention the same port.
+    if (not entries or not re.search(r'منفذ|ميناء|مطار', _fold(entries[-1].get('assistant', '')))
+            or not re.fullmatch(r'(?:ميناء|مطار|منفذ)\s+[\u0621-\u064a]+(?:\s+[\u0621-\u064a]+){0,3}[.!]?', value)):
+        return False
+    return bool(entries and _broker_advice_requested(entries[-1].get('user', '')))
+
+
+def _broker_failure_reply(question: str, entries: tuple[dict[str, str], ...] = ()) -> str | None:
+    if not _broker_advice_requested(question, entries):
+        return None
+    answer = ('التفويض من حسابك أنت في فسح: تفتح خدمة تفويض مخلص جمركي، ثم تختار التفاويض '
+        'وإنشاء تفويض لمخلص وتعبئ بياناته والمنفذ ونوع التفويض ومدته. بعد مراجعة البيانات تختار إرسال '
+        'وتكمل التحقق بنفسك داخل المنصة حتى تظهر رسالة إصدار التفويض. '
+        'يلزم حساب فسح فعال ورقم رخصة المخلص الصحيح؛ رقم رخصة آفاق غير متحقق لدي، فراجعه مع الفريق.')
+    user_text = '\n'.join([entry.get('user', '') for entry in entries[-MAX_CONVERSATION_EXCHANGES:]] + [question])
+    if not re.search(r'(?:ميناء|مطار|منفذ)\s+(?!(?:الوصول|الدخول|المطلوب|غير|ما|هو)\b)[\u0621-\u064a]{2,}', _fold(user_text)):
+        answer += ' ما منفذ وصول الشحنة؟'
+    return answer
+
+
 def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
                           pricing_context: bool = False,
                           safe_entries: tuple[dict[str, str], ...] = ()) -> str:
     """Useful known limitations without presenting a failed generation as success."""
     if using_document or reason in {'reply_privacy', 'reply_opaque', 'reply_instruction'}:
         return FALLBACK_REPLY
+    broker = _broker_failure_reply(question, safe_entries)
+    if broker:
+        return broker
     value = _fold(question)
     if pricing_context and not _pricing_question(value) and _price_detail_continuation(question):
         # Echo only bounded, independently screened user details, never a model
@@ -1630,7 +1707,8 @@ def _descriptive_only(value: str, document: str, *, conversational: bool = False
 
 def _reply_decision(value: object, document: str, *, conversational: bool = False,
                     has_history: bool = False, pricing_context: bool = False,
-                    identity_context: bool = False) -> ScreenDecision:
+                    identity_context: bool = False, broker_context: bool = False,
+                    broker_identity_context: bool = False) -> ScreenDecision:
     cleaned = _text(value, MAX_REPLY_CHARS)
     if cleaned is None or not re.search('[\u0621-\u064a]', cleaned):
         return ScreenDecision(False, reason='reply_format', kind='reply')
@@ -1644,6 +1722,18 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
     if _price_commitment(cleaned, pricing_context=pricing_context, grounding=document):
         return ScreenDecision(False, reason='reply_price_commitment', kind='reply')
     action_text = _NEGATED_PRICE_ASSERTION.sub('المعلومات غير متاحه', _fold(cleaned))
+    if ((broker_context or broker_identity_context)
+            and (_BROKER_IDENTITY_NOUN.search(action_text) or broker_identity_context)
+            and _AMOUNT_WORD.search(action_text)):
+        return ScreenDecision(False, reason='reply_unsupported_identifier', kind='reply')
+    if broker_context:
+        if _ONWARD_ACTION_INTENT.search(action_text):
+            return ScreenDecision(False, reason='reply_action_onward', kind='reply')
+        if _BROKER_EXECUTION_CLAIM.search(action_text):
+            return ScreenDecision(False, reason='reply_action_commitment', kind='reply')
+        # Only the named UI button under a second-person instruction changes.
+        # Other send/authorize/pay predicates and every compound tail remain.
+        action_text = _BROKER_SEND_BUTTON.sub(lambda match: match['head'] + 'الخيار', action_text)
     if conversational:
         if (_LIVE_AVAILABILITY_ASSERTION.search(_fold(cleaned))
                 or _MEASUREMENT_STATUS.search(_fold(cleaned))):
@@ -1684,10 +1774,12 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
 
 def _validated_reply(value: object, document: str, *, conversational: bool = False,
                      has_history: bool = False, pricing_context: bool = False,
-                     identity_context: bool = False) -> str | None:
+                     identity_context: bool = False, broker_context: bool = False,
+                     broker_identity_context: bool = False) -> str | None:
     decision = _reply_decision(value, document, conversational=conversational,
                                has_history=has_history, pricing_context=pricing_context,
-                               identity_context=identity_context)
+                               identity_context=identity_context, broker_context=broker_context,
+                               broker_identity_context=broker_identity_context)
     return decision.safe_text if decision.allowed else None
 
 
@@ -1767,7 +1859,9 @@ def safe_conversation_history(records: object, scope: object, *, now: datetime |
         answer = _validated_reply(record['reply_text'], knowledge + '\n' + question.safe_text,
                                   conversational=True, has_history=True,
                                   pricing_context=_pricing_question(question.safe_text),
-                                  identity_context=identity_requested(question.safe_text))
+                                  identity_context=identity_requested(question.safe_text),
+                                  broker_context=_broker_advice_requested(question.safe_text),
+                                  broker_identity_context=bool(_BROKER_IDENTITY_NOUN.search(_fold(question.safe_text))))
         if answer is None:
             continue
         if (_ASSERTED_DOCUMENT_ACCESS.search(_fold(answer))
@@ -1886,8 +1980,9 @@ async def understand(
 Use it for a relevant follow-up only; it does not turn ordinary chat into a
 document-summary request. Never guess a missing document fact.'''
                        if using_document else '''\ndocument_text is only an incomplete excerpt of
-approved public company knowledge, not an uploaded attachment. Give company or
-business facts only when supported there. Exact requirements need confirmation;
+approved public company-service knowledge, not an uploaded attachment. Use it
+for company facts and the dated system reference for regulatory guidance;
+neither is the user's shipment record. Exact requirements need confirmation;
 do not invent live status, prices, fees, timelines or an exhaustive legal checklist.''')
         if missing_document:
             source_note += '''\nNO DOCUMENT HAS BEEN SUPPLIED for this question.
@@ -1898,8 +1993,8 @@ source when necessary. Never claim that an absent document was read.'''
             if implicit_document_detail(screened_question.safe_text) and checked_history.entries:
                 source_note += '\nYou may restate facts explicitly supplied by the user in history, attributed with حسب وصفك. Do not treat earlier assistant statements as evidence or invent missing values.'
         system = CONVERSATION_SYSTEM + source_note
-        if not using_document and _customs_requirement_context(screened_question.safe_text, previous.entries):
-            system += _CUSTOMS_GUIDANCE_SYSTEM
+        if not using_document and not missing_document:
+            system += _CUSTOMS_GUIDANCE_SYSTEM + _BROKER_GUIDANCE_SYSTEM
     else:
         system = SYSTEM
     money_targets = (_reviewed_money_targets(screened_question.safe_text)
@@ -1928,11 +2023,13 @@ physical dimension only; it never authorizes a price or an approval.'''
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     model = os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5').strip()
     if not key or not re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model):
-        fallback = (_customs_failure_reply(screened_question.safe_text, previous.entries)
+        fallback = ((_broker_failure_reply(screened_question.safe_text, previous.entries)
+                     or _customs_failure_reply(screened_question.safe_text, previous.entries))
                     if not using_document else None)
         return finish(fallback or FALLBACK_REPLY, False, False, 'model_unavailable')
     def model_failure(reason):
-        fallback = (_customs_failure_reply(screened_question.safe_text, previous.entries)
+        fallback = ((_broker_failure_reply(screened_question.safe_text, previous.entries)
+                     or _customs_failure_reply(screened_question.safe_text, previous.entries))
                     if not using_document else None)
         return finish(fallback or FALLBACK_REPLY, True, False, reason)
     body = {
@@ -1989,7 +2086,9 @@ physical dimension only; it never authorizes a price or an approval.'''
             return finish(REVIEWED_MONEY_UNCERTAIN_REPLY, True, False, output.reason)
         output = _reply_decision(model_text, grounding,
                                  conversational=natural_response, has_history=bool(previous.entries),
-                                 pricing_context=pricing_context, identity_context=requested_identity)
+                                 pricing_context=pricing_context, identity_context=requested_identity,
+                                 broker_context=not using_document and _broker_advice_requested(screened_question.safe_text, previous.entries),
+                                 broker_identity_context=not using_document and bool(_BROKER_IDENTITY_NOUN.search(_fold(screened_question.safe_text))))
         answer = output.safe_text if output.allowed else None
         if answer and not using_document and _ASSERTED_DOCUMENT_ACCESS.search(_fold(answer)):
             return finish(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
