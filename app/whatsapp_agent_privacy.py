@@ -1226,6 +1226,104 @@ def _reviewed_money_reply(value: object, facts: tuple[tuple[str, str, str], ...]
     return ScreenDecision(True, cleaned, 'reply_validated', 'reply')
 
 
+# Reviewed 2026-10-10: ZATCA eservices-220 (search by description/HS),
+# Integrated-Tarrifs, and Guideline-on-Imports-and-Exports-under-VAT-Provision.
+# These describe charge categories, not a verified rate for any consignment.
+_GOVERNMENT_CHARGE_SYSTEM = """\nGovernment-charge guidance, reviewed 2026-10-10:
+Customs tariff/duty is a government charge determined from the actual applicable
+commodity classification. VAT is a separate tax; neither is the broker's service
+fee nor freight. ZATCA's tariff inquiry supports description, heading and HS
+search. No matched official tariff entry or verified rate is supplied here.
+Never give a guessed HS, uniform furniture rate, exemption, tax base, calculation
+or monetary amount. A user-stated rate is not verified. Explain the distinction
+briefly and ask for the specific product/subtype/material or its known HS.
+Retain user-supplied cargo details; do not ask again for a known broad commodity.
+An explicit correction of the charge category overrides earlier quote context.
+Do not promise a lookup, payment, declaration or clearance; you have no tools.
+"""
+_CHARGE_TOPIC_BREAK = re.compile(r'موضوع\s*(?:اخر|جديد)|غير\s*الموضوع|(?:شحنه|بضاعه|حموله)\s*(?:جديده|اخري|ثانيه)|فريق\s*العمل|طقس|مطعم')
+
+
+def _explicit_charge_kind(value: str) -> str:
+    value = _fold(value)
+    # A negated previous category does not defeat the owner's correction.
+    value = re.sub(r'(?:لا\s*اقصد|ليس\s*قصدي|مش\s*قصدي|مو\s*قصدي)\s+[^،,.؛!?؟]{1,45}?(?=\s+(?:بل|اقصد|بسال|اسال|اريد)|[،,.؛!?؟]|$)', ' ', value)
+    duty = bool(re.search(r'(?<!\w)(?:التعرفه|تعرفه)(?!\w)(?!\s*(?:النقل|الشحن))|رسوم\s*(?:ال)?(?:جمرك|جمارك)|جمارك\s*(?:ال|علي)|customs?\s*(?:dut(?:y|ies)|tariff)|\btariff\b', value))
+    vat = bool(re.search(r'القيمه\s*المضافه|ضريبه\s*الاستيراد|\bvat\b', value))
+    if duty or vat:
+        return 'duty_vat' if duty and vat else 'duty' if duty else 'vat'
+    if re.search(r'(?:سعر|اجره|اجور|رسوم|تكلفه)\s*(?:خدمه\s*)?(?:التخليص|تخليص|المخلص|النقل|نقل|الشحن|شحن)|اجرتكم|اتعابكم|اجوركم', value):
+        return 'service'
+    return ''
+
+
+def _government_charge_kind(question: str, entries: tuple[dict[str, str], ...] = ()) -> str:
+    current = _explicit_charge_kind(question)
+    if current:
+        return current if current != 'service' else ''
+    folded = _fold(question)
+    if (_CHARGE_TOPIC_BREAK.search(folded) or len(folded) > 160
+            or re.search(r'رابط|تسجيل|تفويض|مستند|ملف|فريق|نقل|شحن', folded)):
+        return ''
+    # Only short clarification/detail turns inherit this purpose. Other questions
+    # do not acquire tax intent just because taxes appeared earlier in the thread.
+    if re.search(r'كيف|لماذا|ليش|متي|مين|من\s*معي|ما\s*خدمات|ماذا', folded):
+        return ''
+    clarification = bool(re.fullmatch(r'(?:طيب\s*)?(?:و?كم(?:\s+(?:هي|النسبه|الرسوم))?|النسبه|الرسوم|ما\s*اقصد\s*اجرتكم|لا\s*اقصد\s*اجرتكم)[؟?!.]*', folded))
+    detail = bool(entries and re.search(r'الصنف التفصيلي|مادته|السلعه وتفاصيلها', _fold(entries[-1].get('assistant', '')))
+                  and len(folded.split()) <= 8 and not re.search(r'[؟?]|^(?:هل|وين|اين|ما|كم|كيف|ممكن)|عندكم|مكتب|خدمات|تخزين|فريق|شركه|حدث|اخبر|اشرح|وضح|ساعد|قول', folded))
+    if not (clarification or detail):
+        return ''
+    for entry in reversed(entries[-MAX_CONVERSATION_EXCHANGES:]):
+        text = entry.get('user', '')
+        if _CHARGE_TOPIC_BREAK.search(_fold(text)):
+            return ''
+        kind = _explicit_charge_kind(text)
+        if kind:
+            return kind if kind != 'service' else ''
+        if len(text) > 160 or re.search(r'رابط|تسجيل|تفويض|مستند|ملف|فريق|نقل|شحن', _fold(text)):
+            return ''
+    return ''
+
+
+def _government_charge_failure_reply(question: str, entries: tuple[dict[str, str], ...] = ()) -> str | None:
+    kind = _government_charge_kind(question, entries)
+    if not kind:
+        return None
+    # Extract only a short screened user-described noun phrase, never assistant
+    # assertions or document content. A new shipment/topic resets prior details.
+    goods = ''
+    rows = list(entries[-MAX_CONVERSATION_EXCHANGES:])
+    for index, text in enumerate([e.get('user', '') for e in rows] + [question]):
+        correction = re.search(r'(?:لا\s*اقصد|ليس\s*قصدي|مش\s*قصدي|مو\s*قصدي|اقصد)\s+(?P<object>[\u0621-\u064a]+)', _fold(text))
+        if (_CHARGE_TOPIC_BREAK.search(_fold(text)) or (correction and not re.search(
+                r'اجرت|اجور|اتعاب|رسوم|تعرف|ضريب|جمارك', correction['object']))):
+            goods = ''
+        if not screen_question(text).allowed:
+            continue
+        match = re.search(r'(?:علي|البضاعه|بضاعتي|نوعها)\s+(?:(?:هي)\s+)?'
+                          r'(?P<goods>[\u0621-\u064a]+(?:\s+[\u0621-\u064a]+){0,3})', _fold(text))
+        if match:
+            candidate = re.split(r'\s+(?:من|الي|كم|ما|هل|ايش|وش|بس|وكم|واريد|اريد)\b', match['goods'])[0]
+            if candidate and not re.search(r'رسوم|ضريب|حساب|تعرف|سداد|دفع|اجور', candidate):
+                goods = candidate
+        elif (index and not _explicit_charge_kind(text) and _government_charge_kind(text, tuple(rows[:index]))
+              and len(text.split()) <= 8 and not re.search(r'[؟?]|كم|نسبه|رسوم|اقصد|ضريب|تعرف', _fold(text))):
+            goods = text
+    material_known = bool(re.search(r'خشب|خشبي|معدن|معدني|بلاستيك|جلد|زجاج|حديد|المنيوم|قطن|حرير', _fold(goods)))
+    detail_question = ('هل لديك البند الجمركي المحدد من المورد؟ النسبة تحتاج مطابقة الصنف في التعريفة الرسمية.' if material_known else
+                       'ما الصنف التفصيلي ومادته، أو رمزه الجمركي إن كان معروفًا؟' if goods else
+                       'ما السلعة وتفاصيلها، أو رمزها الجمركي إن كان معروفًا؟')
+    prefix = 'بخصوص ' + goods + ': ' if goods else ''
+    if kind == 'vat':
+        return prefix + ('ضريبة القيمة المضافة على الاستيراد تختلف عن الرسوم الجمركية وأتعاب المخلص والنقل. '
+            'لا تتوفر لدي معاملة ضريبية موثقة لهذه الشحنة لحساب مبلغها. '
+            + detail_question)
+    return prefix + ('الرسوم الجمركية تُحدد بحسب التصنيف الجمركي الفعلي للسلعة في تعريفة هيئة الزكاة والضريبة والجمارك، '
+        'وتختلف عن أتعاب التخليص والنقل وضريبة القيمة المضافة. لا تتوفر لدي نسبة موثقة لهذا الصنف لحساب الرسوم. '
+        + detail_question)
+
+
 def _pricing_question(value: str) -> bool:
     folded = _fold(value)
     return bool(_PRICE_TERMS.search(folded) or re.search(
@@ -1699,6 +1797,9 @@ def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
     """Useful known limitations without presenting a failed generation as success."""
     if using_document or reason in {'reply_privacy', 'reply_instruction'}:
         return FALLBACK_REPLY
+    government = _government_charge_failure_reply(question, safe_entries)
+    if government:
+        return government
     broker = _broker_failure_reply(question, safe_entries)
     if broker:
         return broker
@@ -2132,7 +2233,10 @@ source when necessary. Never claim that an absent document was read.'''
         system += _REVIEWED_MONEY_SYSTEM
     pricing_context = _reply_pricing_context(screened_question.safe_text, previous.entries,
                                              using_document=using_document)
-    if pricing_context and not money_targets:
+    government_charge = (not using_document and _government_charge_kind(screened_question.safe_text, previous.entries))
+    if government_charge:
+        system += _GOVERNMENT_CHARGE_SYSTEM
+    if pricing_context and not money_targets and not government_charge:
         system += '''\nThis is an ongoing pricing inquiry, but NO APPROVED RATE SOURCE
 is available. A number supplied by the user or earlier conversation is not an
 approved quote. If the current question asks for an actual price amount, explain briefly
@@ -2149,12 +2253,14 @@ physical dimension only; it never authorizes a price or an approval.'''
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     model = os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5').strip()
     if not key or not re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', model):
-        fallback = ((_broker_failure_reply(screened_question.safe_text, previous.entries)
+        fallback = ((_government_charge_failure_reply(screened_question.safe_text, previous.entries)
+                     or _broker_failure_reply(screened_question.safe_text, previous.entries)
                      or _customs_failure_reply(screened_question.safe_text, previous.entries))
                     if not using_document else None)
         return finish(fallback or FALLBACK_REPLY, False, False, 'model_unavailable')
     def model_failure(reason):
-        fallback = ((_broker_failure_reply(screened_question.safe_text, previous.entries)
+        fallback = ((_government_charge_failure_reply(screened_question.safe_text, previous.entries)
+                     or _broker_failure_reply(screened_question.safe_text, previous.entries)
                      or _customs_failure_reply(screened_question.safe_text, previous.entries))
                     if not using_document else None)
         return finish(fallback or FALLBACK_REPLY, True, False, reason)
