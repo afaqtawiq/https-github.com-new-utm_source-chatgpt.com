@@ -20,6 +20,16 @@ def run(client, app):
         with db() as c:
             c.execute('UPDATE stepup_auth SET expires_at=%s WHERE session_id=%s', (utcnow()+dt.timedelta(minutes=10),session['id']))
         assert client.get('/production-monitor').status_code == 200
+        with patch.object(m.mail, 'access_token', return_value='never-render-this-token') as refresh:
+            assert client.post('/production-monitor/check-email', data={'csrf':'bad'}).status_code == 403
+            refresh.assert_not_called()
+            response = client.post('/production-monitor/check-email', data={'csrf':csrf})
+            assert response.status_code == 200 and 'نجح تجديد' in response.text
+            assert 'never-render-this-token' not in response.text and not calls
+        with patch.object(m.mail, 'access_token', side_effect=RuntimeError('Google OAuth 400: invalid_grant')):
+            assert 'invalid_grant' in client.post('/production-monitor/check-email', data={'csrf':csrf}).text
+        with patch.object(m.mail, 'access_token', side_effect=RuntimeError('private-diagnostic-value')):
+            assert 'private-diagnostic-value' not in client.post('/production-monitor/check-email', data={'csrf':csrf}).text
         assert client.post('/production-monitor/settings', data={**data,'csrf':'bad'}).status_code == 403
         assert client.post('/production-monitor/settings', data={**data,'minutes':'0'}).status_code == 400
         with db() as c:
