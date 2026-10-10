@@ -2875,3 +2875,119 @@ def test_rejected_changed_port_followup_remains_in_next_model_context(provider, 
     data = json.loads(json.loads(provider['requests'][-1].content)['messages'][0]['content'])
     assert data['history'][-1]['user'] == 'ميناء الدمام'
     assert '4321' not in json.dumps(data)
+
+# Government charges are not a broker quotation. All rates remain unverified.
+@pytest.mark.parametrize('question,kind', [
+    ('كم الرسوم الجمركية علي الاثاث المنزلي', 'duty'),
+    ('بسال عن رسوم التعرفة الجمركية', 'duty'),
+    ('لا أقصد أجرتكم، أقصد رسوم الجمارك', 'duty'),
+    ('كم ضريبة القيمة المضافة على الأثاث؟', 'vat'),
+    ('ما الجمارك وضريبة القيمة المضافة على الأثاث؟', 'vat'),
+    ('كم سعر التخليص لحاوية40 قدم', ''),
+    ('كم أجرتكم للتخليص؟', ''), ('كم تكلفة النقل من جدة للدمام؟', ''),
+    ('ما تعرفة النقل؟', ''),
+])
+def test_government_charge_category_is_distinct_from_service_price(question, kind):
+    assert p._government_charge_kind(question) == kind
+
+
+def test_actual_tariff_correction_journey_retains_user_furniture(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    provider['answer'] = 'السعر 500 ريال.'
+    first = chat_reply('كم الرسوم الجمركية علي الاثاث المنزلي')
+    assert first.used_model and not first.ok
+    assert 'الاثاث المنزلي' in first.text and 'الصنف التفصيلي ومادته' in first.text
+    assert 'سعر تخليص' not in first.text and '500' not in first.text
+    row = chat_row(question='كم الرسوم الجمركية علي الاثاث المنزلي', reply_text=first.text)
+    provider['answer'] = 'سأدفع الرسوم عنك.'
+    second = chat_reply('بسال عن رسوم التعرفة الجمركية', [row])
+    assert second.used_model and not second.ok
+    assert 'الاثاث المنزلي' in second.text and 'ما المنفذ' not in second.text
+    payload = json.loads(provider['requests'][-1].content)
+    assert 'Government-charge guidance' in payload['system']
+    assert 'This is an ongoing pricing inquiry' not in payload['system']
+    assert json.loads(payload['messages'][0]['content'])['history'][0]['user'] == row['question']
+
+
+@pytest.mark.parametrize('question', ['كم الرسوم الجمركية علي الاثاث المنزلي', 'لا أقصد أجرتكم، أقصد رسوم الجمارك'])
+def test_current_duty_correction_overrides_broker_quote_history(provider, monkeypatch, question):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(question='كم سعر التخليص؟', reply_text=p.CUSTOMS_PRICE_REVIEW_REPLY)]
+    provider['answer'] = 'السعر 500 ريال.'
+    result = chat_reply(question, rows)
+    assert not result.ok and 'التصنيف الجمركي' in result.text
+    assert 'سعر تخليص' not in result.text
+
+
+@pytest.mark.parametrize('question', ['كم سعر التخليص؟', 'كم تكلفة النقل؟', 'موضوع جديد، ما خدمات فريق العمل؟', 'كيف أسجل في فسح؟'])
+def test_new_service_or_topic_does_not_inherit_tariff_intent(provider, monkeypatch, question):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(question='رسوم الجمارك على الاثاث المنزلي؟', reply_text='يلزم تحديد الصنف التفصيلي ومادته.')]
+    provider['answer'] = 'سأدفع الرسوم.'
+    result = chat_reply(question, rows)
+    assert 'بخصوص الاثاث' not in result.text
+    assert 'التصنيف الجمركي الفعلي' not in result.text
+
+
+@pytest.mark.parametrize('answer', [
+    'رسوم الأثاث 15 بالمئة.', 'الرسوم الجمركية 500 ريال.',
+    'البند الجمركي هو 940360000000.', 'سأسدد الرسوم عنك.',
+    'تم اعتماد الإعفاء الجمركي.', 'لا أعرف النسبة، لكن سأدفعها.',
+])
+def test_duty_intent_never_authorizes_unverified_rate_code_or_execution(provider, answer):
+    provider['answer'] = answer
+    result = chat_reply('كم الرسوم الجمركية على الأثاث؟ الميزانية 500 ريال')
+    assert result.used_model and not result.ok
+    assert answer not in result.text and '500' not in result.text
+
+
+def test_safe_duty_clarification_can_pass_existing_guards(provider):
+    provider['answer'] = 'تحديد الرسوم يعتمد على التصنيف الجمركي للسلعة. ما الصنف التفصيلي ومادته؟'
+    result = chat_reply('كم الرسوم الجمركية على الأثاث المنزلي؟')
+    assert result.used_model and result.ok and result.text == provider['answer']
+
+
+@pytest.mark.parametrize('change', [{'sender': 'other'}, {'authorization_generation': 2},
+    {'created_at': (CHAT_NOW-timedelta(days=2)).isoformat(), 'completed_at': (CHAT_NOW-timedelta(days=2)).isoformat()},
+    {'question': 'كلمة المرور secret-value'}])
+def test_tariff_fallback_does_not_recover_goods_from_blocked_history(provider, monkeypatch, change):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    row = chat_row(**({'question': 'كم الرسوم الجمركية على الاثاث المنزلي', 'reply_text': 'ما الصنف التفصيلي ومادته؟'} | change))
+    provider['answer'] = 'السعر 500 ريال.'
+    result = chat_reply('بسال عن رسوم التعرفة الجمركية', [row])
+    assert 'الاثاث المنزلي' not in result.text
+
+
+def test_tariff_privacy_failure_never_bypasses_generic_guard(provider):
+    provider['answer'] = 'كلمة المرور secret-value'
+    result = chat_reply('كم الرسوم الجمركية على الأثاث؟')
+    assert not result.ok and result.text == p.FALLBACK_REPLY
+
+
+@pytest.mark.parametrize('question', ['وين مكتبكم؟', 'هل عندكم تخزين؟', 'حدثني عن الشركة', 'ما ضريبة الدخل؟'])
+def test_unrelated_business_questions_do_not_inherit_duty_context(provider, monkeypatch, question):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(question='كم الرسوم الجمركية على الاثاث المنزلي؟', reply_text='ما الصنف التفصيلي ومادته؟')]
+    provider['answer'] = 'سأدفع الرسوم.'
+    result = chat_reply(question, rows)
+    assert 'بخصوص الاثاث' not in result.text and 'التصنيف الجمركي الفعلي' not in result.text
+
+
+def test_explicit_goods_correction_drops_old_furniture(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(question='كم الرسوم الجمركية على الاثاث المنزلي؟', reply_text='ما الصنف التفصيلي ومادته؟')]
+    provider['answer'] = 'السعر 500 ريال.'
+    result = chat_reply('لا أقصد الأثاث، أقصد الملابس، كم الرسوم الجمركية؟', rows)
+    assert not result.ok and 'بخصوص الاثاث' not in result.text
+    assert 'التصنيف الجمركي' in result.text
+
+
+@pytest.mark.parametrize('detail', ['كراسي خشبية', 'البضاعة كراسي خشبية'])
+def test_duty_followup_keeps_subtype_and_material_without_reasking(provider, monkeypatch, detail):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(question='كم الرسوم الجمركية على الاثاث المنزلي؟', reply_text='ما الصنف التفصيلي ومادته؟')]
+    provider['answer'] = 'الرسوم 500 ريال.'
+    result = chat_reply(detail, rows)
+    assert not result.ok and 'كراسي خشبيه' in p._fold(result.text)
+    assert 'ما الصنف التفصيلي ومادته' not in result.text
+    assert 'البند الجمركي' in result.text
