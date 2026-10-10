@@ -314,7 +314,9 @@ async def processing(job):
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,review_id=review_id,
             diagnostics={'document_context_reason':'prior_unread_attachment','unread_source_job_id':unread['id']} if unread and document_status in ('unavailable','quarantined') else {})
     if not data.get('question_allowed'):
-        if data.get('question_kind') == 'clarify_driver':
+        if data.get('question_reason') == 'broker_execution_request':
+            reply = privacy.BROKER_EXECUTION_REPLY
+        elif data.get('question_kind') == 'clarify_driver':
             reply = privacy.DRIVER_CLARIFY_REPLY
         elif data.get('question_kind') == 'clarify_action':
             reply = privacy.ACTION_CLARIFY_REPLY

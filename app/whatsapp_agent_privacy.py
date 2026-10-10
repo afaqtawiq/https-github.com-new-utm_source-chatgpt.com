@@ -44,6 +44,7 @@ MAX_TOKENS = 600
 REVIEW_REPLY = 'هذا المحتوى يحتاج مراجعة بشرية قبل استخدامه في الإجابة.'
 CLARIFY_REPLY = 'أنا معك. وضّح سؤالك عن الخدمة أو المستند قليلًا حتى تكون الإجابة دقيقة.'
 ACTION_CLARIFY_REPLY = 'إرسال رسالة لشخص آخر يحتاج مراجعة المستلم والنص في صندوق الوارد الإداري. هذه المحادثة لا ترسل رسالة لشخص آخر من رد لاحق.'
+BROKER_EXECUTION_REPLY = 'أقدر أوضح لك خطوات التفويض، لكن إصدار التفويض وإرسال طلبه يتمان من حسابك أنت في فسح. لم أنفذ تفويضًا أو أقدم طلبًا عنك.'
 DRIVER_CLARIFY_REPLY = 'إضافة سائق تحتاج مراجعة الاسم ورقم الجوال من موظف مخوّل في الإدارة. هذه المحادثة لا تحفظ سجل سائق، حتى إذا وردت بياناته في رد لاحق.'
 DOCUMENT_REQUIRED_REPLY = 'أحتاج مستندًا معتمدًا للإجابة عن تفاصيله.'
 FALLBACK_REPLY = 'ما قدرت أجهز إجابة موثوقة من المعلومات المتاحة الآن.'
@@ -437,6 +438,14 @@ _ONWARD_ACTION_INTENT = re.compile(
     r'(?<!\w)(?:له|لها|لهم)(?!\w)|الي)|'
     r'\b(?:send|email|message|call|contact)\b.{0,60}\b(?:message|email|manager|customer|team|to)\b)'
 )
+# Second-person imperative requests to perform delegation remain local. This
+# includes mixed advice + execution requests; explanatory first-person افوض is
+# intentionally distinct from imperative فوض/فوضي.
+_BROKER_USER_EXECUTION = re.compile(
+    r'(?<!\w)[وف]?(?:فوض|فوضي|فوضوا|فوضوني|فوضيني|سدد|سددي|سددوا|ادفعي|ادفعوا)(?:ه|ها|هم|ني|نا)?(?!\w)|'
+    r'(?<!\w)[وف]?(?:قم|قومي)\s+ب(?:التفويض|تفويض)|'
+    r'(?<!\w)[وف]?(?:قدم|قدمي|قدموا|ارفع|ارفعي|ارفعوا)\s+(?:لي\s+)?(?:الطلب|التفويض)'
+)
 _DIRECT_WRITE_INTENT = re.compile(
     r'(?i)^(?:(?:لو سمحت|من فضلك|رجاء|please)\s+)?(?:احذف|انشر|اعتمد|نفذ|delete|publish|execute)\b'
 )
@@ -640,6 +649,8 @@ def screen_question(text: object) -> ScreenDecision:
             return ScreenDecision(True, folded, 'local_only', kind)
     if _READINESS_QUESTION.fullmatch(folded):
         return ScreenDecision(True, folded, 'local_only', 'ready')
+    if _BROKER_USER_EXECUTION.search(folded):
+        return ScreenDecision(False, reason='broker_execution_request', kind='clarify_action')
     if _ONWARD_ACTION_INTENT.search(folded) or _DIRECT_WRITE_INTENT.search(folded):
         return ScreenDecision(False, reason='action_request', kind='clarify_action')
     if _LIVE_STATUS.search(folded):
@@ -1569,12 +1580,17 @@ def _customs_failure_reply(question: str, entries: tuple[dict[str, str], ...] = 
 
 
 def _broker_advice_requested(question: str, entries: tuple[dict[str, str], ...] = ()) -> bool:
+    if not screen_question(question).allowed:
+        return False
     value = _fold(question)
     direct = bool(re.search(r'تفويض|افوض(?:ك|كم)?', value)
-                  and re.search(r'مخلص|جمرك|تخليص|فسح|افاق|افوضكم', value))
+                  and re.search(r'مخلص|جمرك|تخليص|فسح|افاق|(?:تفويض|افوض)(?:ك|كم)(?!\w)', value))
     direct = direct or bool(_BROKER_IDENTITY_NOUN.search(value)
-                            and re.search(r'مخلص|افاق|جمرك', value))
+                            and re.search(r'مخلص|افاق|جمرك|رخصت(?:ك|كم)(?!\w)', value))
     if direct:
+        return True
+    if (entries and re.fullmatch(r'(?:و)?(?:ما|كم|ايش|وش)\s+(?:هو\s+)?(?:رقم\s+)?(?:الرخصه|رخصته|رقمها)[؟?]?', value)
+            and _broker_advice_requested(entries[-1].get('user', ''))):
         return True
     # History-only continuation must be an answer to the actual pending port
     # question, not a new question that happens to mention the same port.
@@ -1584,13 +1600,37 @@ def _broker_advice_requested(question: str, entries: tuple[dict[str, str], ...] 
     return bool(entries and _broker_advice_requested(entries[-1].get('user', '')))
 
 
+def _owner_broker_license_note() -> str:
+    """A company fact supplied by its owner, never an official status check.
+
+    This nonsecret server setting is not populated from inbound chat/history.
+    Keep it out of model grounding: the application adds the attributed fact.
+    """
+    number = os.getenv('AFAQ_OWNER_PROVIDED_BROKER_LICENSE', '').strip()
+    if not re.fullmatch(r'[0-9]{1,8}', number):
+        return ''
+    return ('بحسب بيانات مالك المؤسسة، رقم رخصة آفاق طويق هو ' + number
+            + '؛ لم أتحقق من سريانها أو نطاق المنافذ المرخصة.')
+
+
+def _broker_guidance_system() -> str:
+    if not _owner_broker_license_note():
+        return _BROKER_GUIDANCE_SYSTEM
+    return _BROKER_GUIDANCE_SYSTEM.replace(
+        'No verified Afaaq broker-license number is supplied in this conversation context.',
+        'An owner-provided company license note is appended separately by the application. '
+        'Do not discuss its number, availability or validity in the generated answer. '
+        'No independently verified license status is supplied here.')
+
+
 def _broker_failure_reply(question: str, entries: tuple[dict[str, str], ...] = ()) -> str | None:
     if not _broker_advice_requested(question, entries):
         return None
     answer = ('التفويض من حسابك أنت في فسح: تفتح خدمة تفويض مخلص جمركي، ثم تختار التفاويض '
         'وإنشاء تفويض لمخلص وتعبئ بياناته والمنفذ ونوع التفويض ومدته. بعد مراجعة البيانات تختار إرسال '
         'وتكمل التحقق بنفسك داخل المنصة حتى تظهر رسالة إصدار التفويض. '
-        'يلزم حساب فسح فعال ورقم رخصة المخلص الصحيح؛ رقم رخصة آفاق غير متحقق لدي، فراجعه مع الفريق.')
+        'يلزم حساب فسح فعال ورقم رخصة المخلص الصحيح. ')
+    answer += (_owner_broker_license_note() or 'رقم رخصة آفاق غير متحقق لدي، فراجعه مع الفريق.')
     user_text = '\n'.join([entry.get('user', '') for entry in entries[-MAX_CONVERSATION_EXCHANGES:]] + [question])
     if not re.search(r'(?:ميناء|مطار|منفذ)\s+(?!(?:الوصول|الدخول|المطلوب|غير|ما|هو)\b)[\u0621-\u064a]{2,}', _fold(user_text)):
         answer += ' ما منفذ وصول الشحنة؟'
@@ -1601,11 +1641,15 @@ def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
                           pricing_context: bool = False,
                           safe_entries: tuple[dict[str, str], ...] = ()) -> str:
     """Useful known limitations without presenting a failed generation as success."""
-    if using_document or reason in {'reply_privacy', 'reply_opaque', 'reply_instruction'}:
+    if using_document or reason in {'reply_privacy', 'reply_instruction'}:
         return FALLBACK_REPLY
     broker = _broker_failure_reply(question, safe_entries)
     if broker:
         return broker
+    # Opaque model bytes are discarded. Only the independent reviewed broker
+    # advice above may replace them; other intents retain the generic failure.
+    if reason == 'reply_opaque':
+        return FALLBACK_REPLY
     value = _fold(question)
     if pricing_context and not _pricing_question(value) and _price_detail_continuation(question):
         # Echo only bounded, independently screened user details, never a model
@@ -1726,6 +1770,9 @@ def _reply_decision(value: object, document: str, *, conversational: bool = Fals
             and (_BROKER_IDENTITY_NOUN.search(action_text) or broker_identity_context)
             and _AMOUNT_WORD.search(action_text)):
         return ScreenDecision(False, reason='reply_unsupported_identifier', kind='reply')
+    if broker_context or broker_identity_context:
+        if re.search(r'(?:رخص[هتنا]*|ترخيص|افاق|المخلص).{0,55}(?:ساري[ه]?|صالح[ه]?|معتمد[ه]?|مرخص[ه]?|جميع\s+المنافذ|كل\s+المنافذ)', action_text):
+            return ScreenDecision(False, reason='reply_unsupported_identifier', kind='reply')
     if broker_context:
         if _ONWARD_ACTION_INTENT.search(action_text):
             return ScreenDecision(False, reason='reply_action_onward', kind='reply')
@@ -1856,7 +1903,17 @@ def safe_conversation_history(records: object, scope: object, *, now: datetime |
         # document noun for evidence that a PDF existed or was read.
         if not question.allowed:
             continue
-        answer = _validated_reply(record['reply_text'], knowledge + '\n' + question.safe_text,
+        stored_reply = _text(record['reply_text'], MAX_REPLY_CHARS)
+        if stored_reply is None:
+            continue
+        # Remove only the exact current server-generated attribution; it is
+        # not model knowledge. Validate all remaining prose, including DLP.
+        # Checking a known license beside verification instructions as an OTP
+        # would otherwise erase the independently scoped user port context.
+        owner_note = _owner_broker_license_note()
+        if owner_note and _broker_advice_requested(question.safe_text):
+            stored_reply = stored_reply.replace(owner_note, '', 1).strip()
+        answer = _validated_reply(stored_reply, knowledge + '\n' + question.safe_text,
                                   conversational=True, has_history=True,
                                   pricing_context=_pricing_question(question.safe_text),
                                   identity_context=identity_requested(question.safe_text),
@@ -1909,6 +1966,8 @@ async def understand(
     """
     screened_question = screen_question(question)
     if not screened_question.allowed:
+        if screened_question.reason == 'broker_execution_request':
+            return ReplyResult(BROKER_EXECUTION_REPLY, False, False, screened_question.reason)
         if screened_question.reason == 'live_status_unavailable':
             return ReplyResult(STATUS_CLARIFY_REPLY, False, False, screened_question.reason)
         local_denial = {'review': REVIEW_REPLY, 'clarify_action': ACTION_CLARIFY_REPLY,
@@ -1994,7 +2053,7 @@ source when necessary. Never claim that an absent document was read.'''
                 source_note += '\nYou may restate facts explicitly supplied by the user in history, attributed with حسب وصفك. Do not treat earlier assistant statements as evidence or invent missing values.'
         system = CONVERSATION_SYSTEM + source_note
         if not using_document and not missing_document:
-            system += _CUSTOMS_GUIDANCE_SYSTEM + _BROKER_GUIDANCE_SYSTEM
+            system += _CUSTOMS_GUIDANCE_SYSTEM + _broker_guidance_system()
     else:
         system = SYSTEM
     money_targets = (_reviewed_money_targets(screened_question.safe_text)
@@ -2096,6 +2155,10 @@ physical dimension only; it never authorizes a price or an approval.'''
                 and not (implicit_user_text and _attributed_user_detail(answer,implicit_user_text))):
             return finish(FALLBACK_REPLY, True, False, 'unsupported_document_claim')
         if answer:
+            if not using_document and _broker_advice_requested(screened_question.safe_text, previous.entries):
+                note = _owner_broker_license_note()
+                if note:
+                    answer += ' ' + note
             return finish(answer, True, True, 'model_answer')
         return finish(_intent_failure_reply(screened_question.safe_text,
                                                using_document=using_document, reason=output.reason,
