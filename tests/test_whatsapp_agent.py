@@ -882,3 +882,16 @@ def test_new_shipment_boundary_cannot_fall_out_of_retained_history(setup,monkeyp
     assert any(row['question']=='12 كرتون' for row in calls[-1][2]['conversation_history'])
     explicit=agent.accept_inbound(payload(650,'كم عدد الكراتين في الملف؟'));assert tick()
     assert store.get_job(explicit['job_id'])['document_status']=='ok'
+
+
+@pytest.mark.parametrize('question', ['طريقة تفويضكم وفوضيه عني', 'اعطني طريقة تفويضكم وارفعوا الطلب'])
+def test_broker_execution_is_local_through_actual_worker(setup, question):
+    result = agent.accept_inbound(payload(1, question))
+    assert tick()
+    job = store.get_job(result['job_id'])
+    assert job['status'] == 'sent'
+    assert not job['payload']['question_allowed'] and not job['payload']['question']
+    assert job['payload']['question_reason'] == 'broker_execution_request'
+    assert job['reply_text'] == privacy.BROKER_EXECUTION_REPLY
+    assert not setup['model_calls'] and not setup['provider_reads']
+    assert len(setup['sends']) == 1 and setup['sends'][0][0] == OWNER
