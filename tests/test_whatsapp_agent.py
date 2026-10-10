@@ -895,3 +895,37 @@ def test_broker_execution_is_local_through_actual_worker(setup, question):
     assert job['reply_text'] == privacy.BROKER_EXECUTION_REPLY
     assert not setup['model_calls'] and not setup['provider_reads']
     assert len(setup['sends']) == 1 and setup['sends'][0][0] == OWNER
+
+
+@pytest.mark.parametrize('question,expected', [
+    ('رابط فسح', privacy.FASAH_LINK_REPLY),
+    ('ارسل لي رابط منصة فسح وطريقة التسجيل', privacy.FASAH_REGISTRATION_REPLY),
+])
+def test_worker_official_service_never_reserves_or_calls_model(setup, monkeypatch, question, expected):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Official local service answer must not reserve model budget')
+    monkeypatch.setattr(store, 'reserve_model', forbidden)
+    result = agent.accept_inbound(payload(1, question)); assert tick()
+    job = store.get_job(result['job_id'])
+    assert job['status'] == 'sent' and job['reply_text'] == expected
+    assert job['model_started_at'] is None and not setup['model_calls'] and not setup['provider_reads']
+    assert job['diagnostics']['model_attempted'] is False
+    assert job['diagnostics']['model_success'] is False
+    assert job['diagnostics']['model_reason'] == 'local_official_service'
+    assert len(setup['sends']) == 1 and setup['sends'][0][0] == OWNER
+
+
+def test_official_service_reply_at_exhausted_budget_without_reset(setup):
+    for number in range(10):
+        accepted = agent.accept_inbound(payload(number, 'ما الخدمات المتاحة؟'))
+        job = store.claim_job(account_id=ACCOUNT)
+        assert job['id'] == accepted['job_id']
+        store.checkpoint_document(job['id'], job['lease_token'], text='', sha256=None, status='none')
+        assert store.reserve_model(job['id'], job['lease_token'])
+        store.prepare_reply(job['id'], job['lease_token'], terminal_status='uncertain')
+    local = agent.accept_inbound(payload(20, 'رابط فسح')); assert tick()
+    job = store.get_job(local['job_id'])
+    assert job['status'] == 'sent' and job['reply_text'] == privacy.FASAH_LINK_REPLY
+    assert job['model_started_at'] is None and not setup['model_calls']
+    ordinary = agent.accept_inbound(payload(21, 'كيف أجهز شحنة؟')); assert tick()
+    assert store.get_job(ordinary['job_id'])['reply_text'] == store.MODEL_BUDGET_NOTICE
