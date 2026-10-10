@@ -1579,7 +1579,63 @@ def _customs_failure_reply(question: str, entries: tuple[dict[str, str], ...] = 
     return answer
 
 
+# Fixed public service entry verified from ZATCA eServices-234/235 on 2026-10-10.
+# URLs from users, history or model output never populate this value.
+FASAH_OFFICIAL_URL = 'https://zatca.fasah.sa/ar/login/1.0/'
+FASAH_LINK_REPLY = 'هذا رابط فسح الرسمي: ' + FASAH_OFFICIAL_URL
+FASAH_REGISTRATION_REPLY = (FASAH_LINK_REPLY + '\n'
+    'لإنشاء حساب، استخدم خيار التسجيل في صفحة الدخول وأكمل البيانات والتفعيل داخل المنصة. '
+    'خدمة تسجيل مستورد أو مصدر تتطلب رقم السجل التجاري أو رقم الهوية؛ أدخل البيانات داخل المنصة فقط. '
+    'تفويض المخلص إجراء مستقل بعد تفعيل الحساب.')
+FASAH_EXECUTION_REPLY = ('أقدر أوضح لك طريقة الدخول والتسجيل، لكن إنشاء الحساب والتفعيل يتمان منك داخل فسح. '
+    'لم أنشئ حسابًا أو أسجل طلبًا عنك. ' + FASAH_LINK_REPLY)
+_FASAH_LOCAL_REPLIES = frozenset((FASAH_LINK_REPLY, FASAH_REGISTRATION_REPLY, FASAH_EXECUTION_REPLY))
+_FASAH_HISTORY_REPLIES = frozenset(text.replace(FASAH_OFFICIAL_URL, '').strip()
+                                 for text in _FASAH_LOCAL_REPLIES)
+
+
+def _fasah_service_intent(question: str, entries: tuple[dict[str, str], ...] = ()) -> str:
+    value = _fold(question)
+    named = bool(re.search(r'(?<!\w)(?:فسح|fasah)(?!\w)', value))
+    purpose = re.search(r'رابط|موقع|منص[هت]|دخول|ادخل|تسجيل|اسجل|سجلني|سجليني|حساب|لينك|link|register|sign\s*up', value)
+    if not purpose or re.search(r'سابر|ابشر|ناجز|سعر|تكلفه|حموله|مستند|ملف|الي\s+(?:المدير|العميل)', value):
+        return ''
+    # A short referential follow-up needs a same-thread service/delegation turn;
+    # a new named service or business topic cannot inherit this destination.
+    contextual = bool(entries and (re.search(r'فسح|fasah', _fold(entries[-1].get('user', '')))
+                       or _broker_advice_requested(entries[-1].get('user', ''))
+                       or entries[-1].get('assistant') in _FASAH_HISTORY_REPLIES)
+                      and re.fullmatch(r'[\u0621-\u064a\s؟?]+', value)
+                      and set(re.findall(r'[\u0621-\u064a]+', value)) <= {
+                          'و', 'كيف', 'وين', 'اين', 'من', 'ادخل', 'للدخول', 'الدخول', 'دخول',
+                          'رابط', 'الرابط', 'رابطها', 'رابطه', 'الموقع', 'موقع', 'موقعها', 'موقعه',
+                          'المنصه', 'منصه', 'ارسل', 'ارسلي', 'لي', 'اعطني', 'عطيني', 'ممكن',
+                          'لو', 'سمحت', 'ما', 'هي', 'هو', 'طريقة', 'طريقه', 'التسجيل', 'تسجيل',
+                          'اسجل', 'فيها', 'فيه', 'انشاء', 'حساب', 'جديد', 'وكيف'}
+                      and len(value.split()) <= 10
+                      and not re.search(r'سابر|ابشر|ناجز|شحن|نقل|فاتور|مستند|ملف|عميل|مدير|مخلص', value))
+    if not named and not contextual:
+        return ''
+    if re.search(r'(?<!\w)[وف]?(?:سجلني|سجليني|سجلوا|انشئ|انشئي|افتحي|فعل|فعلي)(?!\w)', value):
+        return 'execution'
+    return 'registration' if re.search(r'تسجيل|اسجل|حساب|register|sign\s*up', value) else 'link'
+
+
+def local_fasah_service_reply(question: object, conversation_history: object = (),
+                               conversation_scope: object = None) -> str | None:
+    screened = screen_question(question)
+    if not screened.allowed:
+        return None
+    previous = safe_conversation_history(conversation_history, conversation_scope)
+    if not previous.allowed:
+        return None
+    intent = _fasah_service_intent(screened.safe_text, previous.entries)
+    return {'link': FASAH_LINK_REPLY, 'registration': FASAH_REGISTRATION_REPLY,
+            'execution': FASAH_EXECUTION_REPLY}.get(intent)
+
+
 def _broker_advice_requested(question: str, entries: tuple[dict[str, str], ...] = ()) -> bool:
+    entries = tuple(entry for entry in entries if entry.get('assistant') not in _FASAH_HISTORY_REPLIES)
     if not screen_question(question).allowed:
         return False
     value = _fold(question)
@@ -1910,15 +1966,22 @@ def safe_conversation_history(records: object, scope: object, *, now: datetime |
         # not model knowledge. Validate all remaining prose, including DLP.
         # Checking a known license beside verification instructions as an OTP
         # would otherwise erase the independently scoped user port context.
+        # There are two exact application-generated broker replies (with or
+        # without the missing-port question), including contextual port turns.
+        exact_broker_reply = stored_reply in (
+            _broker_failure_reply('كيف أفوضكم؟'),
+            _broker_failure_reply('كيف أفوضكم عبر ميناء محدد؟'))
+        if stored_reply in _FASAH_LOCAL_REPLIES:
+            stored_reply = stored_reply.replace(FASAH_OFFICIAL_URL, '').strip()
         owner_note = _owner_broker_license_note()
-        if owner_note and _broker_advice_requested(question.safe_text):
+        if owner_note and (exact_broker_reply or _broker_advice_requested(question.safe_text)):
             stored_reply = stored_reply.replace(owner_note, '', 1).strip()
-        answer = _validated_reply(stored_reply, knowledge + '\n' + question.safe_text,
+        answer = (stored_reply if (stored_reply in _FASAH_HISTORY_REPLIES or exact_broker_reply) else _validated_reply(stored_reply, knowledge + '\n' + question.safe_text,
                                   conversational=True, has_history=True,
                                   pricing_context=_pricing_question(question.safe_text),
                                   identity_context=identity_requested(question.safe_text),
                                   broker_context=_broker_advice_requested(question.safe_text),
-                                  broker_identity_context=bool(_BROKER_IDENTITY_NOUN.search(_fold(question.safe_text))))
+                                  broker_identity_context=bool(_BROKER_IDENTITY_NOUN.search(_fold(question.safe_text)))))
         if answer is None:
             continue
         if (_ASSERTED_DOCUMENT_ACCESS.search(_fold(answer))
@@ -1984,6 +2047,10 @@ async def understand(
             ok, reason = False, 'reply_format'
         return ReplyResult(text, used_model, ok, reason)
 
+    if document_text in ('', None) and document_sha256 in ('', None) and not history:
+        service_reply = local_fasah_service_reply(screened_question.safe_text, conversation_history, conversation_scope)
+        if service_reply:
+            return finish(service_reply, False, False, 'local_official_service')
     identity = local_identity_reply(screened_question.safe_text)
     if identity and document_text in ('', None) and document_sha256 in ('', None) and not history:
         return finish(identity, False, True, 'local_identity')

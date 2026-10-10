@@ -199,6 +199,7 @@ async def processing(job):
     if job['account_id'] != z.account_id() or not enabled(settings,job['sender']):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
+    local_reason = None
     text, digest, source_id = '', None, None
     review_id = None
     model_hashes = settings['approved_sha256']
@@ -332,6 +333,10 @@ async def processing(job):
         reply = 'وصل ملف PDF، وأوقفته للمراجعة المحلية قبل مشاركته مع نموذج الفهم. لم أعتمد محتواه أو أسجل منه أي حركة.'
     elif document_status == 'unavailable':
         reply = 'وصلتني بيانات المرفق، لكن لم أتمكن من قراءة محتواه في هذا المسار. لم أستنتج منه معلومات؛ يلزم مراجعته مباشرة.'
+    elif not data.get('attachments') and not text and (service_reply := privacy.local_fasah_service_reply(
+            data['question'], conversation_history, conversation_scope)):
+        reply = service_reply
+        local_reason = 'local_official_service'
     elif not data.get('attachments') and (identity_reply := privacy.local_identity_reply(data['question'])):
         reply = identity_reply
     elif not data.get('attachments') and data.get('question_kind') in ('greeting','thanks','ready'):
@@ -367,7 +372,8 @@ async def processing(job):
             return
     await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=reply,
         diagnostics={'model_attempted':False,'model_success':False,'model_reason':'document_unread'}
-        if document_status in ('unavailable','quarantined','reference_unavailable') else {})
+        if document_status in ('unavailable','quarantined','reference_unavailable') else
+        {'model_attempted':False,'model_success':False,'model_reason':local_reason} if local_reason else {})
 
 
 async def dispatch(job):
