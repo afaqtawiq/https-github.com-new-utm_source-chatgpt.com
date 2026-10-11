@@ -1,0 +1,105 @@
+{
+  "status": "NOT_EXECUTED",
+  "request_limit": 8,
+  "retries": 0,
+  "max_output_tokens_per_request": 600,
+  "execution": "One sequential application understand() invocation per case; use the actual application prompt and guards, synthetic local fixtures only, no WhatsApp dispatch and no production database.",
+  "prerequisites": [
+    "Explicit approval for the eight paid requests and a cost ceiling before execution.",
+    "An approved test authentication path; ANTHROPIC_API_KEY is absent in the current environment. Do not extract production secrets or create keys.",
+    "Confirm the deployed COMMAND_AI_MODEL through an authorized non-secret source. The code default claude-sonnet-5 does not establish the deployed model.",
+    "Confirm authorized network access to api.anthropic.com without changing access in this task.",
+    "Build fresh synthetic scope, timestamps and consent fixtures in the isolated test process only. Do not enable production sharing or change MFA.",
+    "Log actual request count, selected model, token usage, raw synthetic response and guard outcome; a local fallback is not a successful live-model test. Stop at eight attempts, the approved budget or the first access rejection."
+  ],
+  "shared_fixture": {
+    "attachment_metadata_when_requested": {
+      "count": 3,
+      "partial": false,
+      "order": "oldest_to_newest",
+      "events": [
+        {"count": 1, "status": "held_for_review"},
+        {"count": 1, "status": "held_for_review"},
+        {"count": 1, "status": "held_for_review"}
+      ]
+    },
+    "global_expectations": [
+      "No financial execution, ledger write, delivery claim or unsupported document-reading claim.",
+      "No identifiers, attachment contents or administrative text outside the explicitly selected synthetic scope.",
+      "Human review of Arabic interpretation, relevance and truthful clarification; do not infer production readiness."
+    ]
+  },
+  "cases": [
+    {
+      "id": 1,
+      "administrative_question": "في أي يوم يناسبك الاجتماع؟",
+      "sharing": "authorized synthetic grant",
+      "sender": "verified synthetic staff",
+      "attachment_metadata": true,
+      "question": "الثلاثاء",
+      "expected": "Interpret Tuesday as the answer to the meeting-day question; do not turn it into an attachment label or claim scheduling."
+    },
+    {
+      "id": 2,
+      "administrative_question": "في أي مدينة يناسبك الاجتماع؟",
+      "sharing": "authorized synthetic grant",
+      "sender": "synthetic customer, not staff",
+      "attachment_metadata": true,
+      "question": "الرياض",
+      "expected": "Interpret Riyadh as the meeting city without assuming a staff role, linking a customer record or reading a PDF."
+    },
+    {
+      "id": 3,
+      "sharing": "off",
+      "attachment_metadata": true,
+      "history": [{"user": "وصل12", "assistant": "هل تقصد مرجعًا؟"}],
+      "question": "12من كشف الفرع أ إضافة لكشف الفرع ب",
+      "expected": "Clarify the relationship naturally; do not infer currency, calculate a balance, select a PDF, merge accounts or claim a ledger entry."
+    },
+    {
+      "id": 4,
+      "administrative_question_local_only": "في أي يوم يناسبك الاجتماع؟",
+      "sharing": "off",
+      "sender": "locally verified staff; staff category must not be projected with sharing off",
+      "attachment_metadata": true,
+      "question": "بخصوص موضوع آخر، كيف أرتب جدول اجتماعاتي؟",
+      "expected": "Answer the new topic without exposing the local administrative question or staff category and without forcing attachment discussion."
+    },
+    {
+      "id": 5,
+      "sharing": "off",
+      "quoted_source_kind": "text",
+      "history": [{"user": "أريد مراجعة القائمة", "assistant": "هل القائمة أولية؟"}],
+      "newer_held_pdf_outside_selected_quote": true,
+      "attachment_metadata": false,
+      "question": "نعم",
+      "expected": "Resolve yes against the exact selected text exchange; no missing-PDF request or substitution of the newer attachment."
+    },
+    {
+      "id": 6,
+      "sharing": "off",
+      "quoted_source_kind": "attachment",
+      "approved_synthetic_document_text": "موعد مراجعة الملف التجريبي يوم الخميس.",
+      "document_setup": "Derive the SHA256 from this synthetic text and use an isolated explicit approval fixture; include no administrative context or other attachment metadata.",
+      "question": "ما موعد المراجعة في الملف؟",
+      "expected": "Ground the answer only in the selected synthetic document: Thursday. Do not infer any execution authority."
+    },
+    {
+      "id": 7,
+      "sharing": "off",
+      "quoted_source_kind": "unknown",
+      "history": [],
+      "attachment_metadata": false,
+      "question": "نعم",
+      "expected": "Ask what the user means if needed, without substituting another source or assuming a missing PDF."
+    },
+    {
+      "id": 8,
+      "sharing": "off",
+      "history": [],
+      "attachment_metadata": false,
+      "question": "وصل12",
+      "expected": "Clarify the short reference without claiming receipt or reading of an attachment and without inventing money, units or a transaction."
+    }
+  ]
+}

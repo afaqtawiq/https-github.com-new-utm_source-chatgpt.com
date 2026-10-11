@@ -608,6 +608,8 @@ def verify(factory):
     verify_recent_attachment_outcome(factory)
     verify_quoted_attachment_context(factory)
     verify_document_reviews(factory)
+    from whatsapp_context_postgres_cases import verify_context_queries
+    verify_context_queries(factory)
 
     print('PASS: PostgreSQL duplicate event/message aliases, concurrent SKIP LOCKED claims, '
           'conversation serialization, bounded reads/model budgets, crash checkpoints, '
