@@ -22,6 +22,7 @@ from app import zernio_whatsapp as z
 from app import whatsapp_inbox as inbox
 from app import whatsapp_agent_store as store
 from app import whatsapp_agent_privacy as privacy
+from app import whatsapp_dialogue as dialogue
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -133,11 +134,13 @@ def accept_inbound(payload):
     attachments = message.get('attachments') or []
     if not isinstance(attachments, list):
         attachments = []
+    verified_staff = False
     # Preserve existing independently authorized staff operational commands.
     # This lane never gains write privileges from a caption or document.
     if not attachments and settings['mode'] == 'routine':
         from app.team import identify
         _, member = identify(payload)
+        verified_staff = bool(member)
         if member and deterministic_staff_command(str(message.get('text') or '')):
             return {'legacy_local_only':True}
     snapshots = [attachment_snapshot(item, index, who['account_id']) for index,item in enumerate(attachments[:6])]
@@ -155,6 +158,8 @@ def accept_inbound(payload):
             'question_reason':decision.reason,'attachments':snapshots,
             'attachment_count':len(attachments),'quoted_reference_present':quote_present,
             'quoted_platform_message_id':quoted_id}
+    if verified_staff:
+        data['verified_staff'] = True
     with store.database() as c:
         c.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (who['conversation_id'],))
         prior = c.execute('SELECT event_id FROM zernio_reply_events WHERE event_id=%s', (who['event_id'],)).fetchone()
@@ -200,6 +205,9 @@ async def processing(job):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
     local_reason = None
+    staff_context = data.get('verified_staff') is True and dialogue.sharing_enabled()
+    metadata_intent = privacy.attachment_metadata_intent(data.get('question', '')) if data.get('question_allowed') else ''
+    content_requested = privacy.wants_recent_document(data.get('question', '')) if data.get('question_allowed') else False
     text, digest, source_id = '', None, None
     review_id = None
     model_hashes = settings['approved_sha256']
@@ -211,6 +219,19 @@ async def processing(job):
         conversation_scope['before_job_id'] = jid
         conversation_history = await run_in_threadpool(store.recent_exchanges,
             account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid)
+    conversation_history = await run_in_threadpool(dialogue.filter_history, conversation_history, job)
+    manual = (await run_in_threadpool(dialogue.manual_question, job)
+              if data.get('question_allowed') and not data.get('attachments') else None)
+    quoted_history = ()
+    quoted_source_kind = None
+    if data.get('quoted_reference_present') and not data.get('attachments'):
+        if manual:
+            quoted_source_kind = 'text'
+        else:
+            quoted_history = await run_in_threadpool(store.quoted_text_exchange,
+                conversation_history,data.get('quoted_platform_message_id'))
+            conversation_history = quoted_history
+            quoted_source_kind = 'text' if quoted_history else 'unknown'
     if job.get('document_checkpointed_at'):
         text, digest, source_id = job.get('document_text') or '', job.get('document_sha256'), job.get('context_source_job_id')
         document_status = job.get('document_status')
@@ -258,27 +279,38 @@ async def processing(job):
         context = None
         unread = None
         quote_unavailable = False
-        if data.get('question_allowed') and privacy.wants_recent_document(data.get('question','')):
+        # A one-word label guess is not a document reference when an authorized
+        # administrative question is available. Keep natural interpretation and
+        # metadata-only evidence; explicit quotes/content requests still win.
+        metadata_reference = metadata_intent and not (manual and metadata_intent == 'possible_label')
+        if not (manual and data.get('quoted_reference_present')) and not quoted_history and data.get('question_allowed') and (content_requested or metadata_reference or data.get('quoted_reference_present')):
             quoted_id = data.get('quoted_platform_message_id')
             quoted = data.get('quoted_reference_present') is True
             lookup = {'message_id':quoted_id} if quoted and quoted_id else {}
             latest = (await run_in_threadpool(store.recent_attachment_outcome,
                 account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid,**lookup)
                 if not quoted or quoted_id else None)
-            quote_unavailable = quoted and latest is None
+            # Newer text wins only for an unquoted, ambiguous label. An explicit
+            # quote has already been resolved by the scoped metadata lookup.
+            if not quoted and metadata_intent == 'possible_label' and latest and any(
+                    entry['job_id'] > latest['id'] for entry in conversation_history):
+                latest = None
+            if quoted and latest:
+                quoted_source_kind = 'attachment'
+            quote_unavailable = quoted and latest is None and bool(content_requested or metadata_intent == 'reference')
             if latest and latest['document_status'] in ('unavailable','quarantined'):
                 unread = latest
             context = (await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
                                              conversation_id=job['conversation_id'],before_job_id=jid,**lookup)
-                       if not quote_unavailable else None)
+                       if content_requested and not quote_unavailable else None)
             reviewed = (await run_in_threadpool(store.find_review_context,
                 account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],
-                before_job_id=jid,**lookup) if not quote_unavailable else None)
+                before_job_id=jid,**lookup) if content_requested and not quote_unavailable else None)
             if reviewed and (not context or reviewed['id'] >= context['id']):
                 context = reviewed
             if latest and (not context or latest['id'] > context['id']):
                 context = None
-                if latest['document_status'] == 'ok':
+                if latest['document_status'] == 'ok' and content_requested:
                     # A newer attachment is no longer eligible for reuse; never
                     # silently substitute an older approved document.
                     unread = {'id':latest['id'],'document_status':'quarantined'}
@@ -296,7 +328,7 @@ async def processing(job):
             if (not quoted and context and data.get('question_kind') == 'conversation' and conversation_history
                     and conversation_history[-1]['job_id'] > context['id']):
                 context = None
-            if (not quoted and unread and data.get('question_kind') == 'conversation' and conversation_history
+            if (not quoted and not metadata_intent and unread and data.get('question_kind') == 'conversation' and conversation_history
                     and conversation_history[-1]['job_id'] > unread['id']):
                 unread = None
         if context:
@@ -314,6 +346,8 @@ async def processing(job):
             document_status = 'ok' if text else 'none'
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,review_id=review_id,
             diagnostics={'document_context_reason':'prior_unread_attachment','unread_source_job_id':unread['id']} if unread and document_status in ('unavailable','quarantined') else {})
+    if text or document_status in ('ok','quarantined','unavailable','reference_unavailable'):
+        manual = None
     if not data.get('question_allowed'):
         if data.get('question_reason') == 'broker_execution_request':
             reply = privacy.BROKER_EXECUTION_REPLY
@@ -330,10 +364,18 @@ async def processing(job):
     elif document_status == 'reference_unavailable':
         reply = 'الرسالة المشار إليها لا تتيح لي ملفًا مقروءًا في هذه المحادثة. لم أستخدم مستندًا آخر بدلًا منها؛ يلزم إرفاق الملف نفسه لمراجعته.'
     elif document_status == 'quarantined':
-        reply = 'وصل ملف PDF، وأوقفته للمراجعة المحلية قبل مشاركته مع نموذج الفهم. لم أعتمد محتواه أو أسجل منه أي حركة.'
+        reply = ('هل تقصد اسم العميل أو مرجعًا للمرفق؟ يوجد مرفق بانتظار المراجعة المحلية؛ لم أربطه بعميل أو أسجل منه حركة.'
+                 if metadata_intent == 'possible_label' and not data.get('attachments') else
+                 'وصل ملف PDF، وأوقفته للمراجعة المحلية قبل مشاركته مع نموذج الفهم. لم أعتمد محتواه أو أسجل منه أي حركة.')
     elif document_status == 'unavailable':
         reply = 'وصلتني بيانات المرفق، لكن لم أتمكن من قراءة محتواه في هذا المسار. لم أستنتج منه معلومات؛ يلزم مراجعته مباشرة.'
-    elif not data.get('attachments') and not text and (service_reply := privacy.local_fasah_service_reply(
+    elif metadata_intent == 'accounting_request':
+        reply = 'إضافة وصل أو فاتورة إلى كشف حساب تحتاج تحققًا من المستند والعميل ومراجعة موظف مخوّل. لم أضف قيدًا أو أسجل سدادًا.'
+        local_reason = 'accounting_review_required'
+    elif metadata_intent == 'reference' and not text and not quoted_history and not manual:
+        reply = 'حدّد المستند المقصود للمراجعة؛ لم أتحقق من محتوى الفاتورة أو أسجل منها أي حركة.'
+        local_reason = 'document_reference_clarification'
+    elif not manual and not staff_context and not data.get('attachments') and not text and (service_reply := privacy.local_fasah_service_reply(
             data['question'], conversation_history, conversation_scope)):
         reply = service_reply
         local_reason = 'local_official_service'
@@ -350,6 +392,14 @@ async def processing(job):
             # The selected PDF is separately provenance-bound; older ordinary
             # chat must not obscure the document referent or enter by accident.
             conversation_history = ()
+        permission_ids = await run_in_threadpool(dialogue.history_permissions, conversation_history)
+        if manual and not text:
+            permission_ids = sorted(set(permission_ids + [manual['permission_id']]))
+        attachment_evidence = None
+        evidence_scope = dict(account_id=job['account_id'],sender=job['sender'],
+            conversation_id=job['conversation_id'],before_job_id=jid,lease_token=lease)
+        if not text and not data.get('attachments') and not data.get('quoted_reference_present'):
+            attachment_evidence = await run_in_threadpool(store.recent_attachment_evidence,**evidence_scope)
         if not await run_in_threadpool(store.reserve_model,jid,lease):
             return
         try:
@@ -357,11 +407,20 @@ async def processing(job):
                 allowed = await run_in_threadpool(store.model_authorized,jid,lease)
                 if not allowed or z.account_id() != job['account_id']:
                     raise store.StateConflict('Model scope changed before request')
+                if not await run_in_threadpool(dialogue.permissions_current, permission_ids, job):
+                    raise store.StateConflict('Dialogue sharing authorization revoked')
+                if manual and not text and await run_in_threadpool(dialogue.manual_question, job) != manual:
+                    raise store.StateConflict('Administrative context changed before request')
+                if attachment_evidence and await run_in_threadpool(store.recent_attachment_evidence,**evidence_scope) != attachment_evidence:
+                    raise store.StateConflict('Attachment evidence changed before request')
             result = await privacy.understand(data['question'],text,history=(),document_sha256=digest,
                                              approved_hashes=model_hashes,before_request=model_guard,reviewed_excerpt=bool(review_id),
-                                             conversation_history=conversation_history,conversation_scope=conversation_scope)
+                                             conversation_history=conversation_history,conversation_scope=conversation_scope,
+                                             verified_staff=staff_context, administrative_context=manual if not text else None,
+                                             attachment_evidence=attachment_evidence,quoted_source_kind=quoted_source_kind)
             await run_in_threadpool(store.save_model,jid,lease,reply_text=result.text,
-                                    diagnostics={'model_success':bool(result.ok and result.used_model),
+                                    diagnostics={'administrative_permission_ids':permission_ids,
+                                                 'model_success':bool(result.ok and result.used_model),
                                                  'model_attempted':result.used_model,'model_reason':result.reason})
             await run_in_threadpool(store.prepare_reply,jid,lease)
             return
@@ -378,6 +437,8 @@ async def processing(job):
 
 async def dispatch(job):
     async def guard():
+        if not await run_in_threadpool(dialogue.permissions_current, job.get('diagnostics',{}).get('administrative_permission_ids',[]), job):
+            raise z.WhatsAppBlocked('Dialogue sharing authorization revoked')
         if (z.account_id() != job['account_id'] or not await run_in_threadpool(store.send_authorized,job['id'],job['send_token'])):
             raise z.WhatsAppBlocked('Reply scope changed')
     state, mid, reason = 'uncertain', None, 'send_outcome_unknown'

@@ -222,6 +222,7 @@ async def preview(token: str, request: Request):
         body += '<form method="post" action="/whatsapp-inbox/drafts/' + escape(token) + '/send"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '"><label><input type="checkbox" name="confirm" value="yes" required>أوافق على إرسال النص المعروض إلى هذا الرقم</label><button>إرسال هذا الرد مرة واحدة</button></form>'
     else:
         body += '<p>accepted تعني قبول المزود فقط. sending أو uncertain تحتاج مراجعة سجل المزود قبل أي محاولة جديدة؛ لا يوجد تكرار تلقائي.</p>'
+    body += dialogue_permission_controls(item,current)
     return page(body)
 
 
@@ -255,6 +256,9 @@ async def send_draft(token: str, request: Request):
     with database() as c:
         c.execute('''UPDATE whatsapp_inbox_drafts SET state=%s,provider_message_id=%s,updated_at=NOW()
             WHERE token=%s AND state='sending' ''', (state,receipt,token))
+        if state == 'accepted':
+            from app.whatsapp_dialogue import capture_accepted
+            capture_accepted(c, item)
     return RedirectResponse('/whatsapp-inbox/drafts/' + token, 303)
 
 
@@ -934,3 +938,59 @@ async def document_send(token: str, request: Request):
         # The durable claim remains frozen even if expiry won the race.
         raise HTTPException(error.status_code, error.reason) from None
     return RedirectResponse('/whatsapp-inbox/documents/' + token, 303)
+
+
+_DIALOGUE_DISCLOSURE = ('مشاركة سياق السؤال مع Anthropic: يُرسل نص السؤال الإداري المفحوص مع سجل حوار نصي محدود '
+    'وفئة المرسل الموثقة فقط. لا تشمل هذه الموافقة المستندات أو تنفيذ إجراءات. '
+    'لا تنتقل الأسماء والأرقام والمعرّفات من إعدادات الحساب إلى النموذج. '
+    'حد النص الإداري 800 حرف، والسياق المشترك 3000 حرف، والعمر الأقصى 24 ساعة. '
+    'قبول إرسال الرسالة إلى المستلم لا يمنح إذن مشاركتها مع النموذج. '
+    'الإلغاء يمنع المشاركة اللاحقة ولا يسترد نصًا أُرسل سابقًا إلى المزود.')
+
+
+def dialogue_permission_controls(item,current):
+    from app import whatsapp_dialogue as dialogue
+    body='<section><h3>مشاركة سياق السؤال</h3><p>'+escape(_DIALOGUE_DISCLOSURE)+'</p>'
+    if not dialogue.sharing_enabled():
+        body+='<p>المشاركة متوقفة افتراضيًا؛ يلزم تفويض التفعيل المحدد قبل استخدامها.</p>'
+    action='/whatsapp-inbox/drafts/'+escape(item['token'])
+    if dialogue.sharing_enabled() and item['state'] in ('draft','accepted'):
+        body+='<form method="post" action="'+action+'/dialogue-permission"><input type="hidden" name="csrf" value="'+escape(current['csrf'])+'"><label>النطاق<select name="scope"><option value="draft">نص هذه المسودة فقط</option><option value="conversation">نصوص مسوداتي الإدارية المستقبلية لهذه المحادثة والمستلم فقط</option></select></label><label>المدة بالدقائق، حتى 24 ساعة<input name="minutes" type="number" min="1" max="1440" value="60" required></label><label><input type="checkbox" name="confirm" value="yes" required>راجعت النص والنطاق وأوافق صراحةً على المشاركة المحددة مع Anthropic</label><button>حفظ إذن المشاركة</button></form>'
+    with database() as c:
+        if dialogue.table_exists(c,'whatsapp_agent_dialogue_permissions'):
+            rows=c.execute('''SELECT id,scope_kind,expires_at,revoked_at FROM whatsapp_agent_dialogue_permissions
+                WHERE account_id=%s AND recipient=%s AND conversation_id=%s AND actor_id=%s ORDER BY created_at DESC''',
+                (item['account_id'],item['recipient'],item['conversation_id'],current['user_id'])).fetchall()
+            for row in rows:
+                body+='<p>'+escape(row['scope_kind'])+' — '+escape(str(row['expires_at']))+'</p>'
+                if not row['revoked_at']:
+                    body+='<form method="post" action="'+action+'/dialogue-revoke"><input type="hidden" name="csrf" value="'+escape(current['csrf'])+'"><input type="hidden" name="permission" value="'+escape(row['id'])+'"><button>إلغاء هذا التفويض</button></form>'
+    return body+'</section>'
+
+
+@router.post('/whatsapp-inbox/drafts/{token}/dialogue-permission')
+@router.post('/whatsapp-inbox/drafts/{token}/dialogue-revoke')
+async def dialogue_permission(token: str,request: Request):
+    from app import whatsapp_dialogue as dialogue
+    current=send_authority(request)
+    values=await form(request,current)
+    with database() as c:
+        ensure(c)
+        item=c.execute('SELECT * FROM whatsapp_inbox_drafts WHERE token=%s AND created_by=%s AND account_id=%s',
+            (field(token),current['user_id'],z.account_id())).fetchone()
+        if not item:raise HTTPException(404)
+        try:
+            if request.url.path.endswith('/dialogue-revoke'):
+                pid=field(values.get('permission'))
+                if not dialogue.table_exists(c,'whatsapp_agent_dialogue_permissions'):raise HTTPException(404)
+                grant=c.execute('''SELECT id FROM whatsapp_agent_dialogue_permissions
+                    WHERE id=%s AND account_id=%s AND recipient=%s AND conversation_id=%s AND actor_id=%s''',
+                    (pid,item['account_id'],item['recipient'],item['conversation_id'],current['user_id'])).fetchone()
+                if not grant:raise HTTPException(404)
+                dialogue.revoke_permission(c,pid,account_id=item['account_id'],actor_id=current['user_id'])
+            else:
+                if values.get('confirm')!='yes':raise HTTPException(400,'Explicit model-sharing approval required')
+                dialogue.grant_permission(c,dict(item),current['user_id'],scope_kind=values.get('scope'),minutes=int(values.get('minutes','0')))
+        except ValueError as error:
+            raise HTTPException(409,str(error)) from None
+    return RedirectResponse('/whatsapp-inbox/drafts/'+token,303)

@@ -2991,3 +2991,312 @@ def test_duty_followup_keeps_subtype_and_material_without_reasking(provider, mon
     assert not result.ok and 'كراسي خشبيه' in p._fold(result.text)
     assert 'ما الصنف التفصيلي ومادته' not in result.text
     assert 'البند الجمركي' in result.text
+
+
+@pytest.fixture
+def administrative_sharing_enabled(monkeypatch):
+    monkeypatch.setenv(p.MANUAL_CONTEXT_SHARING_FLAG,'1')
+
+
+def admin_context(**changes):
+    return {**CHAT_SCOPE, 'question':'ما المستندات المطلوبة للتخليص؟',
+            'accepted_at':(CHAT_NOW-timedelta(minutes=10)).isoformat(), 'status':'accepted',
+            'receipt_present':True, 'category':'administrative_text', 'relation':'historical_not_pending',
+            'quoted':False, 'sharing_authorized':True, 'permission_id':'a'*48, **changes}
+
+
+def administrative_reply(question, records=(), context=None):
+    return asyncio.run(p.understand(question,conversation_history=list(records),conversation_scope=CHAT_SCOPE,
+        administrative_context=context if context is not None else admin_context(),verified_staff=True))
+
+
+@pytest.mark.parametrize('question,answer', [
+    ('الفاتورة التجارية','شكرًا على الإفادة. هل توجد مستندات أخرى حسب نوع المعاملة؟'),
+    ('أحتاج مساعدة، عندي مشكلة في النظام','ما المشكلة التي تظهر في النظام؟'),
+    ('نعم','ما أسماء المستندات التي تقصدها؟'),
+    ('بخصوص اجتماع الغد، سأتأخر','بخصوص الاجتماع، ما الوقت المناسب لك؟'),
+    ('ما المستندات المطلوبة للتصدير','هل سؤالك عن متطلبات التصدير العامة أم حالة محددة؟'),
+    ('تصحيح: ليست أولية','شكرًا على التصحيح. ما المقصود بليست أولية؟'),
+])
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_reviewer_examples_reach_model_with_actual_question(provider,monkeypatch,question,answer):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    provider['answer']=answer
+    result=administrative_reply(question)
+    assert result.used_model and result.ok
+    request=json.loads(provider['requests'][0].content)
+    data=json.loads(request['messages'][0]['content'])
+    assert data['question']==p.screen_question(question).safe_text
+    assert data['dialogue']==[{'speaker':'organization','category':'administrative_text',
+        'text':p.screen_question(admin_context()['question']).safe_text,'acceptance':'provider_accepted_not_delivery_proof','reference':'recent'}]
+    assert 'internal work discussion' in request['system']
+    assert 'comma or newline does not establish' in request['system']
+    for forbidden in ('history-account','history-sender','history-conversation','authorization_generation','before_job_id','accepted_at'):
+        assert forbidden not in json.dumps(request,ensure_ascii=False)
+    assert 'tools' not in request
+
+
+@pytest.mark.parametrize('change', [
+    {'account_id':'other'}, {'sender':'other'}, {'conversation_id':'other'}, {'authorization_generation':2},
+    {'before_job_id':999}, {'receipt_present':False}, {'status':'uncertain'}, {'relation':'approved_command'},
+    {'accepted_at':(CHAT_NOW-timedelta(days=2)).isoformat()}, {'accepted_at':(CHAT_NOW+timedelta(seconds=1)).isoformat()},
+    {'question':'كلمة المرور password=private-secret'}, {'question':'راجع https://private.invalid'}, {'unexpected':'field'},
+])
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_administrative_scope_and_privacy_rejected_whole(provider,monkeypatch,change):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);provider['answer']='أي جانب تقصد؟'
+    context=admin_context(**change)
+    administrative_reply('الفاتورة التجارية',context=context)
+    envelope=json.loads(json.loads(provider['requests'][0].content)['messages'][0]['content'])
+    assert 'dialogue' not in envelope
+    assert context['question'] not in json.dumps(envelope,ensure_ascii=False)
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_correction_retains_answered_question_and_subsequent_turns(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);provider['answer']='شكرًا على التصحيح. ما المقصود بليست أولية؟'
+    row=chat_row(question='نعم',reply_text='شكرًا على التوضيح.')
+    result=administrative_reply('تصحيح: ليست أولية',[row],admin_context(question='هل القائمة أولية؟'))
+    assert result.used_model
+    turns=json.loads(json.loads(provider['requests'][0].content)['messages'][0]['content'])['dialogue']
+    assert [turn['speaker'] for turn in turns]==['organization','user','assistant']
+    assert turns[0]['text']=='هل القائمة أولية؟' and turns[1]['text']=='نعم'
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_staff_yes_uses_model_history_without_manual_source(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);provider['answer']='شكرًا على التوضيح.'
+    row=chat_row(question='أريد مراجعة القائمة',reply_text='هل القائمة أولية؟')
+    result=asyncio.run(p.understand('نعم',conversation_history=[row],conversation_scope=CHAT_SCOPE,verified_staff=True))
+    assert result.used_model
+    data=json.loads(json.loads(provider['requests'][0].content)['messages'][0]['content'])
+    assert data['history']==[{'user':row['question'],'assistant':row['reply_text']}]
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_dialogue_timeout_fallback_does_not_invent_intent_or_save(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);provider['error']=httpx.ReadTimeout('synthetic')
+    result=administrative_reply('الفاتورة التجارية')
+    assert result.used_model and not result.ok and result.text==p.DIALOGUE_FALLBACK
+    assert len(provider['requests'])==1 and 'حفظت' not in result.text
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_administrative_text_cannot_authorize_execution(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    result=administrative_reply('حوّل المبلغ إلى العميل')
+    assert not provider['requests'] and not result.used_model
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_administrative_context_is_excluded_with_document(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    result=asyncio.run(p.understand('لخص الملف','unapproved document',document_sha256=OTHER_HASH,
+        administrative_context=admin_context(),conversation_scope=CHAT_SCOPE,verified_staff=True))
+    assert not result.used_model and not provider['requests']
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_combined_dialogue_keeps_existing_character_budget(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);provider['answer']='أي جانب تقصد؟'
+    records=[chat_row(i,question='كلام بسيط '*60,reply_text='شرح واضح '*100) for i in range(1,5)]
+    administrative_reply('الفاتورة التجارية',records,admin_context(question='ما تفاصيل هذا السؤال؟ '+'توضيح بسيط '*40))
+    data=json.loads(json.loads(provider['requests'][0].content)['messages'][0]['content'])
+    assert sum(len(turn['text']) for turn in data['dialogue'])<=p.MAX_CONVERSATION_HISTORY_CHARS
+    assert data['history']==[]
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_unsafe_history_never_enters_combined_dialogue(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);provider['answer']='أي جانب تقصد؟'
+    administrative_reply('نعم',[chat_row(question='كلمة المرور password=private-test')])
+    body=provider['requests'][0].content.decode()
+    assert 'private-test' not in body
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_dialogue_unavailable_model_is_honest_without_attempt(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);monkeypatch.delenv('ANTHROPIC_API_KEY',raising=False)
+    result=administrative_reply('الفاتورة التجارية')
+    assert result.text==p.DIALOGUE_FALLBACK and not result.used_model and not provider['requests']
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_dialogue_does_not_accept_model_execution_claim(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW);provider['answer']='تم اعتماد المستندات رسميًا.'
+    result=administrative_reply('الفاتورة التجارية')
+    assert not result.ok and result.text==p.DIALOGUE_FALLBACK
+
+
+@pytest.mark.parametrize('key',['authorization_generation','before_job_id'])
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_administrative_scope_rejects_boolean_integer_alias(monkeypatch,key):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    record=admin_context(**{key:1})
+    assert p.safe_administrative_context(record,{**CHAT_SCOPE,key:True}) is None
+
+
+def test_disabled_sharing_rejects_otherwise_eligible_projection(monkeypatch):
+    monkeypatch.delenv(p.MANUAL_CONTEXT_SHARING_FLAG,raising=False)
+    assert p.safe_administrative_context(admin_context(),CHAT_SCOPE,now=CHAT_NOW) is None
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_missing_sharing_authorization_is_not_just_accepted_send():
+    assert p.safe_administrative_context(admin_context(sharing_authorized=False),CHAT_SCOPE,now=CHAT_NOW) is None
+
+
+def test_disabled_feature_does_not_add_staff_category_to_model(provider,monkeypatch):
+    monkeypatch.delenv(p.MANUAL_CONTEXT_SHARING_FLAG,raising=False)
+    provider['answer']='يمكن مراجعة وصف الصنف.'
+    asyncio.run(p.understand('كيف أراجع التصنيف؟',verified_staff=True))
+    system=json.loads(provider['requests'][0].content)['system']
+    assert 'identified as staff' not in system
+
+def synthetic_attachment_evidence():
+    return {'count':3,'partial':False,'order':'oldest_to_newest',
+            'events':[{'count':1,'status':'held_for_review'}]*3}
+
+
+@pytest.mark.parametrize('answer',['لم يصلني أي مرفق.','ما وصلتني ملفات.','لا يوجد عندي مرفق.','قرأت الملف وفيه تفاصيل.'])
+def test_metadata_truth_rejects_denial_or_claimed_read(provider,answer):
+    provider['answer']=answer
+    result=asyncio.run(p.understand('وصل12',attachment_evidence=synthetic_attachment_evidence()))
+    assert not result.ok and result.reason=='attachment_evidence_conflict'
+    assert result.text==p.ATTACHMENT_EVIDENCE_FALLBACK
+    body=json.loads(provider['requests'][0].content)
+    envelope=json.loads(body['messages'][0]['content'])
+    assert envelope['attachment_evidence']==synthetic_attachment_evidence()
+    assert 'NO DOCUMENT HAS BEEN SUPPLIED' not in body['system']
+    assert 'tools' not in body
+
+
+@pytest.mark.parametrize('question,answer',[
+    ('وصل12','هل تقصد رقم مرجع؟'),
+    ('12من كشف الفرع أ إضافة لكشف الفرع ب','فهمت أنك تشير إلى كشفين. ما المقصود بالرقم؟'),
+    ('كيف أرتب نقل بضاعة؟','ما نوع البضاعة ومسار النقل؟'),
+    ('بخصوص اجتماع الغد، سأتأخر','ما الوقت المناسب لك؟'),
+])
+def test_evidence_does_not_replace_natural_intent(provider,question,answer):
+    provider['answer']=answer
+    result=asyncio.run(p.understand(question,attachment_evidence=synthetic_attachment_evidence()))
+    assert result.ok and result.text==answer
+
+
+@pytest.mark.parametrize('answer',['تم تسجيل السداد.','أضفت قيدًا إلى الحساب.','المبلغ هو 12 ريال.'])
+def test_evidence_does_not_authorize_finance_or_number_unit(provider,answer):
+    provider['answer']=answer
+    result=asyncio.run(p.understand('وصل12',attachment_evidence=synthetic_attachment_evidence()))
+    assert not result.ok
+
+
+def test_no_evidence_does_not_invent_attachments(provider):
+    provider['answer']='هل تقصد رقم مرجع؟'
+    result=asyncio.run(p.understand('وصل12'))
+    assert result.ok
+    assert 'attachment_evidence' not in json.loads(json.loads(provider['requests'][0].content)['messages'][0]['content'])
+
+
+def test_approved_document_does_not_inherit_metadata_only_guard(provider):
+    result=asyncio.run(p.understand('كم الكمية في المستند؟',DOCUMENT,document_sha256=PDF_HASH,
+        approved_hashes=[PDF_HASH],attachment_evidence=synthetic_attachment_evidence()))
+    assert result.ok
+    assert 'attachment_evidence' not in json.loads(json.loads(provider['requests'][0].content)['messages'][0]['content'])
+
+
+@pytest.mark.parametrize('change',[{'name':'private'},{'count':True},{'count':4},{'partial':1},{'order':'wrong'},{'events':[{'count':1,'status':'secret'}]}])
+def test_attachment_evidence_projection_rejects_extra_or_invalid_fields(change):
+    assert p.safe_attachment_evidence(synthetic_attachment_evidence()|change) is None
+
+
+def test_ambiguous_number_cannot_select_a_file(provider):
+    provider['answer']='المقصود هو الملف الثالث.'
+    result=asyncio.run(p.understand('وصل12',attachment_evidence=synthetic_attachment_evidence()))
+    assert not result.ok and result.reason=='attachment_evidence_conflict'
+
+
+def test_no_attachments_cannot_claim_receipt(provider):
+    provider['answer']='وصلتني ثلاثة مرفقات.'
+    result=asyncio.run(p.understand('وصل12'))
+    assert not result.ok and result.reason=='unsupported_attachment_receipt'
+
+
+def test_attachment_count_can_be_stated_without_claiming_content(provider):
+    provider['answer']='توجد 3 مرفقات سابقة بانتظار المراجعة. ما المقصود بالرقم؟'
+    result=asyncio.run(p.understand('وصل12',attachment_evidence=synthetic_attachment_evidence()))
+    assert result.ok and result.text==provider['answer']
+
+
+@pytest.mark.parametrize('question,answer',[
+    ('وصل12','هل تقصد الملف الثالث؟'),
+    ('أقصد الملف الثالث','فهمت أنك تقصد الملف الثالث، لكن محتواه غير متاح لي'),
+    ('وصل12','لا يوجد عندي ملف مقروء؛ توجد مرفقات بانتظار المراجعة'),
+])
+def test_reviewed_attachment_guard_false_positives(provider,question,answer):
+    provider['answer']=answer
+    result=asyncio.run(p.understand(question,attachment_evidence=synthetic_attachment_evidence()))
+    assert result.ok and result.text==answer
+
+
+@pytest.mark.parametrize('question,answer',[
+    ('وصل12','هل تقصد الملف الثالث؟ لم يصلني أي مرفق.'),
+    ('وصل12','هل تقصد الملف الثالث؟ المقصود هو الملف الثاني.'),
+    ('وصل12','لا يوجد عندي ملف؛ توجد مرفقات بانتظار المراجعة.'),
+    ('وصل12','لا يوجد عندي ملف مقروء، ولم يصلني أي مرفق.'),
+    ('أقصد الملف الثالث','فهمت أنك تقصد الملف الثاني، لكن محتواه غير متاح لي.'),
+    ('هل أقصد الملف الثالث؟','المقصود هو الملف الثالث.'),
+])
+def test_attachment_clarification_does_not_exempt_later_false_claim(provider,question,answer):
+    provider['answer']=answer
+    result=asyncio.run(p.understand(question,attachment_evidence=synthetic_attachment_evidence()))
+    assert not result.ok and result.reason=='attachment_evidence_conflict'
+
+
+def test_receipt_question_without_evidence_is_not_a_receipt_claim(provider):
+    provider['answer']='هل توجد مرفقات تريد مراجعتها؟'
+    result=asyncio.run(p.understand('وصل12'))
+    assert result.ok and result.text==provider['answer']
+
+
+@pytest.mark.parametrize('question,answer,evidence',[
+    ('كيف أرتب نقل بضاعة؟','لا يوجد ملف مطلوب لهذا السؤال؛ ما مسار النقل؟',True),
+    ('كيف أنظم الملفات؟','هناك ملفات يمكنك ترتيبها حسب المشروع',False),
+])
+def test_final_review_truthful_general_file_language(provider,question,answer,evidence):
+    provider['answer']=answer
+    result=asyncio.run(p.understand(question,attachment_evidence=synthetic_attachment_evidence() if evidence else None))
+    assert result.ok and result.text==answer
+
+
+def test_attachment_conflict_fallback_does_not_invent_number_or_request(provider):
+    provider['answer']='لم يصلني أي مرفق.'
+    result=asyncio.run(p.understand('كيف أرتب نقل بضاعة؟',attachment_evidence=synthetic_attachment_evidence()))
+    assert not result.ok and 'الرقم' not in result.text and 'وضّح' not in result.text
+
+
+@pytest.mark.parametrize('enabled',[True,False])
+def test_integrated_model_payload_keeps_admin_permission_separate_from_metadata(provider,monkeypatch,enabled):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    monkeypatch.setenv(p.MANUAL_CONTEXT_SHARING_FLAG,'1' if enabled else '0')
+    provider['answer']='هل تقصد رقم مرجع؟'
+    admin=admin_context(question='هل موعد الاجتماع مناسب؟')
+    result=asyncio.run(p.understand('وصل12',conversation_scope=CHAT_SCOPE,
+        administrative_context=admin,verified_staff=True,attachment_evidence=synthetic_attachment_evidence()))
+    assert result.ok
+    request=json.loads(provider['requests'][0].content)
+    data=json.loads(request['messages'][0]['content'])
+    assert data['attachment_evidence']['count']==3
+    assert bool(data.get('dialogue'))==enabled
+    if enabled:assert data['dialogue'][0]['text']==p.screen_question(admin['question']).safe_text
+    else:assert admin['question'] not in json.dumps(request,ensure_ascii=False)
+    for forbidden in ['history-account','history-sender','history-conversation','permission_id','accepted_at']:
+        assert forbidden not in json.dumps(request,ensure_ascii=False)
+
+
+@pytest.mark.usefixtures('administrative_sharing_enabled')
+def test_integrated_metadata_and_admin_context_never_authorize_money(provider,monkeypatch):
+    monkeypatch.setattr(p,'_utc_now',lambda:CHAT_NOW)
+    provider['answer']='تم تسجيل السداد.'
+    result=asyncio.run(p.understand('وصل12',conversation_scope=CHAT_SCOPE,
+        administrative_context=admin_context(),attachment_evidence=synthetic_attachment_evidence()))
+    assert not result.ok

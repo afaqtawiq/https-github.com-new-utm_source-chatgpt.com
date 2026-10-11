@@ -1070,6 +1070,75 @@ def recent_attachment_outcome(*, account_id, sender, conversation_id, before_job
     return {"id": raw["id"], "document_status": raw["document_status"]} if raw else None
 
 
+def recent_attachment_evidence(*, account_id, sender, conversation_id, before_job_id,
+                              lease_token, max_age_seconds=86400, db_factory=None, now=None):
+    """Metadata only for up to 12 original attachment events, oldest first.
+
+    Counts refer to attachments, never monetary values or units. Scope is
+    checked against a live processing lease. No content, names, or external IDs.
+    More than 12 events is explicitly a partial window, not an exact total.
+    """
+    for name, value in (("account_id", account_id), ("sender", sender),
+                        ("conversation_id", conversation_id)):
+        _identifier(value, name)
+    if type(before_job_id) is not int or before_job_id <= 0:
+        raise ValueError("before_job_id must identify the current processing job")
+    current = _time(now)
+    max_age_seconds = max(1, min(int(max_age_seconds), 86400))
+    stamp, cutoff = _stamp(current), _stamp(current - timedelta(seconds=max_age_seconds))
+    args = [before_job_id, account_id, sender, conversation_id, stamp, cutoff, stamp,
+            cutoff, stamp, cutoff, stamp]
+    if not isinstance(lease_token,str) or not lease_token:
+        return None
+    args.append(lease_token)
+    with (db_factory or database)() as connection:
+        count_field = ("json_extract(j.payload,'$.attachment_count')" if getattr(connection,'dialect',None)=='sqlite'
+                       else "(j.payload::jsonb->>'attachment_count')::integer")
+        rows = connection.execute("""SELECT j.document_status,"""+count_field+""" AS attachment_count
+            FROM whatsapp_agent_jobs j
+            JOIN whatsapp_agent_settings s ON s.account_id=j.account_id
+            JOIN whatsapp_agent_jobs target ON target.id=%s
+              AND target.account_id=j.account_id AND target.sender=j.sender
+              AND target.conversation_id=j.conversation_id
+            WHERE j.account_id=%s AND j.sender=%s AND j.conversation_id=%s
+              AND target.authorization_generation=s.authorization_generation
+              AND target.status='processing' AND target.lease_until>%s
+              AND target.created_at>%s AND target.created_at<=%s
+              AND j.id<target.id AND j.created_at>%s AND j.created_at<=%s
+              AND j.document_checkpointed_at>%s AND j.document_checkpointed_at<=%s
+              AND j.context_source_job_id IS NULL
+              AND j.document_status IN ('ok','quarantined','unavailable')
+              AND """ + _ELIGIBLE + " AND " + _original_attachment_predicate(connection) +
+            " AND target.lease_token=%s ORDER BY j.id DESC LIMIT 13", tuple(args)).fetchall()
+    if not rows:
+        return None
+    selected=list(reversed(rows[:12]))
+    return {'count':sum(row['attachment_count'] for row in selected),
+            'partial':len(rows)>12, 'order':'oldest_to_newest',
+            'events':[{'count':row['attachment_count'],
+                       'status':{'ok':'previously_read','quarantined':'held_for_review','unavailable':'unreadable'}[row['document_status']]}
+                      for row in selected]}
+
+
+def quoted_text_exchange(records, message_id):
+    """Resolve an exact quote only among already scoped eligible text pairs.
+
+    Supports inbound platform IDs and sent outbox receipts. No admin draft
+    sharing or alternate-source fallback; that remains v7's separate policy.
+    """
+    if not records or not isinstance(message_id,str) or not message_id:
+        return ()
+    matches=[]
+    with database() as connection:
+        for record in records:
+            row=connection.execute("""SELECT j.id FROM whatsapp_agent_jobs j
+                LEFT JOIN whatsapp_agent_outbox o ON o.job_id=j.id AND o.status='sent'
+                WHERE j.id=%s AND (j.message_id=%s OR o.provider_message_id=%s)""",
+                (record['job_id'],message_id,message_id)).fetchone()
+            if row:matches.append(record)
+    return matches if len(matches)==1 else ()
+
+
 MAX_EXCHANGES = 4
 MAX_EXCHANGE_QUESTION_CHARS = 1500
 MAX_EXCHANGE_REPLY_CHARS = 2500
