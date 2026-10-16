@@ -929,3 +929,753 @@ def test_official_service_reply_at_exhausted_budget_without_reset(setup):
     assert job['model_started_at'] is None and not setup['model_calls']
     ordinary = agent.accept_inbound(payload(21, 'كيف أجهز شحنة؟')); assert tick()
     assert store.get_job(ordinary['job_id'])['reply_text'] == store.MODEL_BUDGET_NOTICE
+
+
+import sys
+from app import whatsapp_dialogue as dialogue
+QUESTION='ما المستندات المطلوبة للتخليص؟'
+ANSWER='الفاتورة التجارية'
+
+
+def staff(monkeypatch,member=True):
+    monkeypatch.setenv(dialogue.SHARING_FLAG,'1')  # isolated tests explicitly enable the proposed feature
+    with store.database() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,role TEXT,is_active INTEGER)')
+        c.execute("INSERT OR REPLACE INTO users VALUES(7,'admin',1)")
+        c.execute('CREATE TABLE IF NOT EXISTS user_mfa(user_id INTEGER PRIMARY KEY,mfa_enabled INTEGER)')
+        c.execute('INSERT OR REPLACE INTO user_mfa VALUES(7,1)')
+    monkeypatch.setitem(sys.modules,'app.team',SimpleNamespace(identify=lambda p:(OWNER,{'role':'synthetic'} if member else None)))
+    with store.database() as c:
+        c.execute("UPDATE whatsapp_agent_settings SET mode='routine' WHERE account_id=%s",(ACCOUNT,))
+
+
+def manual(*,body=QUESTION,conversation=CONVERSATION,recipient=OWNER,account=ACCOUNT,state='accepted',
+           receipt='synthetic-receipt',token='synthetic-draft',when=None,bound=True,share=True,created_by=7):
+    now=when or store._stamp(None)
+    with store.database() as c:
+        c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_inbox_drafts(token TEXT PRIMARY KEY,account_id TEXT,
+            conversation_id TEXT,recipient TEXT,body TEXT,state TEXT,provider_message_id TEXT,updated_at TEXT)''')
+        item={'token':token,'account_id':account,'body':body,'recipient':recipient,'conversation_id':conversation,'created_by':created_by,'state':state,'updated_at':now,'provider_message_id':receipt}
+        c.execute('INSERT INTO whatsapp_inbox_drafts VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',
+                  (token,account,conversation,recipient,body,state,receipt,now))
+        if bound and state=='accepted' and receipt:
+            dialogue.capture_accepted(c,item,now=store._time(now))
+            if share and account==ACCOUNT:
+                dialogue.grant_permission(c,item,7,scope_kind='draft',now=store._time(now))
+
+
+def dialogue_model(monkeypatch,state):
+    async def model(question,text,**kwargs):
+        if kwargs.get('before_request'):await kwargs['before_request']()
+        state['model_calls'].append((question,text,kwargs))
+        return privacy.ReplyResult('ما الجانب الذي تريد توضيحه؟',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',model)
+
+
+@pytest.mark.parametrize('question',['الفاتورة التجارية','أحتاج مساعدة، عندي مشكلة في النظام','نعم',
+    'بخصوص اجتماع الغد، سأتأخر','ما المستندات المطلوبة للتصدير','تصحيح: ليست أولية'])
+def test_dialogue_reviewer_examples_are_not_intercepted_by_templates(setup,monkeypatch,question):
+    staff(monkeypatch);manual();dialogue_model(monkeypatch,setup)
+    result=agent.accept_inbound(payload(3001,question));assert tick()
+    row=store.get_job(result['job_id'])
+    assert len(setup['model_calls'])==1
+    sent_question,text,kwargs=setup['model_calls'][0]
+    assert sent_question==privacy.screen_question(question).safe_text and not text and kwargs['verified_staff'] is True
+    assert kwargs['administrative_context']['question']==privacy.screen_question(QUESTION).safe_text
+    assert 'manual_question_pending' not in row['diagnostics']
+    assert 'answer_review_status' not in row['diagnostics']
+
+
+def test_yes_to_previous_model_question_keeps_history(setup,monkeypatch):
+    staff(monkeypatch);dialogue_model(monkeypatch,setup)
+    agent.accept_inbound(payload(3002,'كيف أراجع القائمة؟'));assert tick()
+    agent.accept_inbound(payload(3003,'نعم'));assert tick()
+    assert len(setup['model_calls'])==2
+    kwargs=setup['model_calls'][1][2]
+    assert kwargs['administrative_context'] is None
+    assert kwargs['conversation_history'][0]['reply_text']=='ما الجانب الذي تريد توضيحه؟'
+
+
+def test_answer_correction_retains_historical_source_without_reopening_state(setup,monkeypatch):
+    staff(monkeypatch);manual(body='هل القائمة أولية؟');dialogue_model(monkeypatch,setup)
+    for n,q in [(3010,'نعم'),(3011,'تصحيح: ليست أولية')]:
+        agent.accept_inbound(payload(n,q));assert tick()
+    context=setup['model_calls'][1][2]['administrative_context']
+    assert context['question']=='هل القائمة أولية؟' and context['relation']=='historical_not_pending'
+    assert setup['model_calls'][1][2]['conversation_history'][0]['question']=='نعم'
+
+
+def test_settings_touch_keeps_generation_bound_context(setup,monkeypatch):
+    staff(monkeypatch);manual();dialogue_model(monkeypatch,setup)
+    before=store.get_settings(ACCOUNT)['authorization_generation']
+    store.update_settings(ACCOUNT)
+    assert store.get_settings(ACCOUNT)['authorization_generation']==before
+    agent.accept_inbound(payload(3012,ANSWER));assert tick()
+    assert setup['model_calls'][0][2]['administrative_context']['question']==privacy.screen_question(QUESTION).safe_text
+
+
+@pytest.mark.parametrize('change',[{'conversation':'other-synthetic'}, {'recipient':'966500000009'},
+    {'account':'other-account'},{'state':'uncertain'},{'state':'draft'},{'receipt':None},{'bound':False}])
+def test_manual_context_never_crosses_scope_or_infers_acceptance(setup,monkeypatch,change):
+    staff(monkeypatch);manual(**change);dialogue_model(monkeypatch,setup)
+    agent.accept_inbound(payload(3020,ANSWER));assert tick()
+    assert setup['model_calls'][0][2]['administrative_context'] is None
+
+
+def test_new_generation_does_not_inherit_manual_context(setup,monkeypatch):
+    staff(monkeypatch);manual();dialogue_model(monkeypatch,setup)
+    with store.database() as c:c.execute('UPDATE whatsapp_agent_settings SET authorization_generation=authorization_generation+1')
+    agent.accept_inbound(payload(3021,ANSWER));assert tick()
+    assert setup['model_calls'][0][2]['administrative_context'] is None
+
+
+def test_explicit_quote_resolves_only_exact_manual_message(setup,monkeypatch):
+    staff(monkeypatch);manual();manual(body='كيف نرتب الاجتماع؟',token='newer',receipt='newer-receipt');dialogue_model(monkeypatch,setup)
+    agent.accept_inbound(payload(3022,'نعم',metadata={'quotedMessage':{'platformMessageId':'synthetic-receipt'}}));assert tick()
+    assert setup['model_calls'][0][2]['administrative_context']['question']==privacy.screen_question(QUESTION).safe_text
+    agent.accept_inbound(payload(3023,'نعم',metadata={'quotedMessage':{'platformMessageId':'unknown-receipt'}}));assert tick()
+    assert len(setup['model_calls'])==2
+    unknown=setup['model_calls'][-1][2]
+    assert unknown['administrative_context'] is None and not unknown['conversation_history']
+    assert unknown['attachment_evidence'] is None and unknown['quoted_source_kind']=='unknown'
+
+
+def test_manual_context_lookup_recovers_after_checkpoint_before_model(setup,monkeypatch):
+    staff(monkeypatch);manual();dialogue_model(monkeypatch,setup)
+    result=agent.accept_inbound(payload(3024,ANSWER))
+    job=store.claim_job(account_id=ACCOUNT)
+    store.checkpoint_document(job['id'],job['lease_token'],text='',sha256=None,status='none',diagnostics={})
+    job=store.get_job(job['id'])
+    asyncio.run(agent.processing(job));assert tick()
+    assert len(setup['model_calls'])==1 and len(setup['sends'])==1
+    assert setup['model_calls'][0][2]['administrative_context']['question']==privacy.screen_question(QUESTION).safe_text
+    assert not tick()
+def test_actual_admin_draft_send_then_staff_answer(setup,monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app import whatsapp_inbox as inbox
+    staff(monkeypatch)
+    dialogue_model(monkeypatch,setup)
+    current={'user_id':7,'id':'synthetic-session','role':'admin','csrf':'synthetic-csrf'}
+    monkeypatch.setattr(z,'session',lambda request:current)
+    monkeypatch.setattr(inbox,'send_authority',lambda request:current)
+    @contextmanager
+    def inbox_database():
+        with store.database() as inner:
+            class Adapter:
+                dialect='sqlite'
+                def execute(self,sql,args=()):
+                    if sql.startswith('CREATE TABLE'):
+                        sql=sql.replace('NOW()','CURRENT_TIMESTAMP')
+                    elif 'NOW()' in sql:
+                        offset=sql.split('NOW()',1)[0].count('%s')
+                        sql=sql.replace('NOW()', '%s')
+                        args=tuple(args[:offset])+(store._stamp(None),)+tuple(args[offset:])
+                    return inner.execute(sql,args)
+            yield Adapter()
+    monkeypatch.setattr(inbox,'database',inbox_database)
+    async def verified(c,value):
+        assert value==CONVERSATION
+        return {'id':CONVERSATION,'participantId':OWNER}
+    async def validate(c):return None
+    monkeypatch.setattr(inbox,'verified_conversation',verified)
+    monkeypatch.setattr(z,'validate_account',validate)
+    outgoing=[]
+    async def send(recipient,message,**kwargs):
+        callback=z._dispatch_guard.get()
+        if callback:
+            outcome=callback()
+            if hasattr(outcome,'__await__'):await outcome
+        outgoing.append(message)
+        return {'messages':[{'id':'synthetic-provider-receipt'}]}
+    monkeypatch.setattr(z,'send',send)
+    app=FastAPI();app.include_router(inbox.router)
+    with TestClient(app) as client:
+        response=client.post('/whatsapp-inbox/drafts',data={'csrf':current['csrf'],'conversation':CONVERSATION,'body':QUESTION},follow_redirects=False)
+        assert response.status_code==303
+        path=response.headers['location']
+        assert client.post(path+'/dialogue-permission',data={'csrf':current['csrf'],'confirm':'yes','scope':'draft','minutes':'60'},follow_redirects=False).status_code==303
+        assert client.post(path+'/send',data={'csrf':current['csrf'],'confirm':'yes'},follow_redirects=False).status_code==303
+    assert outgoing==[QUESTION]
+    result=agent.accept_inbound(payload(2050,ANSWER));assert tick()
+    row=store.get_job(result['job_id'])
+    context=setup['model_calls'][0][2]['administrative_context']
+    assert context['question']==privacy.screen_question(QUESTION).safe_text and context['status']=='accepted'
+    assert row['payload']['question']==ANSWER
+    assert len(outgoing)==2 and 'تستورد' not in outgoing[1]
+
+
+"""Run the existing identity checks in a subprocess, with synthetic config only."""
+import os
+import subprocess
+import sys
+
+
+def test_dialogue_uses_existing_real_staff_identity_checks():
+    code = r'''
+import copy,json,os,sys,types
+# Avoid importing/running the receiver application; the identity implementation
+# and phone normalization below are real. No DB, provider, model or sends.
+sys.modules['app.zernio_receiver'] = types.ModuleType('app.zernio_receiver')
+os.environ.update(AFAQ_TEAM=json.dumps([{'phone':'+966500000001','name':'Synthetic Staff','role':'customs'}]),
+                  WHATSAPP_COMMAND_ACCOUNT_ID='test-account', WHATSAPP_COMMAND_OWNER='')
+from app import team
+payload={'account':{'id':'test-account','platform':'whatsapp'},
+ 'conversation':{'participantId':'966500000001'},
+ 'message':{'direction':'incoming','sender':{'id':'966500000001','phoneNumber':'+966500000001'},'text':'ما إجراءات التخليص؟'}}
+assert team.identify(payload)[1]['role']=='customs'
+for change in ('claimed_name','account','participant','group','outgoing'):
+ p=copy.deepcopy(payload)
+ if change=='claimed_name':
+  p['message']['sender']={'id':'966500000002','phoneNumber':'+966500000002','name':'Synthetic Staff'}
+  p['conversation']['participantId']='966500000002'
+  p['message']['text']='أنا موظف اختبار ومدير الفريق'
+ elif change=='account': p['account']['id']='other-account'
+ elif change=='participant': p['conversation']['participantId']='966500000002'
+ elif change=='group': p['conversation']['isGroup']=True
+ else: p['message']['direction']='outgoing'
+ assert team.identify(p)==('',None), change
+print('PASS: configured sender identity; rejected text/name/account/participant/group/direction impostors')
+'''
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith('PASS:')
+
+
+
+
+def test_quoted_model_question_uses_only_its_scoped_exchange(setup,monkeypatch):
+    staff(monkeypatch);dialogue_model(monkeypatch,setup)
+    agent.accept_inbound(payload(3050,'كيف أراجع القائمة؟'));assert tick()
+    agent.accept_inbound(payload(3051,'نعم',metadata={'quotedMessage':{'platformMessageId':'synthetic-out-1'}}));assert tick()
+    assert len(setup['model_calls'])==2
+    assert len(setup['model_calls'][1][2]['conversation_history'])==1
+    other=payload(3052,'نعم',metadata={'quotedMessage':{'platformMessageId':'synthetic-out-1'}})
+    other['conversation']['id']='other-synthetic-conversation'
+    result=agent.accept_inbound(other);assert tick()
+    assert len(setup['model_calls'])==3
+    assert store.get_job(result['job_id'])['document_status']=='none'
+    unknown=setup['model_calls'][-1][2]
+    assert not unknown['conversation_history'] and unknown['administrative_context'] is None
+    assert unknown['attachment_evidence'] is None and unknown['quoted_source_kind']=='unknown'
+
+
+def test_manual_context_is_rechecked_before_provider_request(setup,monkeypatch):
+    staff(monkeypatch);manual()
+    async def model(question,text,**kwargs):
+        with store.database() as c:c.execute("UPDATE whatsapp_inbox_drafts SET body='Different synthetic text'")
+        await kwargs['before_request']()
+        raise AssertionError('Provider request must not occur')
+    monkeypatch.setattr(privacy,'understand',model)
+    result=agent.accept_inbound(payload(3053,ANSWER));assert tick()
+    assert store.get_job(result['job_id'])['status']=='uncertain'
+    assert not setup['sends'] and not setup['model_calls'] and not tick()
+
+
+def test_bound_question_cannot_share_quarantined_document(setup,monkeypatch):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    staff(monkeypatch);manual();dialogue_model(monkeypatch,setup)
+    result=agent.accept_inbound(payload(3054,'راجع المستند',True));assert tick()
+    assert store.get_job(result['job_id'])['document_status']=='quarantined'
+    assert not setup['model_calls']
+
+
+def test_manual_context_expires_without_backfilling_generation(setup,monkeypatch):
+    from datetime import timedelta
+    staff(monkeypatch);manual(when=store._stamp(store._time()-timedelta(days=2)));dialogue_model(monkeypatch,setup)
+    agent.accept_inbound(payload(3055,ANSWER));assert tick()
+    assert setup['model_calls'][0][2]['administrative_context'] is None
+
+
+def test_prior_quarantine_is_not_loaded_for_administrative_dialogue(setup,monkeypatch):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64]);staff(monkeypatch)
+    agent.accept_inbound(payload(3060,'',True));assert tick()
+    manual();dialogue_model(monkeypatch,setup)
+    def forbidden(*args,**kwargs):raise AssertionError('No PDF or reviewed excerpt may enter this dialogue')
+    monkeypatch.setattr(store,'recent_context',forbidden)
+    monkeypatch.setattr(store,'find_review_context',forbidden)
+    agent.accept_inbound(payload(3061,ANSWER));assert tick()
+    question,text,kwargs=setup['model_calls'][0]
+    assert not text and not kwargs['conversation_history'] and kwargs['administrative_context']
+
+
+@pytest.mark.parametrize('approved',[True,False])
+@pytest.mark.parametrize('quote',['none','pdf','manual'])
+def test_newer_pdf_reference_outranks_unrelated_manual_question(setup,monkeypatch,approved,quote):
+    if not approved:store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    staff(monkeypatch);manual(body='هل موعد الاجتماع مناسب؟');dialogue_model(monkeypatch,setup)
+    pdf=agent.accept_inbound(payload(5000,'',True));assert tick()
+    setup['model_calls'].clear()
+    counters={'outcome':0,'content':0}
+    for name,key in [('recent_attachment_outcome','outcome'),('recent_context','content')]:
+        original=getattr(store,name)
+        def wrapped(*a,_original=original,_key=key,**kw):
+            counters[_key]+=1
+            return _original(*a,**kw)
+        monkeypatch.setattr(store,name,wrapped)
+    req=payload(5001,'ما محتوى الملف؟' if quote!='manual' else 'نعم')
+    if quote!='none':req['metadata']={'quotedMessage':{'platformMessageId':'message-5000' if quote=='pdf' else 'synthetic-receipt'}}
+    result=agent.accept_inbound(req);assert tick()
+    row=store.get_job(result['job_id'])
+    if quote=='manual':
+        assert setup['model_calls'][0][2]['administrative_context']['question']=='هل موعد الاجتماع مناسب؟'
+        assert not setup['model_calls'][0][1] and counters=={'outcome':0,'content':0}
+    else:
+        assert counters['outcome']==1 and counters['content']==1
+        if approved:
+            assert row['context_source_job_id']==pdf['job_id']
+            assert setup['actual'] in setup['model_calls'][0][1]
+            assert setup['model_calls'][0][2]['administrative_context'] is None
+        else:
+            assert row['document_status']=='quarantined' and not setup['model_calls']
+
+
+def test_accepted_draft_is_local_only_without_explicit_sharing(setup,monkeypatch):
+    staff(monkeypatch);manual(share=False);dialogue_model(monkeypatch,setup)
+    result=agent.accept_inbound(payload(5010,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job,require_sharing=False)['question']==privacy.screen_question(QUESTION).safe_text
+    assert dialogue.manual_question(job) is None
+    asyncio.run(agent.processing(job));assert tick()
+    assert setup['model_calls'][0][2]['administrative_context'] is None
+
+
+def test_sharing_feature_off_blocks_even_saved_consent(setup,monkeypatch):
+    staff(monkeypatch);manual();monkeypatch.delenv(dialogue.SHARING_FLAG);dialogue_model(monkeypatch,setup)
+    agent.accept_inbound(payload(5011,ANSWER));assert tick()
+    assert setup['model_calls'][0][2]['administrative_context'] is None
+
+
+def revoke_all():
+    with store.database() as c:
+        for row in c.execute('SELECT id FROM whatsapp_agent_dialogue_permissions').fetchall():
+            dialogue.revoke_permission(c,row['id'],account_id=ACCOUNT,actor_id=7)
+
+
+def test_revocation_removes_transitively_derived_history(setup,monkeypatch):
+    staff(monkeypatch);manual();dialogue_model(monkeypatch,setup)
+    first=agent.accept_inbound(payload(5012,ANSWER));assert tick()
+    assert store.get_job(first['job_id'])['diagnostics']['administrative_permission_ids']
+    revoke_all()
+    second=agent.accept_inbound(payload(5013,'نعم'));assert tick()
+    kwargs=setup['model_calls'][1][2]
+    assert kwargs['administrative_context'] is None and not kwargs['conversation_history']
+
+
+def test_revocation_between_model_and_send_blocks_dispatch(setup,monkeypatch):
+    staff(monkeypatch);manual();dialogue_model(monkeypatch,setup)
+    agent.accept_inbound(payload(5014,ANSWER))
+    job=store.claim_job(account_id=ACCOUNT);asyncio.run(agent.processing(job))
+    revoke_all();assert tick()
+    assert store.get_job(job['id'])['status']=='blocked' and not setup['sends']
+
+
+def test_standing_permission_covers_future_questions_not_old_accepted_text(setup,monkeypatch):
+    staff(monkeypatch);manual(share=False)
+    with store.database() as c:
+        item=dict(c.execute('SELECT * FROM whatsapp_inbox_drafts').fetchone());item['created_by']=7
+        pid=dialogue.grant_permission(c,item,7,scope_kind='conversation',minutes=30)
+    first=agent.accept_inbound(payload(5015,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job) is None
+    store.prepare_reply(job['id'],job['lease_token'],terminal_status='blocked')
+    manual(token='future-draft',receipt='future-receipt',share=False)
+    agent.accept_inbound(payload(5016,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job)['permission_id']==pid
+
+
+@pytest.mark.parametrize('change',['expired','actor_disabled','mfa_disabled','permission_denied','different_author'])
+def test_sharing_grant_boundaries_are_rechecked(setup,monkeypatch,change):
+    staff(monkeypatch);manual()
+    with store.database() as c:
+        if change=='expired':c.execute("UPDATE whatsapp_agent_dialogue_permissions SET expires_at='2000-01-01T00:00:00+00:00'")
+        elif change=='actor_disabled':c.execute('UPDATE users SET is_active=0')
+        elif change=='mfa_disabled':c.execute('UPDATE user_mfa SET mfa_enabled=0')
+        elif change=='permission_denied':
+            c.execute('CREATE TABLE role_permissions(role TEXT,permission TEXT,allowed INTEGER)')
+            c.execute("INSERT INTO role_permissions VALUES('admin','send_whatsapp',0)")
+        else:
+            c.execute('UPDATE whatsapp_agent_dialogue_permissions SET actor_id=8')
+    agent.accept_inbound(payload(5017,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job) is None
+
+
+def test_explicit_draft_revocation_cannot_fall_back_to_standing_grant(setup,monkeypatch):
+    staff(monkeypatch)
+    item={'token':'synthetic-pending','account_id':ACCOUNT,'recipient':OWNER,'conversation_id':CONVERSATION,
+          'body':QUESTION,'created_by':7,'state':'draft'}
+    with store.database() as c:
+        dialogue.grant_permission(c,item,7,scope_kind='conversation')
+        specific=dialogue.grant_permission(c,item,7,scope_kind='draft')
+        dialogue.revoke_permission(c,specific,account_id=ACCOUNT,actor_id=7)
+    manual(token=item['token'],share=False)
+    agent.accept_inbound(payload(5018,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job) is None
+
+
+def test_permission_revoked_in_preflight_prevents_model_request(setup,monkeypatch):
+    staff(monkeypatch);manual()
+    async def model(question,text,**kwargs):
+        revoke_all()
+        await kwargs['before_request']()
+        raise AssertionError('No request after revocation')
+    monkeypatch.setattr(privacy,'understand',model)
+    result=agent.accept_inbound(payload(5019,ANSWER));assert tick()
+    assert store.get_job(result['job_id'])['status']=='uncertain' and not setup['sends']
+
+
+def test_standing_permission_does_not_cover_another_administrators_text(setup,monkeypatch):
+    staff(monkeypatch)
+    item={'token':'scope-anchor','account_id':ACCOUNT,'recipient':OWNER,'conversation_id':CONVERSATION,
+          'body':QUESTION,'created_by':7,'state':'draft'}
+    with store.database() as c:
+        c.execute("INSERT INTO users VALUES(8,'admin',1)");c.execute('INSERT INTO user_mfa VALUES(8,1)')
+        dialogue.grant_permission(c,item,7,scope_kind='conversation')
+    manual(token='other-author',share=False,created_by=8)
+    agent.accept_inbound(payload(5020,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job) is None
+
+
+def test_explicit_single_draft_review_can_bind_unshared_history_without_auto_backfill(setup,monkeypatch):
+    staff(monkeypatch);manual(bound=False,share=False)
+    with store.database() as c:
+        item=dict(c.execute('SELECT * FROM whatsapp_inbox_drafts').fetchone());item['created_by']=7
+        pid=dialogue.grant_permission(c,item,7,scope_kind='draft')
+        source=c.execute('SELECT * FROM whatsapp_agent_manual_context').fetchone()
+        assert source['binding_basis']=='explicit_draft_review'
+        assert source['accepted_at']==item['updated_at']
+    agent.accept_inbound(payload(5021,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job)['permission_id']==pid
+
+
+def test_live_draft_binding_cannot_be_overlaid_to_evade_later_revocation(setup,monkeypatch):
+    staff(monkeypatch);manual()
+    with store.database() as c:
+        item=dict(c.execute('SELECT * FROM whatsapp_inbox_drafts').fetchone());item['created_by']=7
+        with pytest.raises(ValueError,match='Revoke or let'):
+            dialogue.grant_permission(c,item,7,scope_kind='draft')
+    revoke_all()
+    with store.database() as c:
+        new_id=dialogue.grant_permission(c,item,7,scope_kind='draft')
+    agent.accept_inbound(payload(5022,ANSWER));job=store.claim_job(account_id=ACCOUNT)
+    assert dialogue.manual_question(job)['permission_id']==new_id
+
+def test_two_quarantined_pdfs_label_accounting_request_then_invoice_pointer(setup, monkeypatch, tmp_path):
+    # Synthetic reproduction of an attachment/label/follow-up sequence. No live IDs.
+    store.update_settings(ACCOUNT, approved_sha256=['a' * 64])
+    first = agent.accept_inbound(payload(901, '', True)); assert tick()
+    second = agent.accept_inbound(payload(902, '', True)); assert tick()
+    assert store.get_job(first['job_id'])['document_status'] == 'quarantined'
+    assert store.get_job(second['job_id'])['document_status'] == 'quarantined'
+    def forbidden(*a, **k):
+        raise AssertionError('Metadata-only follow-up must not load content, review excerpts or reserve a model')
+    monkeypatch.setattr(store, 'recent_context', forbidden)
+    monkeypatch.setattr(store, 'find_review_context', forbidden)
+    monkeypatch.setattr(store, 'reserve_model', forbidden)
+    before_reads = len(setup['provider_reads'])
+    trace = []
+    for number, question in [(903, 'شركةاختبار'), (904, 'إضاف الوصل في كشف شركةاختبار'), (905, 'هذا الفاتوره')]:
+        result = agent.accept_inbound(payload(number, question)); assert tick()
+        job = store.get_job(result['job_id'])
+        assert job['document_status'] == 'quarantined' and not job['document_text']
+        assert job['diagnostics']['unread_source_job_id'] == second['job_id']
+        assert job['model_started_at'] is None and 'مراجعة' in job['reply_text']
+        assert 'ما وصلني' not in job['reply_text']
+        trace.append({'question': question, 'reply': job['reply_text'], 'document_status': job['document_status'], 'document_text_empty': not job['document_text'], 'model_not_started': job['model_started_at'] is None})
+        if number == 903:
+            assert 'اسم العميل' in job['reply_text'] and 'لم أربطه بعميل' in job['reply_text']
+    assert not setup['model_calls'] and len(setup['provider_reads']) == before_reads
+    assert all(send[0] == OWNER for send in setup['sends'])  # all sends are fixture mocks
+    (tmp_path / 'metadata-followup.json').write_text(json.dumps({'test_type': 'synthetic queue/worker and SQLite fixture; mocked provider/sends; no live messages', 'model_calls': len(setup['model_calls']), 'new_provider_reads_during_followup': len(setup['provider_reads']) - before_reads, 'trace': trace}, ensure_ascii=False, indent=2))
+
+
+def test_invoice_pointer_with_unknown_quote_never_substitutes_latest_quarantined_pdf(setup):
+    store.update_settings(ACCOUNT, approved_sha256=['a' * 64])
+    agent.accept_inbound(payload(911, '', True)); assert tick()
+    request = payload(912, 'هذا الفاتوره', metadata={'quotedMessage': {'platformMessageId': 'unrelated-synthetic-id'}})
+    result = agent.accept_inbound(request); assert tick()
+    job = store.get_job(result['job_id'])
+    assert job['document_status'] == 'reference_unavailable'
+    assert not job['document_text'] and not setup['model_calls']
+
+
+def test_invoice_pointer_in_another_conversation_does_not_claim_prior_file(setup):
+    store.update_settings(ACCOUNT, approved_sha256=['a' * 64])
+    agent.accept_inbound(payload(921, '', True)); assert tick()
+    request = payload(922, 'هذا الفاتوره')
+    request['conversation']['id'] = 'another-synthetic-conversation'
+    result = agent.accept_inbound(request); assert tick()
+    job = store.get_job(result['job_id'])
+    assert job['document_status'] == 'none' and not job['document_text']
+    assert job['diagnostics']['model_reason'] == 'document_reference_clarification'
+    assert 'وصل ملف PDF' not in job['reply_text'] and not setup['model_calls']
+
+
+def test_accounting_request_without_pdf_does_not_authorize_a_ledger_write(setup):
+    result = agent.accept_inbound(payload(931, 'إضاف الوصل في كشف شركةاختبار')); assert tick()
+    job = store.get_job(result['job_id'])
+    assert 'لم أضف قيدًا أو أسجل سدادًا' in job['reply_text']
+    assert job['model_started_at'] is None and not setup['model_calls']
+
+
+@pytest.mark.parametrize('quote_scope', ['known', 'unknown', 'other_conversation', 'none'])
+def test_short_label_quote_selection_survives_newer_text_without_widening_scope(setup, monkeypatch, quote_scope):
+    store.update_settings(ACCOUNT, approved_sha256=['a' * 64])
+    first = agent.accept_inbound(payload(941, '', True)); assert tick()
+    newer = agent.accept_inbound(payload(942, '', True)); assert tick()
+    async def chat(question, document_text, **kwargs):
+        if kwargs.get('before_request'):
+            await kwargs['before_request']()
+        assert not document_text
+        setup['model_calls'].append((question, document_text, kwargs))
+        return privacy.ReplyResult('يمكن مناقشة خطوات النقل هنا.', True, True, 'model_answer')
+    monkeypatch.setattr(privacy, 'understand', chat)
+    agent.accept_inbound(payload(943, 'كيف أرتب نقل بضاعة؟')); assert tick()
+    assert len(setup['model_calls']) == 1
+    request = payload(944, 'شركةاختبار')
+    if quote_scope != 'none':
+        request['metadata'] = {'quotedMessage': {'platformMessageId':
+            'unknown-synthetic-file' if quote_scope == 'unknown' else 'message-941'}}
+    if quote_scope == 'other_conversation':
+        request['conversation']['id'] = 'different-synthetic-conversation'
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Label quote must not load document content or reviewed excerpts')
+    monkeypatch.setattr(store, 'recent_context', forbidden)
+    monkeypatch.setattr(store, 'find_review_context', forbidden)
+    result = agent.accept_inbound(request); assert tick()
+    job = store.get_job(result['job_id'])
+    assert not job['document_text'] and job['context_source_job_id'] is None
+    if quote_scope == 'known':
+        assert job['document_status'] == 'quarantined'
+        assert job['diagnostics']['unread_source_job_id'] == first['job_id']
+        assert job['diagnostics']['unread_source_job_id'] != newer['job_id']
+        assert 'مراجعة' in job['reply_text'] and job['model_started_at'] is None
+    elif quote_scope == 'none':
+        assert job['document_status'] == 'none' and len(setup['model_calls']) == 2
+    else:
+        # An unresolved short text label does not establish a document request.
+        # Keep the unknown quote isolated, but let natural clarification run.
+        assert job['document_status'] == 'none'
+        assert 'unread_source_job_id' not in job['diagnostics']
+        assert len(setup['model_calls']) == 2
+        assert setup['model_calls'][-1][2]['quoted_source_kind'] == 'unknown'
+        assert not setup['model_calls'][-1][2]['conversation_history']
+        assert setup['model_calls'][-1][2]['attachment_evidence'] is None
+    if quote_scope == 'known':
+        assert len(setup['model_calls']) == 1
+
+
+def test_three_quarantined_pdfs_numeric_reference_and_clarification_metadata_only(setup,monkeypatch):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    for n in range(2001,2004):agent.accept_inbound(payload(n,'',True))
+    for _ in range(3):assert tick()
+    reads=len(setup['provider_reads']);calls=[]
+    async def model(question,document_text='',**kwargs):
+        await kwargs['before_request']()
+        evidence=kwargs['attachment_evidence']
+        assert evidence=={'count':3,'partial':False,'order':'oldest_to_newest',
+                          'events':[{'count':1,'status':'held_for_review'}]*3}
+        assert not document_text
+        calls.append(question)
+        return privacy.ReplyResult('هل تقصد مرجعًا؟ وضّح علاقة الكشفين دون بيانات حساسة.',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',model)
+    for n,q in enumerate(['وصل12','12من كشف الفرع أ إضافة لكشف الفرع ب','كيف أرتب نقل بضاعة؟'],2010):
+        item=agent.accept_inbound(payload(n,q));assert tick()
+        job=store.get_job(item['job_id'])
+        assert job['status']=='sent' and job['document_status']=='none'
+    assert len(calls)==3 and len(setup['provider_reads'])==reads
+
+
+@pytest.mark.parametrize('fence',['account','conversation','sender','generation','age','future','lease','none'])
+def test_attachment_evidence_exact_scope_time_and_lease(setup,fence):
+    from datetime import timedelta
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    source=agent.accept_inbound(payload(2020,'',True));assert tick()
+    request=agent.accept_inbound(payload(2021,'وصل12'))
+    job=store.claim_job(account_id=ACCOUNT)
+    args=dict(account_id=ACCOUNT,sender=OWNER,conversation_id=CONVERSATION,
+              before_job_id=request['job_id'],lease_token=job['lease_token'])
+    if fence in ('account','conversation','sender'):
+        key={'account':'account_id','conversation':'conversation_id','sender':'sender'}[fence]
+        args[key]='synthetic-other'
+    elif fence=='lease':args['lease_token']='wrong-lease'
+    elif fence=='generation':
+        with store.database() as c:c.execute('UPDATE whatsapp_agent_jobs SET authorization_generation=0 WHERE id=%s',(source['job_id'],))
+    elif fence in ('age','future'):
+        stamp=store._stamp(store._time()+timedelta(days=-2 if fence=='age' else 2))
+        with store.database() as c:c.execute('UPDATE whatsapp_agent_jobs SET created_at=%s,document_checkpointed_at=%s WHERE id=%s',(stamp,stamp,source['job_id']))
+    evidence=store.recent_attachment_evidence(**args)
+    assert bool(evidence)==(fence=='none')
+
+
+def test_evidence_window_does_not_claim_exact_total_or_include_followups(setup):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    for n in range(2040,2053):
+        agent.accept_inbound(payload(n,'',True));assert tick()
+    agent.accept_inbound(payload(2054,'هذا الملف'));assert tick()
+    r=agent.accept_inbound(payload(2055,'وصل12'));job=store.claim_job(account_id=ACCOUNT)
+    e=store.recent_attachment_evidence(account_id=ACCOUNT,sender=OWNER,conversation_id=CONVERSATION,
+        before_job_id=r['job_id'],lease_token=job['lease_token'])
+    assert e['count']==12 and e['partial'] and len(e['events'])==12
+
+
+def test_unknown_quote_never_receives_other_attachment_evidence(setup,monkeypatch):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    agent.accept_inbound(payload(2060,'',True));assert tick()
+    def forbidden(*a,**k):raise AssertionError('No metadata substitution for unknown quote')
+    monkeypatch.setattr(store,'recent_attachment_evidence',forbidden)
+    r=agent.accept_inbound(payload(2061,'هذا الملف',metadata={'quotedMessage':{'platformMessageId':'unknown'}}));assert tick()
+    assert store.get_job(r['job_id'])['document_status']=='reference_unavailable'
+
+
+def test_evidence_preserves_mixed_status_order_and_rechecks_before_model(setup,monkeypatch):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    ids=[]
+    for n in range(2070,2073):
+        ids.append(agent.accept_inbound(payload(n,'',True))['job_id']);assert tick()
+    with store.database() as c:
+        c.execute("UPDATE whatsapp_agent_jobs SET document_status='ok' WHERE id=%s",(ids[0],))
+        c.execute("UPDATE whatsapp_agent_jobs SET document_status='unavailable' WHERE id=%s",(ids[1],))
+    async def model(question,document_text='',**kw):
+        assert [e['status'] for e in kw['attachment_evidence']['events']]==['previously_read','unreadable','held_for_review']
+        with store.database() as c:c.execute('UPDATE whatsapp_agent_jobs SET authorization_generation=0 WHERE id=%s',(ids[-1],))
+        await kw['before_request']()
+        raise AssertionError('Changed evidence must stop before external request')
+    monkeypatch.setattr(privacy,'understand',model)
+    r=agent.accept_inbound(payload(2074,'وصل12'));assert tick()
+    assert store.get_job(r['job_id'])['status']=='uncertain'
+    assert len(setup['sends'])==3
+
+
+@pytest.mark.parametrize('quote_kind',['inbound_text','outbound_text','unknown'])
+def test_quoted_text_yes_is_not_a_pdf_request(setup,monkeypatch,quote_kind):
+    calls=[]
+    async def model(question,document_text='',**kw):
+        await kw['before_request']()
+        assert not document_text and kw['attachment_evidence'] is None
+        calls.append(kw)
+        return privacy.ReplyResult('هل القائمة أولية؟' if len(calls)==1 else 'فهمت، القائمة أولية حسب توضيحك.',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',model)
+    agent.accept_inbound(payload(2090,'أريد توضيح القائمة'));assert tick()
+    mid={'inbound_text':'message-2090','outbound_text':'synthetic-out-1','unknown':'not-available'}[quote_kind]
+    r=agent.accept_inbound(payload(2091,'نعم',metadata={'quotedMessage':{'platformMessageId':mid}}));assert tick()
+    j=store.get_job(r['job_id'])
+    assert j['status']=='sent' and j['document_status']=='none' and 'إرفاق' not in j['reply_text']
+    assert calls[-1]['quoted_source_kind']==('unknown' if quote_kind=='unknown' else 'text')
+    assert len(calls[-1]['conversation_history'])==(0 if quote_kind=='unknown' else 1)
+
+
+@pytest.mark.parametrize('member',[True,False])
+@pytest.mark.parametrize('sharing',['on','off','revoked'])
+def test_integrated_admin_three_pdfs_short_reply_clarification_and_dedup(setup,monkeypatch,member,sharing):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64])
+    staff(monkeypatch,member=member)
+    manual(body='هل القائمة أولية؟')
+    with store.database() as c:
+        pid=c.execute('SELECT permission_id FROM whatsapp_agent_dialogue_bindings WHERE draft_token=%s',('synthetic-draft',)).fetchone()['permission_id']
+    for n in range(4001,4004):agent.accept_inbound(payload(n,'',True))
+    for _ in range(3):assert tick()
+    if sharing=='off':monkeypatch.delenv(dialogue.SHARING_FLAG)
+    if sharing=='revoked':
+        with store.database() as c:dialogue.revoke_permission(c,pid,account_id=ACCOUNT,actor_id=7)
+    calls=[]
+    async def model(question,text,**kw):
+        await kw['before_request']()
+        assert not text and kw['attachment_evidence']['count']==3
+        assert all(e['status']=='held_for_review' for e in kw['attachment_evidence']['events'])
+        assert bool(kw['administrative_context'])==(sharing=='on')
+        assert kw['verified_staff']==(member and sharing!='off')
+        calls.append(kw)
+        return privacy.ReplyResult('ما المقصود بالمرجع وعلاقة الكشفين؟',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',model)
+    reads=len(setup['provider_reads'])
+    for n,q in enumerate(['وصل12','12من كشف الفرع أ إضافة لكشف الفرع ب'],4010):
+        p=payload(n,q);r=agent.accept_inbound(p);assert tick()
+        p['id']='alias-'+str(n)
+        dup=agent.accept_inbound(p)
+        assert dup['duplicate'] and dup['job_id']==r['job_id']
+        assert store.get_job(r['job_id'])['status']=='sent'
+    assert len(calls)==2 and len(setup['sends'])==5 and len(setup['provider_reads'])==reads
+
+
+@pytest.mark.parametrize('quote',['manual','pdf','unknown'])
+def test_integrated_quote_priority_with_admin_and_quarantined_pdf(setup,monkeypatch,quote):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64]);staff(monkeypatch);manual(body='هل الموعد مناسب؟')
+    pdf=agent.accept_inbound(payload(4020,'',True));assert tick()
+    dialogue_model(monkeypatch,setup)
+    source={'manual':'synthetic-receipt','pdf':'message-4020','unknown':'unknown'}[quote]
+    r=agent.accept_inbound(payload(4021,'نعم',metadata={'quotedMessage':{'platformMessageId':source}}));assert tick()
+    j=store.get_job(r['job_id'])
+    if quote=='pdf':
+        assert j['document_status']=='quarantined' and not setup['model_calls']
+    else:
+        kw=setup['model_calls'][-1][2]
+        assert kw['attachment_evidence'] is None
+        assert bool(kw['administrative_context'])==(quote=='manual')
+        assert kw['quoted_source_kind']==('text' if quote=='manual' else 'unknown')
+        if quote=='unknown':assert not kw['conversation_history']
+
+
+def test_integrated_metadata_does_not_bypass_post_model_permission_revocation(setup,monkeypatch):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64]);staff(monkeypatch);manual()
+    agent.accept_inbound(payload(4030,'',True));assert tick()
+    async def model(question,text,**kw):
+        assert kw['attachment_evidence']['count']==1 and kw['administrative_context']
+        await kw['before_request']()
+        with store.database() as c:
+            dialogue.revoke_permission(c,kw['administrative_context']['permission_id'],account_id=ACCOUNT,actor_id=7)
+        return privacy.ReplyResult('هل تقصد مرجعًا؟',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',model)
+    r=agent.accept_inbound(payload(4031,'وصل12'));assert tick()
+    assert store.get_job(r['job_id'])['status']=='blocked'
+    assert len(setup['sends'])==1
+
+
+def test_integrated_new_generation_drops_both_admin_and_attachment_evidence(setup,monkeypatch):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64]);staff(monkeypatch);manual()
+    agent.accept_inbound(payload(4040,'',True));assert tick()
+    store.update_settings(ACCOUNT,mode='off')
+    store.update_settings(ACCOUNT,mode='owner_pilot',pilot_sender=OWNER,approved_sha256=['a'*64])
+    async def model(question,text,**kw):
+        await kw['before_request']()
+        assert kw['administrative_context'] is None and kw['attachment_evidence'] is None
+        assert not kw['conversation_history'] and not text
+        return privacy.ReplyResult('هل تقصد رقم مرجع؟',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',model)
+    r=agent.accept_inbound(payload(4041,'وصل12'));assert tick()
+    assert store.get_job(r['job_id'])['status']=='sent'
+
+
+@pytest.mark.parametrize('sharing',['allowed','off','revoked'])
+@pytest.mark.parametrize('question',['الثلاثاء','الرياض','ما محتوى الملف؟'])
+def test_integrated_short_answer_to_authorized_admin_survives_pdf_metadata(setup,monkeypatch,sharing,question):
+    store.update_settings(ACCOUNT,approved_sha256=['a'*64]);staff(monkeypatch)
+    admin_question='في أي مدينة يناسبك الاجتماع؟' if question=='الرياض' else 'في أي يوم يناسبك الاجتماع؟'
+    manual(body=admin_question)
+    for n in range(4050,4053):agent.accept_inbound(payload(n,'',True))
+    for _ in range(3):assert tick()
+    if sharing=='off':monkeypatch.delenv(dialogue.SHARING_FLAG)
+    if sharing=='revoked':
+        with store.database() as c:
+            pid=c.execute('SELECT permission_id FROM whatsapp_agent_dialogue_bindings WHERE draft_token=%s',('synthetic-draft',)).fetchone()['permission_id']
+            dialogue.revoke_permission(c,pid,account_id=ACCOUNT,actor_id=7)
+    calls=[]
+    async def model(current,text,**kw):
+        await kw['before_request']()
+        calls.append((current,text,kw))
+        return privacy.ReplyResult('فهمت ردك بخصوص الاجتماع.',True,True,'model_answer')
+    monkeypatch.setattr(privacy,'understand',model)
+    reads=len(setup['provider_reads'])
+    r=agent.accept_inbound(payload(4053,question));job=store.claim_job(account_id=ACCOUNT)
+    asyncio.run(agent.processing(job))
+    final=store.get_job(r['job_id'])
+    if question in ('الثلاثاء','الرياض') and sharing=='allowed':
+        assert len(calls)==1
+        current,text,kw=calls[0]
+        assert current==question and not text
+        assert kw['administrative_context']['question']==admin_question
+        assert kw['attachment_evidence']['count']==3
+        assert final['document_status']=='none'
+        assert 'اسم العميل' not in final['reply_text']
+    else:
+        assert not calls and final['document_status']=='quarantined'
+        assert not final['document_text']
+    assert len(setup['provider_reads'])==reads

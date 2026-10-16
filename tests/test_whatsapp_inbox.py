@@ -28,11 +28,13 @@ def setup(monkeypatch, provider):
     conn = sqlite3.connect(':memory:',check_same_thread=False)
     conn.row_factory = sqlite3.Row
     class Cursor:
+        def fetchall(self): return [dict(row) for row in self.cursor.fetchall()]
         def __init__(self,cursor): self.cursor=cursor
         def fetchone(self):
             row=self.cursor.fetchone()
             return dict(row) if row else None
     class Connection:
+        dialect = 'sqlite'
         def execute(self,sql,args=()):
             return Cursor(conn.execute(sql.replace('NOW()','CURRENT_TIMESTAMP').replace('%s','?'),args))
     @contextmanager
@@ -173,7 +175,8 @@ def test_send_rejects_mismatched_window_proof(setup,change):
     assert not provider['posts']
 
 
-def test_bootstrap_stepup_returns_to_gettable_preview():
+@pytest.mark.parametrize('suffix',['send','dialogue-permission','dialogue-revoke'])
+def test_bootstrap_stepup_returns_to_gettable_preview(suffix):
     """Exercise actual middleware code without importing the production database."""
     import ast
     import pathlib
@@ -188,7 +191,7 @@ def test_bootstrap_stepup_returns_to_gettable_preview():
         role_allowed=lambda *a:True,has_permission=lambda *a:True,
         mfa_state=lambda uid:{'mfa_enabled':True},recent_stepup=lambda sid:False)
     exec(compile(ast.Module(body=selected,type_ignores=[]),'<actual-bootstrap>','exec'),namespace)
-    request=SimpleNamespace(method='POST',url=SimpleNamespace(path='/whatsapp-inbox/drafts/abc/send'),cookies={})
+    request=SimpleNamespace(method='POST',url=SimpleNamespace(path='/whatsapp-inbox/drafts/abc/'+suffix),cookies={})
     assert namespace['sensitive_permission'](request)=='send_whatsapp'
     response=asyncio.run(namespace['enterprise_security_guard'](request,None))
     assert response.status_code==428
@@ -976,3 +979,56 @@ def test_media_inspection_rejects_unverified_identity_without_request(media_id):
             return await inbox.inspect_media_response(c,media_id,'account-test')
     with pytest.raises(HTTPException) as caught: asyncio.run(check())
     assert caught.value.status_code==404
+
+
+def dialogue_authority_tables(conn):
+    conn.execute('CREATE TABLE users(id INTEGER PRIMARY KEY,role TEXT,is_active INTEGER)')
+    conn.execute("INSERT INTO users VALUES(7,'admin',1)")
+    conn.execute('CREATE TABLE user_mfa(user_id INTEGER PRIMARY KEY,mfa_enabled INTEGER)')
+    conn.execute('INSERT INTO user_mfa VALUES(7,1)')
+    conn.execute('CREATE TABLE whatsapp_agent_settings(account_id TEXT PRIMARY KEY,mode TEXT,authorization_generation INTEGER)')
+    conn.execute("INSERT INTO whatsapp_agent_settings VALUES('account-test','routine',2)")
+    conn.commit()
+
+
+def dialogue_draft(client):
+    response=client.post('/whatsapp-inbox/drafts',data={'csrf':'csrf','conversation':'c1','body':'هل موعد الاجتماع مناسب؟'},follow_redirects=False)
+    assert response.status_code==303
+    return response.headers['location']
+
+
+def test_dialogue_sharing_default_off_and_explicit_consent_required(setup,monkeypatch):
+    from app import whatsapp_dialogue as dialogue
+    client,current,provider,conn=setup;dialogue_authority_tables(conn)
+    monkeypatch.delenv(dialogue.SHARING_FLAG,raising=False)
+    path=dialogue_draft(client)
+    assert 'Anthropic' in client.get(path).text and 'متوقفة افتراضيًا' in client.get(path).text
+    values={'csrf':'csrf','confirm':'yes','scope':'draft','minutes':'60'}
+    assert client.post(path+'/dialogue-permission',data=values).status_code==409
+    monkeypatch.setenv(dialogue.SHARING_FLAG,'1')
+    assert client.post(path+'/dialogue-permission',data={**values,'confirm':'no'}).status_code==400
+    assert client.post(path+'/dialogue-permission',data={**values,'csrf':'wrong'}).status_code==403
+    current['mfa']=False
+    assert client.post(path+'/dialogue-permission',data=values).status_code==428
+    current['mfa']=True
+    assert client.post(path+'/dialogue-permission',data=values,follow_redirects=False).status_code==303
+    grant=conn.execute('SELECT * FROM whatsapp_agent_dialogue_permissions').fetchone()
+    assert grant['provider']=='anthropic' and grant['scope_kind']=='draft' and grant['actor_id']==7
+    assert not provider['posts']
+    monkeypatch.delenv(dialogue.SHARING_FLAG)
+    assert 'إلغاء هذا التفويض' in client.get(path).text
+    assert client.post(path+'/dialogue-revoke',data={'csrf':'csrf','permission':grant['id']},follow_redirects=False).status_code==303
+    assert conn.execute('SELECT revoked_at FROM whatsapp_agent_dialogue_permissions').fetchone()[0]
+
+
+def test_dialogue_permission_scope_and_actor_are_not_form_controlled(setup,monkeypatch):
+    from app import whatsapp_dialogue as dialogue
+    client,current,provider,conn=setup;dialogue_authority_tables(conn);monkeypatch.setenv(dialogue.SHARING_FLAG,'1')
+    path=dialogue_draft(client)
+    values={'csrf':'csrf','confirm':'yes','scope':'conversation','minutes':'30','account':'other','recipient':'966500000099','actor_id':'9'}
+    assert client.post(path+'/dialogue-permission',data=values,follow_redirects=False).status_code==303
+    grant=conn.execute('SELECT * FROM whatsapp_agent_dialogue_permissions').fetchone()
+    assert grant['account_id']=='account-test' and grant['recipient']=='966500000001' and grant['actor_id']==7
+    assert client.post(path+'/dialogue-permission',data={**values,'minutes':'1441'}).status_code==409
+    current['user_id']=8
+    assert client.post(path+'/dialogue-permission',data=values).status_code==404

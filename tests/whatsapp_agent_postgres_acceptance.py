@@ -30,6 +30,49 @@ def verify(factory):
     store.init_storage(db_factory=factory)
     store.init_storage(db_factory=factory)
 
+    # New source linkage: prepared for real PostgreSQL, never a SQLite claim.
+    from app import whatsapp_dialogue as dialogue
+    with patch.object(store, 'database', factory), patch.dict(os.environ,{dialogue.SHARING_FLAG:'0'}):
+        account = 'manual-dialogue-acceptance'
+        store.update_settings(account,mode='owner_pilot',pilot_sender='owner',approved_sha256=[SHA],now=NOW)
+        with factory() as c:
+            c.execute("""CREATE TABLE whatsapp_inbox_drafts(token TEXT PRIMARY KEY,account_id TEXT,
+                conversation_id TEXT,recipient TEXT,body TEXT,state TEXT,provider_message_id TEXT,updated_at TIMESTAMPTZ)""")
+            item={'token':'synthetic-manual','account_id':account,'conversation_id':'manual-conversation',
+                  'recipient':'owner','body':'هل القائمة أولية؟','created_by':7,'state':'accepted','updated_at':NOW,'provider_message_id':'synthetic-receipt'}
+            c.execute("INSERT INTO whatsapp_inbox_drafts VALUES(%s,%s,%s,%s,%s,'accepted','synthetic-receipt',%s)",
+                      (item['token'],account,item['conversation_id'],'owner',item['body'],NOW))
+            dialogue.capture_accepted(c,item,now=NOW)
+        later=NOW+timedelta(seconds=1)
+        with factory() as c:
+            job=store.enqueue(c,account_id=account,message_id='manual-answer',event_id='manual-event',sender='owner',
+                conversation_id='manual-conversation',payload={'question':'نعم','question_allowed':True,
+                'question_kind':'conversation','attachments':[],'attachment_count':0},now=later)
+        job=store.claim_job(account_id=account,now=later)
+        assert dialogue.manual_question(job,now=later) is None
+        before=dialogue.manual_question(job,now=later,require_sharing=False)
+        assert before and before['question']=='هل القائمة أولية؟'
+        store.update_settings(account,now=later)
+        assert dialogue.manual_question(job,now=later,require_sharing=False)==before
+        store.checkpoint_document(job['id'],job['lease_token'],text='',sha256=None,status='none',now=later)
+        resumed=store.get_job(job['id'])
+        assert dialogue.manual_question(resumed,now=later,require_sharing=False)==before
+        with factory() as c:
+            c.execute('CREATE TABLE users(id BIGINT PRIMARY KEY,role TEXT,is_active INTEGER)')
+            c.execute("INSERT INTO users VALUES(7,'admin',1)")
+            c.execute('CREATE TABLE user_mfa(user_id BIGINT PRIMARY KEY,mfa_enabled INTEGER)')
+            c.execute('INSERT INTO user_mfa VALUES(7,1)')
+        with patch.dict(os.environ,{dialogue.SHARING_FLAG:'1'}):
+            with factory() as c:
+                permission_id=dialogue.grant_permission(c,item,7,scope_kind='draft',now=later)
+            assert dialogue.manual_question(resumed,now=later)['permission_id']==permission_id
+            with factory() as c:dialogue.revoke_permission(c,permission_id,account_id=account,actor_id=7,now=later)
+            assert dialogue.manual_question(resumed,now=later) is None
+        with factory() as c:
+            c.execute('UPDATE whatsapp_inbox_drafts SET body=%s WHERE token=%s',('Changed synthetic source',item['token']))
+        assert dialogue.manual_question(resumed,now=later,require_sharing=False) is None
+        store.prepare_reply(job['id'],job['lease_token'],terminal_status='blocked',now=later)
+
     def settings(account):
         return store.update_settings(account, mode='owner_pilot', pilot_sender='owner',
             approved_sha256=[SHA], db_factory=factory, now=NOW)
@@ -565,6 +608,8 @@ def verify(factory):
     verify_recent_attachment_outcome(factory)
     verify_quoted_attachment_context(factory)
     verify_document_reviews(factory)
+    from whatsapp_context_postgres_cases import verify_context_queries
+    verify_context_queries(factory)
 
     print('PASS: PostgreSQL duplicate event/message aliases, concurrent SKIP LOCKED claims, '
           'conversation serialization, bounded reads/model budgets, crash checkpoints, '
