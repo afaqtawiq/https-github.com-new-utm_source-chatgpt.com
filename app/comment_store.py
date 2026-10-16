@@ -2,6 +2,7 @@
 import hashlib
 import uuid
 from app import comment_policy as policy
+from app import comment_contextual as contextual
 
 def database():
     from app.storage import db
@@ -21,6 +22,8 @@ def init_storage(db_factory=None):
             UNIQUE(account_id,post_id,comment_id))""")
         c.execute("ALTER TABLE afaaq_comment_jobs ADD COLUMN IF NOT EXISTS author_id TEXT NOT NULL DEFAULT ''")
         c.execute("ALTER TABLE afaaq_comment_jobs ADD COLUMN IF NOT EXISTS identity_verified_at TIMESTAMPTZ")
+        c.execute("ALTER TABLE afaaq_comment_jobs ADD COLUMN IF NOT EXISTS model_call_units INTEGER NOT NULL DEFAULT 1")
+        c.execute("ALTER TABLE afaaq_comment_jobs ADD COLUMN IF NOT EXISTS validated_reply_hash TEXT")
         c.execute("""CREATE TABLE IF NOT EXISTS afaaq_comment_events(
             event_id TEXT PRIMARY KEY, job_id BIGINT NOT NULL REFERENCES afaaq_comment_jobs(id))""")
         c.execute("""CREATE TABLE IF NOT EXISTS afaaq_comment_outbox(
@@ -119,11 +122,12 @@ def reserve_model(job, db_factory=None):
         row = current(c,job)
         if not row or row["model_started_at"] or not identity_current(c,row):
             return False
-        count = c.execute("""SELECT count(*) AS n FROM afaaq_comment_jobs
+        units = 2 if policy.config(job["account_id"]).get("reply_mode") == "contextual_auto" else 1
+        count = c.execute("""SELECT COALESCE(sum(model_call_units),0) AS n FROM afaaq_comment_jobs
             WHERE model_started_at>NOW()-INTERVAL '24 hours'""").fetchone()["n"]
-        if count >= 50:
+        if count + units > 50:
             return False
-        c.execute("UPDATE afaaq_comment_jobs SET model_started_at=NOW() WHERE id=%s",(job["id"],))
+        c.execute("UPDATE afaaq_comment_jobs SET model_started_at=NOW(),model_call_units=%s WHERE id=%s",(units,job["id"]))
     return True
 
 def authorized(job, status="processing", db_factory=None):
@@ -151,11 +155,30 @@ def record_identity(job, evidence, db_factory=None):
             WHERE id=%s""",(row["id"],))
     return True
 
+def record_validation(job, reply, db_factory=None):
+    """Internal worker checkpoint after independent semantic approval; no HTTP route."""
+    with (db_factory or database)() as c:
+        row = current(c,job)
+        cfg = policy.config(job["account_id"])
+        if (not row or not identity_current(c,row) or cfg.get("reply_mode") != "contextual_auto"
+                or not row["model_started_at"] or row["model_call_units"] != 2
+                or not contextual.valid_output(row["question"],reply)):
+            return False
+        c.execute("UPDATE afaaq_comment_jobs SET validated_reply_hash=%s WHERE id=%s",
+                  (hashlib.sha256(reply.encode()).hexdigest(),job["id"]))
+    return True
+
 def reserve_send(job, reply, db_factory=None):
     with (db_factory or database)() as c:
         row = current(c,job)
         cfg=policy.config(job["account_id"])
-        if not row or not identity_current(c,row) or cfg["mode"] != "live" or cfg.get("reply_mode") != "reviewed" or reply not in policy.REPLIES.values():
+        if not row or not identity_current(c,row) or cfg["mode"] != "live":
+            return None
+        reviewed = cfg.get("reply_mode") == "reviewed" and reply in policy.REPLIES.values()
+        generated = (cfg.get("reply_mode") == "contextual_auto"
+                     and contextual.valid_output(row["question"],reply)
+                     and row["validated_reply_hash"] == hashlib.sha256(reply.encode()).hexdigest())
+        if not (reviewed or generated):
             return None
         counts = c.execute("""SELECT count(*) AS daily,
             count(*) FILTER (WHERE created_at>NOW()-INTERVAL '1 hour') AS hourly

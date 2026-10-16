@@ -59,7 +59,7 @@ def config(account):
                 or entry.get("platform") != platform or entry.get("mode") not in ("dry_run", "live")
                 or not isinstance(entry.get("profile_id"), str) or not entry["profile_id"]
                 or type(entry.get("revision")) is not int or entry["revision"] < 1
-                or entry.get("reply_mode", "reviewed") not in ("reviewed", "contextual_draft")
+                or entry.get("reply_mode", "reviewed") not in ("reviewed", "contextual_draft", "contextual_auto")
                 or not isinstance(entry.get("owner_ids"), list) or not entry["owner_ids"]
                 or not isinstance(entry.get("youtube_owner_id"), str) or not entry["youtube_owner_id"]
                 or entry["youtube_owner_id"] not in entry["owner_ids"]
