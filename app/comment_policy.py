@@ -59,10 +59,15 @@ def config(account):
                 or entry.get("platform") != platform or entry.get("mode") not in ("dry_run", "live")
                 or not isinstance(entry.get("profile_id"), str) or not entry["profile_id"]
                 or type(entry.get("revision")) is not int or entry["revision"] < 1
+                or entry.get("reply_mode", "reviewed") not in ("reviewed", "contextual_draft")
                 or not isinstance(entry.get("owner_ids"), list) or not entry["owner_ids"]
+                or not isinstance(entry.get("youtube_owner_id"), str) or not entry["youtube_owner_id"]
+                or entry["youtube_owner_id"] not in entry["owner_ids"]
+                or not isinstance(entry.get("owner_verification_ref"), str) or not entry["owner_verification_ref"].strip()
                 or any(not isinstance(x, str) or not x for x in entry["owner_ids"])):
             return {"mode": "off", "fingerprint": "off", "revision": 0}
-        result = {k: entry[k] for k in ("platform", "mode", "profile_id", "revision", "owner_ids")}
+        result = {k: entry[k] for k in ("platform", "mode", "profile_id", "revision", "owner_ids", "youtube_owner_id", "owner_verification_ref")}
+        result["reply_mode"] = entry.get("reply_mode", "reviewed")
         result["fingerprint"] = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
         return result
     except (ValueError, TypeError, AttributeError, KeyError):
@@ -79,7 +84,7 @@ def normalize(payload, cfg):
     row = {"event_id": identifier(payload.get("id")),
            "account_id": identifier(account.get("accountId")),
            "post_id": identifier(comment.get("platformPostId")),
-           "comment_id": identifier(comment.get("id")), "question": "", "reason": "", "status": "queued"}
+           "comment_id": identifier(comment.get("id")), "author_id": "", "question": "", "reason": "", "status": "queued"}
     author = comment.get("author") or {}
     if not isinstance(author, dict):
         author = {}
@@ -99,8 +104,8 @@ def normalize(payload, cfg):
         reason = "account_scope"
     elif author.get("isOwnAccount") is True or author.get("id") in cfg["owner_ids"]:
         reason = "own_comment"
-    elif author.get("isOwnAccount") is not False:
-        reason = "unknown_author"
+    elif "isOwnAccount" in author and author["isOwnAccount"] is not False:
+        reason = "invalid_ownership_flag"
     elif not isinstance(author.get("id"), str) or not author["id"]:
         reason = "unknown_author"
     elif comment.get("parentCommentId") or comment.get("isReply") is not False or comment.get("isLive") or comment.get("ad"):
@@ -110,7 +115,9 @@ def normalize(payload, cfg):
     if reason:
         row.update(status="held", reason=reason)
     else:
-        row["question"] = clean(comment["text"]).strip()
+        row["author_id"] = identifier(author["id"])
+        row["question"] = comment["text"]
+        row["reason"] = "identity_verification_required"
     return row
 
 def render(intent):

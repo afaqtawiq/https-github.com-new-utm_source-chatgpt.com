@@ -19,6 +19,8 @@ def init_storage(db_factory=None):
             reply TEXT NOT NULL DEFAULT '', token TEXT, lease_until TIMESTAMPTZ,
             model_started_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(account_id,post_id,comment_id))""")
+        c.execute("ALTER TABLE afaaq_comment_jobs ADD COLUMN IF NOT EXISTS author_id TEXT NOT NULL DEFAULT ''")
+        c.execute("ALTER TABLE afaaq_comment_jobs ADD COLUMN IF NOT EXISTS identity_verified_at TIMESTAMPTZ")
         c.execute("""CREATE TABLE IF NOT EXISTS afaaq_comment_events(
             event_id TEXT PRIMARY KEY, job_id BIGINT NOT NULL REFERENCES afaaq_comment_jobs(id))""")
         c.execute("""CREATE TABLE IF NOT EXISTS afaaq_comment_outbox(
@@ -56,10 +58,10 @@ def enqueue(payload, db_factory=None):
         if event:
             return {"ok":True,"duplicate":True}
         job = c.execute("""INSERT INTO afaaq_comment_jobs
-            (account_id,post_id,comment_id,generation,fingerprint,question,status,reason)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(account_id,post_id,comment_id) DO NOTHING RETURNING id""",
+            (account_id,post_id,comment_id,generation,fingerprint,question,status,reason,author_id)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(account_id,post_id,comment_id) DO NOTHING RETURNING id""",
             (incoming["account_id"],incoming["post_id"],incoming["comment_id"],s["generation"],
-             cfg["fingerprint"],incoming["question"],incoming["status"],incoming["reason"])).fetchone()
+             cfg["fingerprint"],incoming["question"],incoming["status"],incoming["reason"],incoming["author_id"])).fetchone()
         duplicate = not job
         if not job:
             job = c.execute("""SELECT id FROM afaaq_comment_jobs
@@ -115,7 +117,7 @@ def reserve_model(job, db_factory=None):
         # Separate global budget: max 50 requests/day and 256 output tokens/request.
         c.execute("SELECT pg_advisory_xact_lock(hashtext('afaaq-comment-model-budget'))")
         row = current(c,job)
-        if not row or row["model_started_at"]:
+        if not row or row["model_started_at"] or not identity_current(c,row):
             return False
         count = c.execute("""SELECT count(*) AS n FROM afaaq_comment_jobs
             WHERE model_started_at>NOW()-INTERVAL '24 hours'""").fetchone()["n"]
@@ -126,12 +128,34 @@ def reserve_model(job, db_factory=None):
 
 def authorized(job, status="processing", db_factory=None):
     with (db_factory or database)() as c:
-        return bool(current(c,job,status))
+        row = current(c,job,status)
+        return bool(row and identity_current(c,row))
+
+def identity_current(c, row):
+    return bool(c.execute("""SELECT id FROM afaaq_comment_jobs WHERE id=%s AND author_id<>''
+        AND identity_verified_at>NOW()-INTERVAL '60 seconds'""",(row["id"],)).fetchone())
+
+def record_identity(job, evidence, db_factory=None):
+    with (db_factory or database)() as c:
+        row=current(c,job)
+        cfg=policy.config(job["account_id"])
+        if not row or not isinstance(evidence,dict):
+            return False
+        expected={k:row[k] for k in ("account_id","post_id","comment_id","author_id")}
+        expected.update(owner_id=cfg.get("youtube_owner_id"),
+            question_sha256=hashlib.sha256(row["question"].encode()).hexdigest(),
+            basis="authenticated_author_id_vs_verified_owner")
+        if evidence != expected or not row["author_id"] or row["author_id"] in cfg["owner_ids"]:
+            return False
+        c.execute("""UPDATE afaaq_comment_jobs SET identity_verified_at=NOW(),reason='identity_verified'
+            WHERE id=%s""",(row["id"],))
+    return True
 
 def reserve_send(job, reply, db_factory=None):
     with (db_factory or database)() as c:
         row = current(c,job)
-        if not row or policy.config(job["account_id"])["mode"] != "live" or reply not in policy.REPLIES.values():
+        cfg=policy.config(job["account_id"])
+        if not row or not identity_current(c,row) or cfg["mode"] != "live" or cfg.get("reply_mode") != "reviewed" or reply not in policy.REPLIES.values():
             return None
         counts = c.execute("""SELECT count(*) AS daily,
             count(*) FILTER (WHERE created_at>NOW()-INTERVAL '1 hour') AS hourly

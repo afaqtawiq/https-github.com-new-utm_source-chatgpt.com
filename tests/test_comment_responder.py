@@ -13,7 +13,7 @@ ACCOUNT = "6ab019958d284ffb2121d129"
 def configured(monkeypatch):
     monkeypatch.setenv("AFAAQ_COMMENTS_ENABLED","1")
     monkeypatch.setenv("AFAAQ_COMMENT_ACCOUNTS",json.dumps({ACCOUNT:{
-        "platform":"youtube","mode":"dry_run","profile_id":"profile","revision":1,"owner_ids":["owner"]}}))
+        "platform":"youtube","mode":"dry_run","profile_id":"profile","revision":1,"owner_ids":["owner"],"youtube_owner_id":"owner","owner_verification_ref":"synthetic-independent-proof"}}))
     return p.config(ACCOUNT)
 
 def payload(text="Do you offer shipping?"):
@@ -41,7 +41,8 @@ def test_default_off(monkeypatch):
 def test_unknown_and_own_author(configured):
     event = payload()
     del event["comment"]["author"]["isOwnAccount"]
-    assert p.normalize(event,configured)["reason"]=="unknown_author"
+    assert p.normalize(event,configured)["reason"]=="identity_verification_required"
+    assert p.normalize(event,configured)["status"]=="queued"
     event["comment"]["author"]={"id":"owner","isOwnAccount":False}
     assert p.normalize(event,configured)["reason"]=="own_comment"
 
@@ -74,9 +75,10 @@ def test_config_change(configured,monkeypatch):
 def prepare_worker(monkeypatch, configured, mode="live"):
     config=dict(configured,mode=mode)
     monkeypatch.setattr(p,"config",lambda _:config)
-    job={"id":1,"account_id":ACCOUNT,"post_id":"post","comment_id":"comment","question":"\u0634\u0643\u0631\u0627","token":"lease"}
+    job={"id":1,"account_id":ACCOUNT,"post_id":"post","comment_id":"comment","question":"\u0634\u0643\u0631\u0627","token":"lease","author_id":"customer"}
     monkeypatch.setattr(worker.store,"claim",Mock(side_effect=[job,None]))
     monkeypatch.setattr(worker.store,"finish",Mock(return_value=True))
+    monkeypatch.setattr(worker.store,"record_identity",Mock(return_value=True))
     monkeypatch.setattr(worker.store,"reserve_send",Mock(return_value="stable-key"))
     monkeypatch.setattr(worker.store,"authorized",Mock(return_value=True))
     monkeypatch.setattr(worker.store,"complete_send",Mock(return_value=True))
@@ -89,8 +91,9 @@ def test_provider_outcome(configured,monkeypatch,status,outcome):
     posts=[]
     def handler(request):
         if request.method=="GET":
-            return httpx.Response(200,json={"meta":{"accountId":ACCOUNT,"platform":"youtube"},
-                "comments":[{"id":"comment","canReply":True,"from":{"id":"customer","isOwner":False},"message":job["question"]}]})
+            return httpx.Response(200,json={"meta":{"accountId":ACCOUNT,"platform":"youtube","postId":"post","lastUpdated":datetime.now(timezone.utc).isoformat()},
+                "pagination":{"hasMore":False},
+                "comments":[{"id":"comment","canReply":True,"from":{"id":"customer","isOwner":False},"message":job["question"],"platform":"youtube","parentId":None,"isHidden":False}]})
         posts.append(json.loads(request.content))
         assert request.headers["Idempotency-Key"]=="stable-key"
         return httpx.Response(status,json={"success":True,"data":{"commentId":"reply"}})
@@ -117,6 +120,8 @@ def test_no_send_after_scope_change(configured,monkeypatch):
 
 def test_dry_run_never_sends(configured,monkeypatch):
     prepare_worker(monkeypatch,configured,"dry_run")
+    async def verified(*_):return {"synthetic":True}
+    monkeypatch.setattr(worker,"verify_target",verified)
     def no_network(_):raise AssertionError("Unexpected provider call")
     asyncio.run(worker.tick(transport=httpx.MockTransport(no_network)))
     assert worker.store.finish.call_args.args[1]=="dry_run"
@@ -126,7 +131,7 @@ def test_unverified_target_holds(configured,monkeypatch):
     prepare_worker(monkeypatch,configured)
     def empty(_):return httpx.Response(200,json={"comments":[]})
     asyncio.run(worker.tick(transport=httpx.MockTransport(empty)))
-    assert worker.store.finish.call_args.args[2]=="target_unverified"
+    assert worker.store.finish.call_args.args[2]=="identity_unverified"
     worker.store.reserve_send.assert_not_called()
 
 def test_signature_precedes_comment_branch():
