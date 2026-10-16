@@ -105,6 +105,40 @@ def test_unsafe_text_not_persisted(db_factory):
     assert row["question"]=="" and row["status"]=="held"
     assert s.claim(ACCOUNT,db_factory) is None
 
+
+def test_expired_processing_never_reclaims(db_factory):
+    s.enqueue(payload(),db_factory);job=s.claim(ACCOUNT,db_factory)
+    assert s.reserve_model(job,db_factory)
+    with db_factory() as c:c.execute("UPDATE afaaq_comment_jobs SET lease_until=NOW()-INTERVAL '1 second'")
+    assert s.claim(ACCOUNT,db_factory) is None
+    with db_factory() as c:
+        assert c.execute("SELECT status FROM afaaq_comment_jobs").fetchone()["status"]=="held"
+
+def test_old_revision_cannot_restore_revocation(db_factory,monkeypatch):
+    original=os.environ["AFAAQ_COMMENT_ACCOUNTS"]
+    s.enqueue(payload(),db_factory);job=s.claim(ACCOUNT,db_factory)
+    monkeypatch.setenv("AFAAQ_COMMENTS_ENABLED","0")
+    assert not s.authorized(job,db_factory=db_factory)
+    monkeypatch.setenv("AFAAQ_COMMENTS_ENABLED","1")
+    assert not s.authorized(job,db_factory=db_factory)
+    assert s.claim(ACCOUNT,db_factory) is None
+
+def test_daily_rate_limit(db_factory,monkeypatch):
+    live(monkeypatch)
+    for i in range(51):
+        event=payload();event["id"]=str(i);event["comment"]["id"]=str(i)
+        s.enqueue(event,db_factory);job=s.claim(ACCOUNT,db_factory)
+        key=s.reserve_send(job,p.REPLIES["thanks"],db_factory)
+        assert bool(key)==(i<50)
+        if key:s.complete_send(job,"sent","reply-"+str(i),db_factory)
+        with db_factory() as c:
+            c.execute("UPDATE afaaq_comment_outbox SET created_at=NOW()-INTERVAL '2 hours'")
+
+def test_stale_queue_holds(db_factory):
+    s.enqueue(payload(),db_factory)
+    with db_factory() as c:c.execute("UPDATE afaaq_comment_jobs SET created_at=NOW()-INTERVAL '2 days'")
+    assert s.claim(ACCOUNT,db_factory) is None
+
 if __name__=="__main__":
     if not os.environ.get("AFAAQ_TEST_DATABASE_URL"):
         raise SystemExit("AFAAQ_TEST_DATABASE_URL required; no production fallback")

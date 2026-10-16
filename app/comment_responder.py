@@ -131,6 +131,16 @@ async def readiness(request: Request):
             "limits":{"model_calls_per_day":50,"model_output_tokens":256,"replies_per_hour":10,"replies_per_day":50},
             "activation_requires":"verified account/profile/owner identity, signed webhook and owner-approved pilot"}
 
+@router.get("/comment-assistant/jobs/{account_id}")
+async def review_queue(account_id: str, request: Request):
+    from app.storage import get_session
+    session = get_session(request.cookies.get("gla_session"))
+    if not session or session.get("role") != "admin":
+        raise HTTPException(403)
+    if account_id not in policy.KNOWN:
+        raise HTTPException(404)
+    return {"jobs":await run_in_threadpool(store.review_queue,account_id)}
+
 def register_worker(app):
     async def loop():
         while True:

@@ -31,6 +31,8 @@ def screen(text):
     if not isinstance(text, str) or not text.strip() or len(text) > 1200:
         return "review"
     text = clean(text)
+    if any(unicodedata.category(c).startswith("C") for c in text):
+        return "review"
     if SENSITIVE.search(text) or INJECTION.search(text) or COMPLAINT.search(text) or re.search(r"\u0647\u0648\u064a|\u0631\u0642\u0645", text):
         return "review"
     return "safe"

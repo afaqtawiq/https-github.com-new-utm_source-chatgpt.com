@@ -72,6 +72,8 @@ def claim(account, db_factory=None):
     cfg = policy.config(account)
     with (db_factory or database)() as c:
         s = settings(c,account,cfg)
+        c.execute("""UPDATE afaaq_comment_jobs SET status='held',question='',reason='stale_job'
+            WHERE account_id=%s AND status='queued' AND created_at<NOW()-INTERVAL '24 hours'""",(account,))
         # A crash after send reservation can have reached the provider.
         c.execute("""UPDATE afaaq_comment_outbox SET status='uncertain'
             WHERE job_id IN (SELECT id FROM afaaq_comment_jobs WHERE account_id=%s
@@ -175,4 +177,11 @@ def reconcile(job_id, provider_id, evidence, db_factory=None):
                 or not isinstance(provider_id,str) or not provider_id):
             return False
     return complete_send(row,"sent",provider_id,db_factory)
+
+def review_queue(account, db_factory=None):
+    if account not in policy.KNOWN:
+        raise ValueError("Unapproved account")
+    with (db_factory or database)() as c:
+        return c.execute("""SELECT id,account_id,post_id,comment_id,status,reason,reply,created_at
+            FROM afaaq_comment_jobs WHERE account_id=%s ORDER BY id DESC LIMIT 100""",(account,)).fetchall()
 
