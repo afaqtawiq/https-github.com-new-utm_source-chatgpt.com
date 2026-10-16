@@ -98,6 +98,15 @@ async def receive(request: Request):
         return JSONResponse({"error":"Invalid payload"}, status_code=400)
     if p.get("event") == "webhook.test":
         return {"ok":True,"test":True}
+    if p.get("event") == "comment.received":
+        from app import comment_store
+        try:
+            await run_in_threadpool(comment_store.init_storage)
+            return await run_in_threadpool(comment_store.enqueue, p)
+        except ValueError:
+            return JSONResponse({"error":"Invalid comment payload"}, status_code=400)
+        except Exception:
+            return JSONResponse({"error":"Comment storage unavailable"}, status_code=503)
     if p.get("event") != "message.received":
         return {"ok":True,"ignored":"not_inbound_message"}
     metadata = p.get("metadata") or {}
