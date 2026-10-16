@@ -179,3 +179,7 @@ from app.whatsapp_document_review import router as whatsapp_document_review_rout
 from app.whatsapp_outgoing_diagnostic import router as whatsapp_outgoing_diagnostic_router
 app.include_router(whatsapp_document_review_router)
 app.include_router(whatsapp_outgoing_diagnostic_router)
+
+from app.comment_responder import router as comment_router, register_worker as register_comment_worker
+app.include_router(comment_router)
+register_comment_worker(app)
