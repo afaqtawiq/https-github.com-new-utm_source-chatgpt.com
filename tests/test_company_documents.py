@@ -55,7 +55,7 @@ def login(client,database,role='admin',active=1,change=0,expired=False):
 
 
 def sample(fmt='PNG',color=None):
-    data=io.BytesIO();Image.new('RGB',(12,12),color or (int(uuid4().hex[:6],16)%255,44,55)).save(data,fmt)
+    data=io.BytesIO();Image.new('RGB',(12,12),color or tuple(uuid4().bytes[:3])).save(data,fmt)
     return data.getvalue()
 
 
@@ -112,6 +112,7 @@ def test_duplicate_concurrent_uploads_do_not_overwrite_original(client,database)
 def test_csrf_metadata_and_dates(client,database):
     _,csrf=login(client,database)
     assert upload(client,'bad').status_code==403
+    assert upload(client,'رمز غير صالح').status_code==403
     for fields in [{'name':'x'},{'kind':'customer_invoice'},{'expires_on':'2025-01-01'},{'issued_on':'wrong'}]:assert upload(client,csrf,**fields).status_code==422
     malicious='<script>alert("x")</script>'
     assert upload(client,csrf,name=malicious).status_code==303
@@ -163,3 +164,52 @@ def test_no_edit_delete_and_audit_does_not_contain_sensitive_metadata(client,dat
     assert all(set(e)=={'id','document_id','actor_id','action','created_at'} for e in events)
     assert 'SYNTHETIC COMPANY DOCUMENT' not in str(events) and row['sha256'] not in str(events)
     assert record(database,content)['content']==row['content']
+
+
+def test_role_revoked_during_validation_cannot_archive(client,database,monkeypatch):
+    uid,csrf=login(client,database);content=sample()
+    original=archive.check_file
+    def validate_then_revoke(*args):
+        result=original(*args)
+        with database() as c:c.execute("UPDATE users SET role='viewer' WHERE id=%s",(uid,))
+        return result
+    monkeypatch.setattr(archive,'check_file',validate_then_revoke)
+    assert upload(client,csrf,content).status_code==403
+    assert record(database,content) is None
+
+
+def test_audit_entries_are_immutable(client,database):
+    uid,csrf=login(client,database);assert upload(client,csrf).status_code==303
+    for statement in ('DELETE FROM company_document_audit WHERE actor_id=%s',
+                      "UPDATE company_document_audit SET action='list' WHERE actor_id=%s"):
+        with pytest.raises(psycopg.Error):
+            with database() as c:c.execute(statement,(uid,))
+
+
+def test_invalid_multipart_does_not_archive(client,database):
+    _,csrf=login(client,database)
+    files=[('file',('one.png',sample(),'image/png')),('file',('two.png',sample(),'image/png'))]
+    data={'csrf':csrf,'name':'SYNTHETIC','kind':'other','issued_on':'','expires_on':''}
+    assert client.post('/company-documents',data=data,files=files).status_code==413
+    assert client.post('/company-documents',content=b'broken',headers={'content-type':'multipart/form-data'}).status_code==413
+    assert client.post('/company-documents',json=data).status_code==415
+
+
+def test_corrupted_read_never_releases_bytes(client,database,monkeypatch):
+    _,csrf=login(client,database);content=sample();assert upload(client,csrf,content).status_code==303
+    row=record(database,content)
+    class CorruptCursor:
+        def __init__(self,cursor):self.cursor=cursor
+        def fetchone(self):return {**self.cursor.fetchone(),'sha256':'0'*64}
+    class CorruptConnection:
+        def __init__(self,c):self.c=c
+        def execute(self,statement,args=()):
+            cursor=self.c.execute(statement,args)
+            return CorruptCursor(cursor) if statement.startswith('SELECT media_type,content,sha256') else cursor
+    @contextmanager
+    def corrupted():
+        with database() as c:yield CorruptConnection(c)
+    monkeypatch.setattr(archive,'database',corrupted)
+    response=client.get(f'/company-documents/{row["id"]}/download')
+    assert response.status_code==409 and response.content!=content
+    assert bytes(record(database,content)['content'])==content

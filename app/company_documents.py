@@ -114,7 +114,7 @@ async def upload_form(request,actor):
     try:
         form=await parser.parse()
         if set(form)!={'csrf','name','kind','issued_on','expires_on','file'} or any(len(form.getlist(k))!=1 for k in form):raise HTTPException(400)
-        if not isinstance(form['csrf'],str) or not hmac.compare_digest(form['csrf'],actor['csrf']):raise HTTPException(403)
+        if not isinstance(form['csrf'],str) or not hmac.compare_digest(form['csrf'].encode('utf-8'),actor['csrf'].encode('utf-8')):raise HTTPException(403)
         name=str(form['name']).strip();kind=str(form['kind'])
         if not 2<=len(name)<=120 or re.search(r'[\x00-\x1f\x7f]',name) or kind not in KINDS:raise HTTPException(422,'راجع اسم المستند ونوعه')
         try:issued=date.fromisoformat(form['issued_on']) if form['issued_on'] else None;expires=date.fromisoformat(form['expires_on']) if form['expires_on'] else None
