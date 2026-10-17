@@ -97,3 +97,37 @@ def test_paused_conversation_still_allows_reviewed_manual_draft(handoff, monkeyp
     response = client.post(path + '/send', data={'csrf': 'csrf', 'confirm': 'yes'})
     assert response.status_code == 200 and 'accepted' in response.text
     assert len(provider['posts']) == 1 and state['paused']
+
+
+@pytest.mark.parametrize('paused', [False, True])
+def test_legacy_event_without_message_id_retains_verified_atomic_scope(monkeypatch, paused):
+    import asyncio
+    calls = []
+    monkeypatch.setattr(z, 'account_id', lambda: 'test-account')
+    def capture(**values):
+        calls.append(values)
+        return {'account_id': values['account_id'], 'conversation_id': values['conversation_id'],
+                'paused': paused, 'held': paused, 'generation': 3}
+    monkeypatch.setattr(control.store, 'capture_inbound', capture)
+    payload = {'id': 'synthetic-event', 'event': 'message.received',
+               'account': {'accountId': 'test-account', 'platform': 'whatsapp'},
+               'conversation': {'id': 'test-conversation', 'participantId': '966500000001'},
+               'message': {'direction': 'incoming', 'text': 'Synthetic only',
+                           'sender': {'phoneNumber': '966500000001', 'id': '966500000001'}}}
+    result = asyncio.run(control.inbound(payload))
+    assert result['generation'] == 3 and result['held'] == paused
+    assert result['sender'] == '966500000001'
+    assert calls[0]['message_id'].startswith('legacy-event:') and calls[0]['return_state']
+    assert 'id' not in payload['message']
+
+
+def test_missing_message_id_does_not_relax_participant_validation(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(z, 'account_id', lambda: 'test-account')
+    monkeypatch.setattr(control.store, 'capture_inbound', lambda **kwargs: pytest.fail('Unverified receipt'))
+    monkeypatch.setattr(control.store, 'read_state', lambda *args: {'paused': True, 'generation': 2})
+    payload = {'id': 'synthetic-event', 'event': 'message.received',
+               'account': {'accountId': 'test-account', 'platform': 'whatsapp'},
+               'conversation': {'id': 'test-conversation', 'participantId': '966500000002'},
+               'message': {'direction': 'incoming', 'sender': {'phoneNumber': '966500000001'}}}
+    assert asyncio.run(control.inbound(payload))['held']

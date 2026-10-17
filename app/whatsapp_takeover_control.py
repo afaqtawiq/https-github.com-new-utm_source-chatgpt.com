@@ -1,6 +1,7 @@
 """Existing admin/MFA authority controls scoped handoff; no global configuration changes."""
 from contextlib import asynccontextmanager
 from html import escape
+import hashlib
 from urllib.parse import urlencode
 
 import anyio
@@ -42,7 +43,7 @@ async def guard(account, cid, sender, state):
         # No known paused conversation and no freeform thread. Serialize template
         # dispatch on recipient too, because pause can discover a thread meanwhile.
         target = 'recipient:' + sender
-    manager = store.send_guard(account, target, state['generation'], sender=sender)
+    manager = store.send_guard(account, target, state['generation'], sender=sender or None)
     entered = False
     try:
         # Cancellation must not abandon a lock acquired in a worker thread.
@@ -61,6 +62,15 @@ async def guard(account, cid, sender, state):
 async def inbound(payload):
     from app.whatsapp_agent import identity
     who = identity(payload)
+    message = payload.get('message') or {}
+    event_id = payload.get('id')
+    if (not who and isinstance(message, dict) and not message.get('platformMessageId')
+            and not message.get('id') and isinstance(event_id, str) and 0 < len(event_id) <= 255):
+        # Older signed legacy events have an event ID but no platform message ID.
+        # Retain/deduplicate them under an explicit event-derived receipt identity,
+        # while preserving every account/participant/direction check.
+        receipt_id = 'legacy-event:' + hashlib.sha256(event_id.encode()).hexdigest()
+        who = identity({**payload, 'message': {**message, 'id': receipt_id}})
     if not who:
         account = payload.get('account') or {}
         cid = (payload.get('conversation') or {}).get('id')
