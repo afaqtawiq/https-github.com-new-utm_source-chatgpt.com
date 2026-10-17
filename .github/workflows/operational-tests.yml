@@ -30,6 +30,12 @@ jobs:
       - run: python -m pytest tests/test_whatsapp_takeover.py tests/test_whatsapp_takeover_control.py tests/test_whatsapp_takeover_transport.py tests/test_whatsapp_takeover_thread_context.py tests/test_whatsapp_operator_context.py -q
         env:
           WHATSAPP_TAKEOVER_TEST_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python -m pytest tests/test_company_documents.py -q
+        env:
+          COMPANY_ARCHIVE_TEST_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python tests/company_archive_postgres_acceptance.py
+        env:
+          COMPANY_ARCHIVE_TEST_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python -m pytest tests/test_comment_responder.py tests/test_comment_identity.py -q
       - run: python tests/comment_postgres_acceptance.py
         env:
