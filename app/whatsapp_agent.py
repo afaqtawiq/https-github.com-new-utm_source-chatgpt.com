@@ -22,6 +22,7 @@ from app import zernio_whatsapp as z
 from app import whatsapp_inbox as inbox
 from app import whatsapp_agent_store as store
 from app import whatsapp_agent_privacy as privacy
+from app import whatsapp_operator_context as operator_context_reader
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -105,7 +106,8 @@ def claim_legacy_message(connection, payload):
     who = identity(payload)
     if not who:
         return True
-    return store.claim_legacy(connection, **who)
+    scope = {'takeover_expected_generation': payload['_takeover_generation']} if '_takeover_generation' in payload else {}
+    return store.claim_legacy(connection, **who, **scope)
 
 
 def accept_inbound(payload):
@@ -155,6 +157,9 @@ def accept_inbound(payload):
             'question_reason':decision.reason,'attachments':snapshots,
             'attachment_count':len(attachments),'quoted_reference_present':quote_present,
             'quoted_platform_message_id':quoted_id}
+    if '_takeover_generation' in payload:
+        # Receiver supplies the database generation after validating the event.
+        data['takeover_expected_generation'] = payload['_takeover_generation']
     with store.database() as c:
         c.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (who['conversation_id'],))
         prior = c.execute('SELECT event_id FROM zernio_reply_events WHERE event_id=%s', (who['event_id'],)).fetchone()
@@ -205,12 +210,15 @@ async def processing(job):
     model_hashes = settings['approved_sha256']
     conversation_history = ()
     conversation_scope = None
+    operator_context = ()
     if data.get('question_allowed') and data.get('question_kind') in ('operations','conversation','document_question'):
         conversation_scope = {key:job[key] for key in
                               ('account_id','sender','conversation_id','authorization_generation')}
         conversation_scope['before_job_id'] = jid
         conversation_history = await run_in_threadpool(store.recent_exchanges,
             account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid)
+        if data.get('quoted_reference_present') and not data.get('attachments'):
+            operator_context = await operator_context_reader.read_context(job)
     if job.get('document_checkpointed_at'):
         text, digest, source_id = job.get('document_text') or '', job.get('document_sha256'), job.get('context_source_job_id')
         document_status = job.get('document_status')
@@ -265,7 +273,7 @@ async def processing(job):
             latest = (await run_in_threadpool(store.recent_attachment_outcome,
                 account_id=job['account_id'],sender=job['sender'],conversation_id=job['conversation_id'],before_job_id=jid,**lookup)
                 if not quoted or quoted_id else None)
-            quote_unavailable = quoted and latest is None
+            quote_unavailable = quoted and latest is None and not any(row['quoted'] for row in operator_context)
             if latest and latest['document_status'] in ('unavailable','quarantined'):
                 unread = latest
             context = (await run_in_threadpool(store.recent_context,account_id=job['account_id'],sender=job['sender'],
@@ -350,6 +358,8 @@ async def processing(job):
             # The selected PDF is separately provenance-bound; older ordinary
             # chat must not obscure the document referent or enter by accident.
             conversation_history = ()
+        elif not data.get('quoted_reference_present'):
+            operator_context = await operator_context_reader.read_context(job)
         if not await run_in_threadpool(store.reserve_model,jid,lease):
             return
         try:
@@ -359,7 +369,8 @@ async def processing(job):
                     raise store.StateConflict('Model scope changed before request')
             result = await privacy.understand(data['question'],text,history=(),document_sha256=digest,
                                              approved_hashes=model_hashes,before_request=model_guard,reviewed_excerpt=bool(review_id),
-                                             conversation_history=conversation_history,conversation_scope=conversation_scope)
+                                             conversation_history=conversation_history,conversation_scope=conversation_scope,
+                                             operator_context=operator_context)
             await run_in_threadpool(store.save_model,jid,lease,reply_text=result.text,
                                     diagnostics={'model_success':bool(result.ok and result.used_model),
                                                  'model_attempted':result.used_model,'model_reason':result.reason})
@@ -382,7 +393,7 @@ async def dispatch(job):
             raise z.WhatsAppBlocked('Reply scope changed')
     state, mid, reason = 'uncertain', None, 'send_outcome_unknown'
     try:
-        with z.dispatch_guard(guard):
+        with z.automation_origin(job['account_id'], job['sender'], job['payload'].get('takeover_generation', 0)), z.dispatch_guard(guard):
             result = await z.send(job['sender'],job['reply_text'],expected_account=job['account_id'],
                                   expected_conversation=job['conversation_id'],idempotency_key=job['idempotency_key'])
         state, mid, reason = 'sent',result['messages'][0]['id'],'provider_accepted'

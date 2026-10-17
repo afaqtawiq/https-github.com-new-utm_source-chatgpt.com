@@ -27,6 +27,10 @@ TERMINAL = frozenset({"sent", "blocked", "uncertain", "failed"})
 MODES = frozenset({"off", "owner_pilot", "routine"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _UNSET = object()
+# Installed by bootstrap; optional for isolated store consumers.
+conversation_admission = None
+# Legacy may send inside its transaction; inspect without retaining the send fence.
+conversation_inspection = None
 
 
 class StateConflict(RuntimeError):
@@ -590,6 +594,12 @@ def enqueue(connection, *, account_id, message_id, event_id, sender,
         _identifier(value, name)
     if not isinstance(payload, dict):
         raise ValueError("payload must be a sanitized object")
+    takeover = conversation_admission(connection, account_id, conversation_id) if conversation_admission else None
+    takeover_stale = (takeover is not None and "takeover_expected_generation" in payload and
+        (type(payload["takeover_expected_generation"]) is not int or
+         payload["takeover_expected_generation"] != takeover["generation"]))
+    if takeover is not None:
+        payload = dict(payload, takeover_generation=takeover["generation"])
     encoded = _json(payload)
     settings = _settings(connection, account_id, now=now, lock=True)
     old = connection.execute("""SELECT j.* FROM whatsapp_agent_events e
@@ -609,6 +619,10 @@ def enqueue(connection, *, account_id, message_id, event_id, sender,
                                   (account_id, message_id)).fetchone())
     connection.execute("""INSERT INTO whatsapp_agent_events(account_id,event_id,job_id)
         VALUES(%s,%s,%s) ON CONFLICT(account_id,event_id) DO NOTHING""", (account_id, event_id, job["id"]))
+    if job["status"] == "pending" and takeover is not None and (takeover["paused"] or takeover_stale):
+        _terminal(connection, job, "blocked", now, {"reason":
+            "conversation_takeover" if takeover["paused"] else "conversation_generation_changed"})
+        job = _job(connection, job["id"])
     if job["status"] == "pending" and not _enabled(settings, job):
         _terminal(connection, job, "blocked", now, {"reason": "mode_or_sender_not_enabled"})
         job = _job(connection, job["id"])
@@ -1247,7 +1261,7 @@ def send_authorized(job_id, send_token, *, db_factory=None, now=None):
 
 
 def claim_legacy(connection, *, account_id, message_id, event_id, sender,
-                 conversation_id, now=None):
+                 conversation_id, now=None, takeover_expected_generation=_UNSET):
     """Claim identity ownership for the legacy lane, never agent work.
 
     Call inside the receiver's existing conversation-advisory transaction, before
@@ -1259,6 +1273,11 @@ def claim_legacy(connection, *, account_id, message_id, event_id, sender,
                         ("event_id", event_id), ("sender", sender),
                         ("conversation_id", conversation_id)):
         _identifier(value, name)
+    takeover = conversation_inspection(connection, account_id, conversation_id) if conversation_inspection else None
+    held = takeover is not None and (takeover["paused"] or
+        (takeover_expected_generation is not _UNSET and
+         (type(takeover_expected_generation) is not int or
+          takeover_expected_generation != takeover["generation"])))
     settings = _settings(connection, account_id, now=now, lock=True)
     if connection.execute("""SELECT job_id FROM whatsapp_agent_events
         WHERE account_id=%s AND event_id=%s""", (account_id, event_id)).fetchone():
@@ -1279,10 +1298,11 @@ def claim_legacy(connection, *, account_id, message_id, event_id, sender,
         VALUES(%s,%s,%s,%s,%s,%s,'blocked',%s,%s,%s,%s,%s,%s)
         ON CONFLICT(account_id,message_id) DO NOTHING RETURNING id""",
         (account_id, message_id, event_id, sender, conversation_id,
-         _json({"legacy_owned": True}), _json({"reason": "legacy_lane_owned"}), key,
+         _json({"legacy_owned": not held}), _json({"reason":
+             "conversation_takeover" if held else "legacy_lane_owned"}), key,
          settings["authorization_generation"], stamp, stamp, stamp)).fetchone()
     if not inserted:
         return False
     connection.execute("""INSERT INTO whatsapp_agent_events(account_id,event_id,job_id)
         VALUES(%s,%s,%s)""", (account_id, event_id, inserted["id"]))
-    return True
+    return not held
