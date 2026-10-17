@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from app import zernio_whatsapp as z
 
 router = APIRouter()
+takeover_render = None
 
 
 @contextmanager
@@ -162,6 +163,8 @@ async def inbox(request: Request):
                    or m.get('conversationId', cid) != cid for m in messages):
                 raise z.WhatsAppBlocked('Message identity mismatch')
             body = '<h2>' + escape(str(row.get('participantName') or '')) + ' · +' + escape(z.phone(row['participantId'])) + '</h2>'
+            if takeover_render is not None:
+                body += await takeover_render(z.account_id(), cid, z.phone(row['participantId']), current['csrf'])
             body += ''.join(render_message(m, cid, current['csrf']) for m in messages) or '<p>لم تظهر رسائل؛ النتيجة لا تثبت عدم وجود تواصل سابق.</p>'
             body += next_link(payload.get('pagination') or {}, conversation=cid)
             body += '<form method="post" action="/whatsapp-inbox/drafts"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '"><input type="hidden" name="conversation" value="' + escape(cid) + '"><label>رد للمراجعة<textarea name="body" maxlength="4000" required></textarea></label><p>لا يُرسل الآن. إرسال الرد بعد المراجعة يحتاج صلاحية المدير والتحقق الإضافي ونافذة 24 ساعة مفتوحة. خارجها يلزم قالب معتمد عبر المسار المخصص.</p><button>حفظ مسودة الرد</button></form>'
@@ -243,7 +246,7 @@ async def send_draft(token: str, request: Request):
         def recheck_authority():
             if send_authority(request)['user_id'] != current['user_id']:
                 raise z.WhatsAppBlocked('Manager changed before send')
-        with z.dispatch_guard(recheck_authority):
+        with z.manual_dispatch(), z.dispatch_guard(recheck_authority):
             result = await z.send(item['recipient'], item['body'], expected_account=item['account_id'],
                                   expected_conversation=item['conversation_id'])
         state, receipt = 'accepted', result['messages'][0]['id']
@@ -909,7 +912,7 @@ async def document_send(token: str, request: Request):
             document_actor(request, actor, item['account_id'], sending=True)
             if not documents.send_authorized(token, item['send_token'], db_factory=database):
                 raise z.WhatsAppBlocked('Document draft is no longer authorized')
-        with z.dispatch_guard(authority):
+        with z.manual_dispatch(), z.dispatch_guard(authority):
             result = await z.send_document(item['recipient'], item['content'], item['filename'], item['caption'],
                 expected_account=item['account_id'], expected_conversation=item['conversation_id'],
                 idempotency_key=item['idempotency_key'])

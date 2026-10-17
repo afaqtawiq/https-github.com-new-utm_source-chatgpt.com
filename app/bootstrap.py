@@ -64,7 +64,7 @@ def role_allowed(request,s):
  return not any(path==p or path.startswith(p+'/') for p in ROLE_PREFIX.get(role,()))
 def sensitive_permission(request):
  path=request.url.path
- if request.method=='POST' and path in ('/whatsapp-assistant/settings','/whatsapp-assistant/accept'):return 'send_whatsapp'
+ if request.method=='POST' and path in ('/whatsapp-assistant/settings','/whatsapp-assistant/accept','/whatsapp-inbox/takeover'):return 'send_whatsapp'
  if request.method=='POST' and path.startswith('/whatsapp-inbox/drafts/') and path.endswith('/send'):return 'send_whatsapp'
  if request.method=='POST' and path.startswith('/customer-campaigns/'):
   if path.endswith('/send/email') or path=='/customer-campaigns/schedule':return 'send_email'
@@ -174,6 +174,8 @@ app.include_router(finance_workspace_router)
 from app.whatsapp_agent import router as whatsapp_agent_router, register_worker as register_whatsapp_agent_worker
 app.include_router(whatsapp_agent_router)
 register_whatsapp_agent_worker(app)
+from app.whatsapp_takeover_control import register as register_whatsapp_takeover
+register_whatsapp_takeover(app)
 
 from app.whatsapp_document_review import router as whatsapp_document_review_router
 from app.whatsapp_outgoing_diagnostic import router as whatsapp_outgoing_diagnostic_router

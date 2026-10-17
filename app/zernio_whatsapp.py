@@ -31,6 +31,50 @@ _monotonic = time.monotonic
 _wall_time = time.time
 _batch = ContextVar('zernio_transport_batch', default=None)
 _dispatch_guard = ContextVar('zernio_dispatch_guard', default=None)
+_manual_dispatch = ContextVar('zernio_manual_dispatch', default=False)
+_automation_origin = ContextVar('zernio_automation_origin', default=None)
+# Installed by bootstrap; standalone adapter tests do not require a database.
+automation_snapshot = None
+automation_guard = None
+
+
+@contextmanager
+def manual_dispatch():
+    """Only for reviewed sends after the existing permission/MFA guard."""
+    token = _manual_dispatch.set(True)
+    try:
+        yield
+    finally:
+        _manual_dispatch.reset(token)
+
+
+@contextmanager
+def automation_origin(account, recipient, generation):
+    token = _automation_origin.set((account, phone(recipient), generation))
+    try:
+        yield
+    finally:
+        _automation_origin.reset(token)
+
+
+async def automated_snapshot(account, target):
+    if _manual_dispatch.get() or automation_snapshot is None:
+        return None
+    state = await automation_snapshot(account, target)
+    origin = _automation_origin.get()
+    if origin and origin[:2] == (account, target):
+        state = {**state, 'generation': origin[2]}
+    return state
+
+
+@asynccontextmanager
+async def automated_send(account, cid, target, snapshot):
+    if _manual_dispatch.get() or automation_guard is None:
+        yield
+    else:
+        async with automation_guard(account, cid, target, snapshot):
+            yield
+
 
 
 class WhatsAppBlocked(RuntimeError):
@@ -396,6 +440,7 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_', expect
         raise WhatsAppBlocked('رقم المستلم أو نص الرسالة غير صالح')
     if expected_account is not None and expected_account != account_id():
         raise WhatsAppBlocked('تغير حساب واتساب؛ لم تُرسل الرسالة')
+    takeover = await automated_snapshot(account_id(), target)
     async with transport_batch() as batch:
         c = await batch.get_client()
         await validate_account(c)
@@ -452,7 +497,14 @@ async def send(recipient, message, *, template_prefix='afaaq_transport_', expect
             _check_deadline(batch, path, deadline)
             _check_account(batch, path)
             _check_window(batch, path, target, cid, proof)
-            response = await c.post(BASE + path, json=body, headers={'Idempotency-Key': idempotency_key or 'afaaq-' + uuid.uuid4().hex})
+            async with automated_send(batch.account, cid, target, takeover):
+                if guard is not None and automation_guard is not None and not _manual_dispatch.get():
+                    checked = guard()
+                    if inspect.isawaitable(checked):
+                        await checked
+                _check_account(batch, path)
+                _check_window(batch, path, target, cid, proof)
+                response = await c.post(BASE + path, json=body, headers={'Idempotency-Key': idempotency_key or 'afaaq-' + uuid.uuid4().hex})
             _observe_rate(batch, response)
         if 400 <= response.status_code < 500 and response.status_code not in (408, 409):
             error = WhatsAppBlocked('رفض مزود واتساب الإرسال (HTTP ' + str(response.status_code) + ')؛ راجع القالب وصلاحية الحساب')
@@ -516,6 +568,7 @@ async def send_document(recipient, content, filename, caption='', *, expected_ac
         raise WhatsAppBlocked('وصف الملف غير صالح؛ لم يُرسل الملف')
     if _dispatch_guard.get() is None:
         raise WhatsAppBlocked('يلزم التحقق من صلاحية إرسال الملف قبل المحاولة')
+    takeover = await automated_snapshot(expected_account, target)
     from app.whatsapp_inbox import validate_pdf_locally
     from starlette.concurrency import run_in_threadpool
     try:
@@ -550,10 +603,17 @@ async def send_document(recipient, content, filename, caption='', *, expected_ac
             # Caller has durably reserved this key and marked its exact reviewed
             # document as sending. No retry exists beyond this boundary.
             try:
-                response = await c.post(BASE + path,
-                    data={'accountId': batch.account, 'message': caption},
-                    files={'attachment': (filename, content, 'application/pdf')},
-                    headers={'Idempotency-Key': idempotency_key}, follow_redirects=False)
+                async with automated_send(batch.account, cid, target, takeover):
+                    if automation_guard is not None and not _manual_dispatch.get():
+                        checked = guard()
+                        if inspect.isawaitable(checked):
+                            await checked
+                    _check_account(batch, path)
+                    _check_window(batch, path, target, cid, proof)
+                    response = await c.post(BASE + path,
+                        data={'accountId': batch.account, 'message': caption},
+                        files={'attachment': (filename, content, 'application/pdf')},
+                        headers={'Idempotency-Key': idempotency_key}, follow_redirects=False)
             except (httpx.HTTPError, TimeoutError, asyncio.CancelledError):
                 raise WhatsAppDocumentSendUncertain(None) from None
             _observe_rate(batch, response)

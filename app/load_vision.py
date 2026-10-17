@@ -11,6 +11,7 @@ import math
 import os
 import re
 import threading
+from contextvars import copy_context
 from urllib.parse import quote
 
 import httpx
@@ -137,7 +138,7 @@ def _start_workflow(shipment_id):
             asyncio.run(contact_owner(shipment_id, approved=True))
         except Exception:
             pass  # the workflow records its own status; the owner can retry from /freight-workflow
-    threading.Thread(target=run, daemon=True).start()
+    threading.Thread(target=copy_context().run, args=(run,), daemon=True).start()
 
 
 def summary(fields, saved):

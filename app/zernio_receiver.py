@@ -21,6 +21,7 @@ team_reply = None
 # Optional durable lane, installed only by the production bootstrap.
 durable_inbound = None
 durable_legacy_claim = None
+takeover_inbound = None
 
 def valid_signature(raw, signature, secret):
     return bool(secret and signature and hmac.compare_digest(
@@ -126,6 +127,13 @@ async def receive(request: Request):
         return JSONResponse({"error":"Missing event or conversation identifiers"}, status_code=400)
     ensure_tables()
     ensure_intake_tables()
+    takeover = await takeover_inbound(p) if takeover_inbound is not None else None
+    if takeover and takeover.get('held'):
+        return {'ok': True, 'held_for_operator': True, 'automatic_retry_of_send': False}
+    # Overwrite any webhook-supplied value; only the database snapshot grants scope.
+    p.pop('_takeover_generation', None)
+    if takeover is not None:
+        p['_takeover_generation'] = takeover['generation']
     legacy_local_only = False
     if durable_inbound is not None:
         queued = await run_in_threadpool(durable_inbound, p)
@@ -251,24 +259,35 @@ async def receive(request: Request):
     if legacy_local_only:
         from app.command_ai import LEGACY_MODEL_DISABLED
         model_token = LEGACY_MODEL_DISABLED.set(True)
+    from app import zernio_whatsapp as transport
     try:
-        prepared = await run_in_threadpool(prepare_reply)
+        with transport.automation_origin(account_id, (takeover or {}).get('sender', ''), (takeover or {}).get('generation', 0)):
+            prepared = await run_in_threadpool(prepare_reply)
     finally:
         if model_token is not None:
             LEGACY_MODEL_DISABLED.reset(model_token)
     if prepared is None:
+        if takeover_inbound is not None:
+            await takeover_inbound(p)  # Retain a receipt if pause won the intake race.
         return {"ok":True,"duplicate":True}
     agent, reply = prepared
     if transport_action:
         # Only an action selected by the verified private intake transaction may
         # cross into the transport workflow after commit.
-        reply = await advance_transport(transport_action, reply)
+        from app import zernio_whatsapp as transport
+        with transport.automation_origin(account_id, (takeover or {}).get('sender', ''), (takeover or {}).get('generation', 0)):
+            reply = await advance_transport(transport_action, reply)
+    from app import zernio_whatsapp as transport
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",
-                headers={"Authorization":"Bearer "+key,"Idempotency-Key":"shawahid-"+event_id},
-                json={"accountId":account_id, **reply})
-        state = "sent" if result.is_success else "rejected"
+        async with transport.automated_send(account_id, conversation_id,
+                (takeover or {}).get('sender', ''), takeover):
+            async with httpx.AsyncClient(timeout=15) as client:
+                result = await client.post("https://zernio.com/api/v1/inbox/conversations/"+quote(conversation_id,safe="")+"/messages",
+                    headers={"Authorization":"Bearer "+key,"Idempotency-Key":"shawahid-"+event_id},
+                    json={"accountId":account_id, **reply})
+            state = "sent" if result.is_success else "rejected"
+    except transport.WhatsAppBlocked:
+        state = "blocked"
     except httpx.HTTPError:
         state = "uncertain"
     with db() as c:

@@ -26,6 +26,10 @@ CONVERSATION='synthetic-conversation'
 
 @pytest.fixture
 def setup(monkeypatch):
+    # Legacy worker scenarios have no additional verified provider context.
+    async def no_operator_context(job):
+        return ()
+    monkeypatch.setattr(agent.operator_context_reader, 'read_context', no_operator_context)
     sql=sqlite3.connect(':memory:',check_same_thread=False);sql.row_factory=sqlite3.Row
     lock=threading.RLock()
     class Connection:
@@ -929,3 +933,22 @@ def test_official_service_reply_at_exhausted_budget_without_reset(setup):
     assert job['model_started_at'] is None and not setup['model_calls']
     ordinary = agent.accept_inbound(payload(21, 'كيف أجهز شحنة؟')); assert tick()
     assert store.get_job(ordinary['job_id'])['reply_text'] == store.MODEL_BUDGET_NOTICE
+
+
+def test_worker_passes_verified_operator_context_to_text_model_only(setup, monkeypatch):
+    context_rows = ({'direction': 'outgoing', 'quoted': False,
+                     'text': 'أنا نيرمين، المساعدة الرقمية لآفاق طويق. ما المسار المطلوب؟'},)
+    async def read_context(job):
+        assert job['account_id'] == ACCOUNT and job['conversation_id'] == CONVERSATION
+        return context_rows
+    async def model(question, document_text, **kwargs):
+        assert not document_text
+        assert kwargs['operator_context'] == context_rows
+        await kwargs['before_request']()
+        setup['model_calls'].append(question)
+        return privacy.ReplyResult('ما نوع الحمولة؟', True, True, 'model_answer')
+    monkeypatch.setattr(agent.operator_context_reader, 'read_context', read_context)
+    monkeypatch.setattr(privacy, 'understand', model)
+    result = agent.accept_inbound(payload(1, 'أحتاج نقلًا من تبوك إلى حائل'))
+    assert tick() and store.get_job(result['job_id'])['status'] == 'sent'
+    assert len(setup['model_calls']) == 1 and len(setup['sends']) == 1

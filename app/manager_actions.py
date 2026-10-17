@@ -17,6 +17,7 @@ import json
 import os
 import re
 import threading
+from contextvars import copy_context
 
 import httpx
 
@@ -135,7 +136,7 @@ def deliver(number, text):
             box['result'] = asyncio.run(wa.send(number, message, template_prefix='afaaq_marketing_'))
         except Exception as error:
             box['error'] = error
-    worker = threading.Thread(target=run)
+    worker = threading.Thread(target=copy_context().run, args=(run,))
     worker.start()
     worker.join(60)
     if 'error' in box:
