@@ -239,3 +239,13 @@ def test_other_legacy_account_is_not_disabled(monkeypatch):
         async with control.guard('other-test', 'other-thread', '', None):
             return True
     assert asyncio.run(check()) is True
+
+
+def test_managed_legacy_account_switch_cannot_bypass_captured_fence(monkeypatch):
+    from app import whatsapp_takeover_control as control
+    monkeypatch.setattr(z, 'account_id', lambda: 'new-account')
+    async def check():
+        async with control.guard('old-account', 'thread', '966500000001', {'generation': 0}):
+            pytest.fail('Must not dispatch after account switch')
+    with pytest.raises(z.WhatsAppBlocked):
+        asyncio.run(check())

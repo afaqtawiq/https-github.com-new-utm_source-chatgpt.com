@@ -87,6 +87,6 @@ removes its pause enforcement, so rollback is not a containment action.
 
 Recorded local results: full `pytest tests -q` passed 4,181 tests plus 32 subtests.
 After the final unrelated-account guard correction, the transport suite passed
-16 tests (including the new case). Independent review passed its 80 focused
+17 tests (including unrelated-account isolation and managed account-switch fencing). Independent review passed its 80 focused
 checks and reported no remaining blocker before that small scope correction.
-The reviewer is also asked to check the final correction. No live send occurred.
+The final review additionally required retaining the fence on a managed account if configuration changes during intake; this is implemented and regression-tested. No live send occurred.

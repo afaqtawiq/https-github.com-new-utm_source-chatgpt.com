@@ -28,6 +28,8 @@ async def guard(account, cid, sender, state):
     # This control manages only the existing configured Afaq account. Other
     # legacy accounts retain their own routing/authorization behavior.
     if account != z.account_id():
+        if state is not None:
+            raise z.WhatsAppBlocked('Configured account changed after intake')
         yield
         return
     if not isinstance(state, dict):
