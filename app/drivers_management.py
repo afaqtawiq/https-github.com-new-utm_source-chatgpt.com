@@ -10,7 +10,7 @@ from app.storage import execute, get_session, log, one, rows, utcnow
 
 router = APIRouter()
 
-STYLE = '''<style>body{font-family:Arial;background:#07131f;color:#eef6fb;margin:0}*{box-sizing:border-box}.wrap{max-width:1350px;margin:auto;padding:24px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.nav a,.btn{display:inline-block;padding:10px 14px;border:0;border-radius:10px;background:#18384d;color:white;font-weight:700;text-decoration:none;cursor:pointer}.btn{background:#22c55e;color:#04130a}.card{background:#102536;border:1px solid #28475d;border-radius:16px;padding:20px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.kpi{background:#0b1d2b;padding:16px;border-radius:12px}.kpi b{font-size:24px;display:block;margin-top:6px}input,select,textarea{padding:11px;border:1px solid #36586e;border-radius:9px;background:#081925;color:white;width:100%}textarea{min-height:90px}.scroll{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:right;padding:10px;border-bottom:1px solid #28475d;vertical-align:top;white-space:nowrap}.muted{color:#9fb4c4}.good{color:#86efac}.warn{color:#fde68a}.bad{color:#fca5a5}.ltr{direction:ltr;text-align:left}.pager{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:16px}</style>'''
+STYLE = '''<style>body{font-family:Arial;background:#07131f;color:#eef6fb;margin:0}*{box-sizing:border-box}.wrap{max-width:1350px;margin:auto;padding:24px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.nav a,.btn{display:inline-block;padding:10px 14px;border:0;border-radius:10px;background:#18384d;color:white;font-weight:700;text-decoration:none;cursor:pointer}.btn{background:#22c55e;color:#04130a}.card{background:#102536;border:1px solid #28475d;border-radius:16px;padding:20px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.kpi{background:#0b1d2b;padding:16px;border-radius:12px}.kpi b{font-size:24px;display:block;margin-top:6px}input,select,textarea{padding:11px;border:1px solid #36586e;border-radius:9px;background:#081925;color:white;width:100%}textarea{min-height:90px}.scroll{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:right;padding:10px;border-bottom:1px solid #28475d;vertical-align:top;white-space:nowrap}.muted{color:#9fb4c4}.good{color:#86efac}.warn{color:#fde68a}.bad{color:#fca5a5}.ltr{direction:ltr;text-align:left}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.tab{padding:10px 16px;border-radius:999px;background:#0b1d2b;border:1px solid #28475d;color:#eef6fb;text-decoration:none;font-weight:700}.tab b{background:#18384d;border-radius:999px;padding:2px 9px;margin-right:6px}.tab.on{background:#22c55e;color:#04130a;border-color:#22c55e}.tab.on b{background:#04130a;color:#86efac}.pager{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:16px}</style>'''
 
 def esc(value):
     return html.escape(str(value or ''))
@@ -40,69 +40,85 @@ def driver_form(action, driver=None):
     )
     return '<form method="post" action="'+action+'"><div class="grid"><label>اسم السائق<input name="driver_name" value="'+esc(driver.get('driver_name'))+'" required></label><label>دولة الرقم<select name="country_code">'+country_options+'</select></label><label>رقم واتساب<input class="ltr" name="whatsapp_phone" value="'+esc(driver.get('whatsapp_phone'))+'" placeholder="مثال: 0501234567" required></label><label>نوع المركبة<input name="vehicle_type" value="'+esc(driver.get('vehicle_type'))+'" required></label><label>سعة الحمولة<input name="capacity" value="'+esc(driver.get('capacity'))+'"></label><label>المدينة الحالية<input name="current_city" value="'+esc(driver.get('current_city'))+'"></label><label>المسارات المفضلة<input name="preferred_routes" value="'+esc(driver.get('preferred_routes'))+'"></label><label>التوفر<select name="availability"><option value="متاح"'+selected(driver.get('availability','متاح'),'متاح')+'>متاح</option><option value="غير متاح"'+selected(driver.get('availability'),'غير متاح')+'>غير متاح</option><option value="غير محدد"'+selected(driver.get('availability'),'غير محدد')+'>غير محدد</option></select></label><label>اسم المؤسسة<input name="company_name" value="'+esc(driver.get('company_name'))+'"></label></div><label>ملاحظات<textarea name="notes">'+esc(driver.get('notes'))+'</textarea></label><p class="muted">تسجيل السائق يضمه إلى قائمة استقبال عروض الحمولات.</p><button class="btn">حفظ السائق</button></form>'
 
-def selected(actual, expected):
-    return ' selected' if (actual or '') == expected else ''
+# Country is read from the stored number only; rows are never rewritten.
+PHONE_DIGITS = "regexp_replace(regexp_replace(COALESCE(whatsapp_phone,''),'[^0-9]','','g'),'^00','')"
+COUNTRY_TABS = {
+    'SA': ('🇸🇦 السعودية', 'left('+PHONE_DIGITS+",3)='966'"),
+    'AE': ('🇦🇪 الإمارات', 'left('+PHONE_DIGITS+",3)='971'"),
+    'other': ('دول أخرى / غير محدد', 'left('+PHONE_DIGITS+",3) NOT IN ('966','971')"),
+    'all': ('الكل', ''),
+}
 
-@router.get('/drivers', response_class=HTMLResponse)
-def drivers(request: Request, q: str = '', availability: str = '', consent: str = '', page_number: int = 1, record_type: str = ''):
-    session = auth(request)
-    if not session:
-        return RedirectResponse('/login', 303)
-    page_number = max(1, page_number)
-    clauses = []
-    args = []
-    if q.strip():
-        term = '%'+q.strip()+'%'
-        clauses.append('(driver_name ILIKE %s OR whatsapp_phone ILIKE %s OR company_name ILIKE %s OR current_city ILIKE %s OR notes ILIKE %s)')
-        args.extend([term] * 5)
-    if availability:
-        clauses.append('availability=%s')
-        args.append(availability)
-    if record_type:
-        if record_type not in DRIVER_TYPES:
-            raise HTTPException(400, 'Invalid record type')
-        clauses.append('record_type=%s'); args.append(record_type)
-    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
-    total = one('SELECT COUNT(*) n FROM drivers'+where, tuple(args))['n']
-    per_page = 50
-    offset = (page_number - 1) * per_page
-    data = rows('SELECT * FROM drivers'+where+' ORDER BY driver_name,id LIMIT %s OFFSET %s', tuple(args+[per_page, offset]))
-    total_all = one('SELECT COUNT(*) n FROM drivers')['n']
-    available = one("SELECT COUNT(*) n FROM drivers WHERE availability='متاح'")['n']
-    query = urllib.parse.urlencode({'q': q, 'availability': availability, 'record_type': record_type})
-    table_rows = ''.join(
-        '<tr><td>'+esc(x['driver_name'])+'<br><span class="muted">'+esc(DRIVER_TYPES.get(x.get('record_type'),'بانتظار تصنيف الإدارة'))+'</span></td><td class="ltr">'+esc(x['whatsapp_phone'])+'</td><td>'+esc(x['vehicle_type'])+'</td><td>'+esc(x['current_city'])+'</td><td>'+esc(x['company_name'])+'</td><td>'+esc(x['availability'])+'</td><td><a class="btn" href="/drivers/'+str(x['id'])+'/edit">عرض وتعديل</a></td></tr>'
-        for x in data
-    ) or '<tr><td colspan="7" class="muted">لا توجد نتائج مطابقة.</td></tr>'
-    previous = '<a class="btn" href="/drivers?'+query+'&page_number='+str(page_number-1)+'">السابق</a>' if page_number > 1 else ''
-    next_link = '<a class="btn" href="/drivers?'+query+'&page_number='+str(page_number+1)+'">التالي</a>' if offset + per_page < total else ''
-    body = nav()+'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h1>إدارة السائقين</h1><a class="btn" href="/drivers/new">+ إضافة سائق جديد</a></div><div class="grid"><div class="kpi">سجلات دليل السائقين<b>'+str(total_all)+'</b></div><div class="kpi">متاحون<b>'+str(available)+'</b></div><div class="kpi">نتائج البحث<b>'+str(total)+'</b></div></div>'
-    review_count = one("SELECT COUNT(*) n FROM drivers WHERE record_type='unreviewed'")["n"]
-    body += '<p class="muted">السجلات القديمة محفوظة كما هي وقد تتضمن شركات. بانتظار تصنيف الإدارة: '+str(review_count)+'. <a href="/drivers?record_type=unreviewed">مراجعة التصنيف</a> · <a href="/drivers/export.csv?'+query+'">تصدير الكشف الحالي مع التصنيف</a></p>'
-    body += '<p class="muted">كل سائق مسجل منضم لاستقبال عروض الحمولات. تشمل الحملة جميع الأرقام الصالحة غير المكررة.</p>'
-    type_options = '<select name="record_type"><option value="">كل التصنيفات</option>'+''.join('<option value="'+key+'"'+selected(record_type,key)+'>'+esc(label)+'</option>' for key,label in DRIVER_TYPES.items())+'</select>'
-    body += '<div class="card"><form method="get" action="/drivers"><div class="grid"><input name="q" value="'+esc(q)+'" placeholder="بحث بالاسم أو الجوال أو الشركة أو المدينة"><select name="availability"><option value="">كل حالات التوفر</option><option value="متاح"'+selected(availability,'متاح')+'>متاح</option><option value="غير متاح"'+selected(availability,'غير متاح')+'>غير متاح</option><option value="غير محدد"'+selected(availability,'غير محدد')+'>غير محدد</option></select>'+type_options+'<button class="btn">بحث وتصفية</button></div></form></div>'
-    body += '<div class="card scroll"><table><tr><th>السائق</th><th>واتساب</th><th>المركبة</th><th>المدينة</th><th>الشركة</th><th>التوفر</th><th>الإجراء</th></tr>'+table_rows+'</table><div class="pager">'+previous+'<span>صفحة '+str(page_number)+'</span>'+next_link+'</div></div>'
-    return HTMLResponse(page('إدارة السائقين', body))
-
-@router.get('/drivers/export.csv')
-def export_drivers(request: Request, q: str = '', availability: str = '', record_type: str = ''):
-    if not auth(request):
-        raise HTTPException(401)
+def driver_filters(q='', availability='', record_type='', country='all'):
     clauses, args = [], []
     if q.strip():
-        clauses.append('(driver_name ILIKE %s OR whatsapp_phone ILIKE %s OR company_name ILIKE %s OR current_city ILIKE %s OR notes ILIKE %s)')
-        args.extend(['%'+q.strip()+'%']*5)
+        clauses.append(SEARCH_CLAUSE)
+        args.extend(['%'+q.strip()+'%'] * 5)
     if availability:
         clauses.append('availability=%s'); args.append(availability)
     if record_type:
         if record_type not in DRIVER_TYPES:
             raise HTTPException(400, 'Invalid record type')
         clauses.append('record_type=%s'); args.append(record_type)
-    where = ' WHERE '+' AND '.join(clauses) if clauses else ''
+    if country not in COUNTRY_TABS:
+        raise HTTPException(400, 'Invalid country')
+    if COUNTRY_TABS[country][1]:
+        clauses.append(COUNTRY_TABS[country][1])
+    return (' WHERE '+' AND '.join(clauses) if clauses else ''), args
+
+SEARCH_CLAUSE = '(driver_name ILIKE %s OR whatsapp_phone ILIKE %s OR company_name ILIKE %s OR current_city ILIKE %s OR notes ILIKE %s)'
+
+def country_tabs(current, counts, link):
+    return '<div class="tabs">'+''.join(
+        '<a class="tab'+(' on' if key == current else '')+'" href="'+esc(link(key))+'">'+esc(label)+' <b>'+str(counts.get(key, 0))+'</b></a>'
+        for key, (label, _) in COUNTRY_TABS.items()
+    )+'</div>'
+
+def selected(actual, expected):
+    return ' selected' if (actual or '') == expected else ''
+
+@router.get('/drivers', response_class=HTMLResponse)
+def drivers(request: Request, q: str = '', availability: str = '', consent: str = '', page_number: int = 1, record_type: str = '', country: str = 'SA'):
+    session = auth(request)
+    if not session:
+        return RedirectResponse('/login', 303)
+    page_number = max(1, page_number)
+    where, args = driver_filters(q, availability, record_type, country)
+    total = one('SELECT COUNT(*) n FROM drivers'+where, tuple(args))['n']
+    per_page = 50
+    offset = (page_number - 1) * per_page
+    data = rows('SELECT * FROM drivers'+where+' ORDER BY driver_name,id LIMIT %s OFFSET %s', tuple(args+[per_page, offset]))
+    total_all = one('SELECT COUNT(*) n FROM drivers')['n']
+    available = one("SELECT COUNT(*) n FROM drivers WHERE availability='متاح'")['n']
+    query = urllib.parse.urlencode({'q': q, 'availability': availability, 'record_type': record_type, 'country': country})
+    counts = {}
+    for key in COUNTRY_TABS:
+        tab_where, tab_args = driver_filters(q, availability, record_type, key)
+        counts[key] = one('SELECT COUNT(*) n FROM drivers'+tab_where, tuple(tab_args))['n']
+    tab_link = lambda key: '/drivers?'+urllib.parse.urlencode({'q': q, 'availability': availability, 'record_type': record_type, 'country': key})
+    table_rows = ''.join(
+        '<tr><td>'+esc(x['driver_name'])+'<br><span class="muted">'+esc(DRIVER_TYPES.get(x.get('record_type'),'بانتظار تصنيف الإدارة'))+'</span></td><td class="ltr">'+esc(x['whatsapp_phone'])+'</td><td>'+esc(x['vehicle_type'])+'</td><td>'+esc(x['current_city'])+'</td><td>'+esc(x['company_name'])+'</td><td>'+esc(x['availability'])+'</td><td><a class="btn" href="/drivers/'+str(x['id'])+'/edit">عرض وتعديل</a></td></tr>'
+        for x in data
+    ) or '<tr><td colspan="7" class="muted">لا توجد نتائج مطابقة.</td></tr>'
+    previous = '<a class="btn" href="/drivers?'+query+'&page_number='+str(page_number-1)+'">السابق</a>' if page_number > 1 else ''
+    next_link = '<a class="btn" href="/drivers?'+query+'&page_number='+str(page_number+1)+'">التالي</a>' if offset + per_page < total else ''
+    body = nav()+'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h1>إدارة السائقين</h1><a class="btn" href="/drivers/new">+ إضافة سائق جديد</a></div>'+country_tabs(country, counts, tab_link)+'<p class="muted">الأرقام مقسمة حسب مفتاح الدولة: السعودية ‎+966‎ والإمارات ‎+971‎. الأرقام المسجلة بلا مفتاح دولي تظهر في «دول أخرى / غير محدد».</p><div class="grid"><div class="kpi">سجلات دليل السائقين<b>'+str(total_all)+'</b></div><div class="kpi">متاحون<b>'+str(available)+'</b></div><div class="kpi">نتائج البحث<b>'+str(total)+'</b></div></div>'
+    review_count = one("SELECT COUNT(*) n FROM drivers WHERE record_type='unreviewed'")["n"]
+    body += '<p class="muted">السجلات القديمة محفوظة كما هي وقد تتضمن شركات. بانتظار تصنيف الإدارة: '+str(review_count)+'. <a href="/drivers?record_type=unreviewed">مراجعة التصنيف</a> · <a href="/drivers/export.csv?'+query+'">تصدير الكشف الحالي مع التصنيف</a></p>'
+    body += '<p class="muted">كل سائق مسجل منضم لاستقبال عروض الحمولات. تشمل الحملة جميع الأرقام الصالحة غير المكررة.</p>'
+    type_options = '<select name="record_type"><option value="">كل التصنيفات</option>'+''.join('<option value="'+key+'"'+selected(record_type,key)+'>'+esc(label)+'</option>' for key,label in DRIVER_TYPES.items())+'</select>'
+    body += '<div class="card"><form method="get" action="/drivers"><div class="grid"><input name="q" value="'+esc(q)+'" placeholder="بحث بالاسم أو الجوال أو الشركة أو المدينة"><select name="availability"><option value="">كل حالات التوفر</option><option value="متاح"'+selected(availability,'متاح')+'>متاح</option><option value="غير متاح"'+selected(availability,'غير متاح')+'>غير متاح</option><option value="غير محدد"'+selected(availability,'غير محدد')+'>غير محدد</option></select>'+type_options+'<input type="hidden" name="country" value="'+esc(country)+'"><button class="btn">بحث وتصفية</button></div></form></div>'
+    body += '<div class="card scroll"><table><tr><th>السائق</th><th>واتساب</th><th>المركبة</th><th>المدينة</th><th>الشركة</th><th>التوفر</th><th>الإجراء</th></tr>'+table_rows+'</table><div class="pager">'+previous+'<span>صفحة '+str(page_number)+'</span>'+next_link+'</div></div>'
+    return HTMLResponse(page('إدارة السائقين', body))
+
+@router.get('/drivers/export.csv')
+def export_drivers(request: Request, q: str = '', availability: str = '', record_type: str = '', country: str = 'all'):
+    if not auth(request):
+        raise HTTPException(401)
+    where, args = driver_filters(q, availability, record_type, country)
     data = rows('SELECT * FROM drivers'+where+' ORDER BY driver_name,id',tuple(args))
     keys = ['id','record_type','driver_name','whatsapp_phone','vehicle_type','capacity','current_city','preferred_routes','availability','company_name','carrier_company_id','notes']
-    return Response(csv_text(keys,data),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="driver-register.csv"'})
+    return Response(csv_text(keys,data),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="driver-register'+('' if country == 'all' else '-'+country)+'.csv"'})
 
 
 def classification_form(session, driver):

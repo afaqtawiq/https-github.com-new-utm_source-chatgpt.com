@@ -145,6 +145,31 @@ def run():
     drivers=request('admin','GET','/drivers/export.csv').text
     assert 'Legacy Fixture' in drivers and 'Import One' not in drivers and 'record_type' in drivers
     print('PASS: preview/commit ownership, duplicate/idempotent imports, stale conflict recheck, separate filtered CSVs, unknown consent, no driver/customer/outbound additions.')
+
+    # Saudi and Emirati numbers are listed separately, read from the stored number only.
+    with db() as c:
+        for name,phone in (('Emirati Fixture','+971501234567'),('Saudi Spaced Fixture','00966 50 000 0011'),('Unknown Code Fixture','0501112222')):
+            c.execute("INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,offer_consent,created_at,updated_at) VALUES(%s,%s,'unknown',1,%s,%s)",(name,phone,now,now))
+    before=rows('SELECT * FROM drivers ORDER BY id')
+    def names(text): return {n for n in ('Legacy Fixture','Emirati Fixture','Saudi Spaced Fixture','Unknown Code Fixture') if n in text}
+    assert names(request('transport','GET','/drivers').text)=={'Legacy Fixture','Saudi Spaced Fixture'}
+    assert names(request('admin','GET','/drivers?country=SA').text)=={'Legacy Fixture','Saudi Spaced Fixture'}
+    ae=request('admin','GET','/drivers?country=AE').text
+    assert names(ae)=={'Emirati Fixture'} and 'class="tab on" href="/drivers?q=&amp;availability=&amp;record_type=&amp;country=AE"' in ae
+    assert names(request('admin','GET','/drivers?country=other').text)=={'Unknown Code Fixture'}
+    assert len(names(request('admin','GET','/drivers?country=all').text))==4
+    assert names(request('admin','GET','/drivers?country=AE&q=Saudi').text)==set()
+    assert request('admin','GET','/drivers?country=XX').status_code==400
+    assert names(request('admin','GET','/drivers/export.csv?country=AE').text)=={'Emirati Fixture'}
+    assert len(names(request('admin','GET','/drivers/export.csv').text))==4
+    assert rows('SELECT * FROM drivers ORDER BY id')==before
+    carriers_sa=request('admin','GET','/carriers').text
+    assert 'Import One' in carriers_sa and 'Import Two' not in carriers_sa
+    carriers_ae=request('admin','GET','/carriers?country=AE').text
+    assert 'Import Two' in carriers_ae and 'Import One' not in carriers_ae
+    assert 'Import One' in request('admin','GET','/carriers?country=all').text and 'Import Two' in request('admin','GET','/carriers?country=all').text
+    assert 'Import One' not in request('admin','GET','/carriers?country=other').text
+    print('PASS: Saudi and Emirati drivers and carriers listed separately; records unchanged.')
     client.close()
 
 
