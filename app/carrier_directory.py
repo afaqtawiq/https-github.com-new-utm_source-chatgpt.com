@@ -87,7 +87,9 @@ def filters(q, country, verification):
     if q.strip():
         clauses.append('(company_name ILIKE %s OR phone ILIKE %s OR email ILIKE %s OR city ILIKE %s OR preferred_routes ILIKE %s)')
         args.extend(['%'+q.strip()+'%']*5)
-    if country:
+    if country == 'other':
+        clauses.append("country NOT IN ('SA','AE')")
+    elif country and country != 'all':
         if country not in records.COUNTRIES:
             raise HTTPException(400, 'Invalid country')
         clauses.append('country=%s'); args.append(country)
@@ -120,16 +122,23 @@ def company_form(session, record=None):
 
 
 @router.get('/carriers', response_class=HTMLResponse)
-def directory(request: Request, q: str='', country: str='', verification: str='', page_number: int=1):
+def directory(request: Request, q: str='', country: str='SA', verification: str='', page_number: int=1):
     session = auth(request)
     where, args = filters(q, country, verification)
     page_number = max(1, page_number); offset = (page_number-1)*50
     count = one('SELECT COUNT(*) n FROM carrier_companies'+where, tuple(args))['n']
     data = rows('SELECT * FROM carrier_companies'+where+' ORDER BY company_name,id LIMIT 50 OFFSET %s', tuple(args+[offset]))
     query = urlencode({'q':q,'country':country,'verification':verification})
+    tab_labels = {'SA':'🇸🇦 السعودية','AE':'🇦🇪 الإمارات','other':'دول الخليج الأخرى','all':'الكل'}
+    counts = {}
+    for key in tab_labels:
+        tab_where, tab_args = filters(q, key, verification)
+        counts[key] = one('SELECT COUNT(*) n FROM carrier_companies'+tab_where, tuple(tab_args))['n']
+    tabs = '<div class="tabs">'+''.join('<a class="tab'+(' on' if key == country else '')+'" href="/carriers?'+esc(urlencode({'q':q,'country':key,'verification':verification}))+'">'+label+' <b>'+str(counts[key])+'</b></a>' for key,label in tab_labels.items())+'</div>'
+    country_select = {'all':'كل الدول', 'other':'دول الخليج الأخرى', **records.COUNTRIES}
     actions = '<a class="btn" href="/carriers/new">+ إضافة شركة نقل</a> <a class="btn" href="/carriers/import">استيراد شركات النقل</a>' if session['role']=='admin' else ''
-    body = nav()+'<h1>كشف شركات النقل</h1><p>شركات وجهات نقل محتملة: '+str(count)+'</p>'+actions+' <a class="btn" href="/carriers/export.csv?'+query+'">تصدير كشف الشركات</a><p class="muted">هذا دليل شركات مستقل عن السائقين وقوائم الإرسال. لا يُرسل شيء عند الحفظ أو الاستيراد.</p>'
-    body += '<div class="card"><form><div class="grid"><input name="q" value="'+esc(q)+'" placeholder="الشركة أو المدينة أو المسار أو جهة الاتصال"><select name="country">'+options(records.COUNTRIES,country,'كل الدول')+'</select><select name="verification">'+options(records.VERIFICATIONS,verification,'كل حالات التحقق')+'</select><button class="btn">بحث</button></div></form></div>'
+    body = nav()+'<h1>كشف شركات النقل</h1>'+tabs+'<p>شركات وجهات نقل محتملة: '+str(count)+'</p>'+actions+' <a class="btn" href="/carriers/export.csv?'+query+'">تصدير كشف الشركات</a><p class="muted">هذا دليل شركات مستقل عن السائقين وقوائم الإرسال. لا يُرسل شيء عند الحفظ أو الاستيراد.</p>'
+    body += '<div class="card"><form><div class="grid"><input name="q" value="'+esc(q)+'" placeholder="الشركة أو المدينة أو المسار أو جهة الاتصال"><select name="country">'+options(country_select,country if country in country_select else 'all')+'</select><select name="verification">'+options(records.VERIFICATIONS,verification,'كل حالات التحقق')+'</select><button class="btn">بحث</button></div></form></div>'
     table = ''.join('<tr><td><a href="/carriers/'+str(item['id'])+'">'+esc(item['company_name'])+'</a></td><td>'+esc(records.COUNTRIES[item['country']])+' / '+esc(item['city'])+'</td><td class="ltr">'+esc(item['phone'])+'<br>'+esc(item['email'])+'</td><td>'+esc(item['preferred_routes'])+'</td><td>'+esc(item['vehicle_types'])+' / '+esc(item['capacity'])+'</td><td>'+esc(records.VERIFICATIONS[item['verification_status']])+'</td></tr>' for item in data) or '<tr><td colspan="6">لا توجد شركات مطابقة</td></tr>'
     body += '<div class="card scroll"><table><tr><th>شركة النقل</th><th>الموقع</th><th>الاتصال المنشور</th><th>المسارات</th><th>المركبات والسعة</th><th>التحقق</th></tr>'+table+'</table></div>'
     if page_number > 1: body += '<a class="btn" href="/carriers?'+query+'&page_number='+str(page_number-1)+'">السابق</a> '
