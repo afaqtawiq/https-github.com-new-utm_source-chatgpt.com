@@ -854,6 +854,10 @@ Do not claim a previous conversation occurred when history is empty.
 No prior chat beyond explicitly supplied screened history is available.
 Use details the user already supplied in the current message and safe history;
 do not ask for them again. Ask one or two relevant missing details at a time.
+An explicit correction replaces the earlier detail, not an additional shipment.
+For a short follow-up such as "ومن جدة؟", keep the supported topic and unchanged
+details. If the intended route change is ambiguous, confirm that change alone;
+do not restart intake or present an old route as the user's current choice.
 Do not present invented options as an exhaustive choice or recommend a vehicle,
 packaging method or logistics suitability without a supplied reliable source.
 When a preference is relevant, ask an open question instead of guessing options.
@@ -1824,6 +1828,10 @@ def _intent_failure_reply(question: str, *, using_document: bool, reason: str,
     if reason == 'reply_opaque':
         return FALLBACK_REPLY
     value = _fold(question)
+    if pricing_context and not re.search(r'تخليص|جمرك', value):
+        transport = _transport_continuation_reply(question, safe_entries)
+        if transport:
+            return transport
     if pricing_context and not _pricing_question(value) and _price_detail_continuation(question):
         # Echo only bounded, independently screened user details, never a model
         # rejection or an assistant's claim. History has already passed scope,
@@ -1906,6 +1914,140 @@ def _safe_route_excerpt(text: str) -> str:
            for part in match.groups()):
         return ''
     return 'من ' + match[1].strip() + ' إلى ' + match[2].strip()
+
+
+def _transport_continuation_reply(question: str, entries: tuple[dict[str, str], ...]) -> str | None:
+    """Small fallback grammar over screened user text, never operational state.
+
+    Keep separate explicit fields so a correction cannot leave a stale value in
+    a concatenated summary. Unknown/ambiguous corrections ask for clarification;
+    assistant replies never supply shipment facts. No persistence or tools.
+    """
+    facts = {}
+    pending_route = None
+    route_reset = False
+    service_reset = False
+    records = [row for row in entries[-MAX_CONVERSATION_EXCHANGES:]
+               if set(row) == {'user', 'assistant'}] + [{'user': question, 'assistant': None}]
+    for index, row in enumerate(records):
+        text = row['user']
+        current = index == len(records) - 1
+        # Only an adjacent explicit yes to the exact route-confirmation question
+        # can confirm a proposal. Both cities still come from screened user text;
+        # the assistant question binds the yes, never supplies a shipment fact.
+        if pending_route:
+            proposed, confirmation_asked = pending_route
+            pending_route = None
+            if re.fullmatch(r'(?:نعم|ايوه|ايوا)', _fold(text).strip(' .!؟?')):
+                if confirmation_asked:
+                    facts['route'] = proposed
+                    route_reset = False
+                    continue
+                if current:
+                    return 'تقصد ' + proposed + '؟'
+        if local_identity_reply(text):
+            continue
+        if not screen_question(text).allowed:
+            facts.clear()
+            continue
+        if _DOCUMENT_TOPIC_SHIFT.search(_fold(text)):
+            facts.clear()
+        if not (_pricing_question(text) or _price_detail_continuation(text)):
+            facts.clear()
+            continue
+        if re.search(r'تخليص|جمرك|تخزين|رسوم', _fold(text)):
+            facts.clear()
+            service_reset = True
+            continue
+        if service_reset:
+            if _safe_route_excerpt(text) or re.search(r'نقل|شحن', _fold(text)):
+                service_reset = False
+            else:
+                continue
+        if re.search(r'(?<!\w)(?:ليس|بدل|مو|مش)(?!\w)', _fold(text)):
+            if text == question:
+                return 'ما التفصيل الصحيح الذي تقصده بعد التصحيح؟'
+            facts.clear()
+            continue
+        route = _safe_route_excerpt(text)
+        if route:
+            facts['route'] = route
+            route_reset = False
+        # A bare origin question is a proposed alternative, not a confirmed
+        # replacement. Never silently reuse the old origin in a failure reply.
+        origin = re.fullmatch(r'(?:و)?من\s+([\u0621-\u064a ]{2,30})[؟?]?', text.strip())
+        if origin and not route:
+            destination = facts.get('route', '').partition(' إلى ')[2]
+            proposed = 'من ' + origin[1].strip() + ' إلى ' + destination if destination else ''
+            confirmation = 'تقصد ' + proposed + '؟' if proposed else 'من ' + origin[1].strip() + ' إلى أي مدينة؟'
+            if current:
+                return confirmation
+            facts.pop('route', None)
+            route_reset = True
+            if proposed:
+                pending_route = (proposed, row['assistant'] == confirmation)
+            continue
+        if not route and not origin and re.search(r'(?<!\w)[وف]?من\s+.+\s+(?:الى|الي)\s+', _fold(text)):
+            if text == question:
+                return 'ما مدينتا التحميل والوصول اللتان تقصدهما الآن؟'
+            facts.clear()
+            continue
+        # Only short explicit clauses are interpreted. Do not guess cargo from
+        # a question, a price, a route, or arbitrary conversational prose.
+        for clause in re.split(r'[،,؛;]', text):
+            clause = clause.strip(' .!')
+            folded = _fold(clause)
+            correction = re.match(r'^(?:لا\s+|اقصد\s+|الصحيح\s+|تصحيح\s+)', folded)
+            if correction:
+                clause = clause[correction.end():].strip()
+                folded = _fold(clause)
+            recognized = True
+            if not clause or folded == 'لا' or not _safe_detail_excerpt(clause) or _safe_route_excerpt(clause):
+                continue
+            weight = re.fullmatch(r'(?:(?:الوزن|وزن الحموله)\s*[:：]?\s*)?(\d+(?:[.]\d+)?\s*(?:طن|كجم|كيلوغرام|kg))', folded)
+            cargo_weight = re.fullmatch(r'([\u0621-\u064a ]{2,30})\s+(\d+(?:[.]\d+)?\s*(?:طن|كجم|كيلوغرام|kg))', folded)
+            if weight:
+                facts['weight'] = weight[1]
+            elif cargo_weight and len(cargo_weight[1].split()) <= 3:
+                facts['cargo'], facts['weight'] = cargo_weight[1], cargo_weight[2]
+            elif re.fullmatch(r'(?:حاويه\s*)?\d+\s*قدم', folded):
+                facts['size'] = clause
+            elif re.fullmatch(r'(?:في\s+)?(?:اكياس|كراتين|صناديق|طبالي)', folded):
+                facts['packaging'] = clause
+            elif re.fullmatch(r'(?:موعد التحميل|التحميل)\s+.{1,35}', folded):
+                facts['time'] = clause
+            elif re.fullmatch(r'(?:اليوم|غدا|بكره|بعد غد)', folded):
+                facts['time'] = clause
+            elif re.fullmatch(r'(?:البضاعه|الحموله|نوع البضاعه)\s*[:：]?\s+.{2,30}', folded):
+                facts['cargo'] = re.sub(r'^(?:البضاعه|الحموله|نوع البضاعه)\s*[:：]?\s+', '', folded)
+            elif re.fullmatch(r'[\u0621-\u064a]{2,20}', folded) and not _pricing_question(clause):
+                if folded not in {'تمام', 'طيب', 'ايوه', 'نعم', 'موافق', 'ممكن', 'شكرا', 'الموعد', 'الوزن', 'المسار'}:
+                    if 'cargo' not in facts or correction:
+                        facts['cargo'] = clause
+                else:
+                    recognized = False
+            else:
+                recognized = False
+            if correction and not recognized and text == question:
+                return 'أي تفصيل تقصد تصحيحه، وما القيمة الصحيحة؟'
+    if not facts:
+        # An explicit service boundary must not fall through to the older
+        # transport summarizer, which still has the original history.
+        return FALLBACK_REPLY if service_reset or route_reset else None
+    if not facts.get('route'):
+        missing = 'ما مدينتا التحميل والوصول؟'
+    elif not facts.get('cargo'):
+        missing = 'ما نوع البضاعة؟'
+    elif not facts.get('weight'):
+        missing = 'كم وزن الحمولة؟'
+    elif not facts.get('packaging') or not facts.get('time'):
+        missing = ('ما طريقة التغليف وموعد التحميل؟' if not facts.get('packaging') and not facts.get('time')
+                   else 'متى موعد التحميل؟' if not facts.get('time') else 'ما طريقة التغليف؟')
+        missing += ' يكفي وصف ترتيبات التحميل والتفريغ المتاحة لديك.'
+    else:
+        missing = 'هذه التفاصيل المذكورة في المحادثة.'
+    summary = '؛ '.join(facts[key] for key in ('route', 'cargo', 'weight', 'size', 'packaging', 'time') if key in facts)
+    return 'حسب وصفك: «' + summary + '». ما عندي سعر معتمد أقدمه لك. ' + missing
 
 
 def _descriptive_only(value: str, document: str, *, conversational: bool = False) -> bool:
