@@ -952,3 +952,26 @@ def test_worker_passes_verified_operator_context_to_text_model_only(setup, monke
     result = agent.accept_inbound(payload(1, 'أحتاج نقلًا من تبوك إلى حائل'))
     assert tick() and store.get_job(result['job_id'])['status'] == 'sent'
     assert len(setup['model_calls']) == 1 and len(setup['sends']) == 1
+
+
+def test_team_text_and_voice_go_to_command_agent_documents_stay(setup, monkeypatch):
+    import json as _json
+    try:
+        import app.team  # noqa: F401  needs the shared storage configured by the full suite
+    except RuntimeError:
+        pytest.skip('team module needs DATABASE_URL')
+    original = store.get_settings
+    monkeypatch.setattr(store, 'get_settings', lambda account: dict(original(account), mode='routine'))
+    monkeypatch.setenv('AFAQ_TEAM', _json.dumps([{'phone': '+' + OWNER, 'name': 'Synthetic', 'manager': True}]))
+    monkeypatch.setenv('WHATSAPP_COMMAND_ACCOUNT_ID', ACCOUNT)
+    text = agent.accept_inbound(payload(11, 'ضيف عميل جديد اسمه شركة البحر'))
+    assert text == {'legacy_local_only': True, 'team_agent': True}
+    voice = payload(12, '')
+    voice['message']['attachments'] = [{'type': 'audio'}]
+    assert agent.accept_inbound(voice) == {'legacy_local_only': True, 'team_agent': True}
+    document = agent.accept_inbound(payload(13, 'لخص المستند', True))
+    assert document is None or document.get('team_agent') is not True
+    monkeypatch.setenv('AFAQ_TEAM', '[]')
+    monkeypatch.delenv('WHATSAPP_COMMAND_OWNER', raising=False)
+    outsider = agent.accept_inbound(payload(14, 'ضيف عميل'))
+    assert outsider is None or outsider.get('team_agent') is not True
