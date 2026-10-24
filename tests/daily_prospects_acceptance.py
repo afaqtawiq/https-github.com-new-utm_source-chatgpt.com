@@ -130,7 +130,7 @@ def run():
     print('PASS: AI opening guarded with template fallback.')
 
     # Offer covers clearance and transport together with both licences.
-    assert '2513' in text and dp.TRANSPORT_LICENCE in text and 'التخليص الجمركي والنقل' in text
+    assert '2513' in text and dp.TRANSPORT_LICENCE in text and 'التخليص الجمركي والنقل' in text and 'info@afaqtawiqs.net' in text
     # Pending drafts from the earlier template are upgraded once; edited or decided ones are not touched.
     pitch = dp.DEFAULT_PITCH
     with db() as c:
@@ -171,6 +171,19 @@ def run():
     dropped = one('SELECT message,message_source FROM daily_prospects WHERE id=?', (r3,))
     assert dropped['message_source'] == 'template' and dropped['message'] == dp.template_message('Redundant Co', pitch)
     print('PASS: redundant AI openings repaired.')
+
+    # Second-release drafts (no email line) are upgraded, with and without an opening.
+    v2_plain = dp._template_v2('V2 Co', pitch)
+    v2_ai = dp._with_opening(dp._template_v2('V2 AI', pitch), 'يسعدنا التواصل مع فريقكم بشأن شحناتكم القادمة إلى جدة.')
+    with db() as c:
+        a, b = (c.execute('''INSERT INTO daily_prospects(source_key,company_name,score,segment,reason,message,message_source,status,batch_date,created_at,updated_at)
+            VALUES(%s,%s,50,'general','r',%s,%s,'pending',%s,%s,%s) RETURNING id''', (k, n, m, src, date(2026, 10, 23), now, now)).fetchone()['id']
+            for k, n, m, src in (('directory:9201', 'V2 Co', v2_plain, 'template'), ('directory:9202', 'V2 AI', v2_ai, 'ai')))
+    dp.refresh_pending_messages()
+    assert one('SELECT message FROM daily_prospects WHERE id=?', (a,))['message'] == dp.template_message('V2 Co', pitch)
+    assert one('SELECT message FROM daily_prospects WHERE id=?', (b,))['message'] == dp._with_opening(dp.template_message('V2 AI', pitch), 'يسعدنا التواصل مع فريقكم بشأن شحناتكم القادمة إلى جدة.')
+    assert dp.refresh_pending_messages() == 0
+    print('PASS: official email added; second-release drafts upgraded.')
     client.close()
 
 
