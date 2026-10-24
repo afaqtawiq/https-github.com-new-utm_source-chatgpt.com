@@ -83,6 +83,9 @@ def deliver(inbox_id):
         from app.prospect_outreach import is_prospect_sender
         if is_prospect_sender(c, item['user_id'], item.get('sender_address') or item.get('reply_address')):
             return
+        from app.mail_agent import active_for
+        if active_for(item['user_id']):
+            return  # the mail agent writes the reply; never send two
         settings=c.execute('SELECT * FROM official_reply_settings WHERE user_id=%s FOR UPDATE',(item['user_id'],)).fetchone()
         if not settings or not settings['enabled'] or item['imported_at'] <= settings['enabled_at']:
             return
