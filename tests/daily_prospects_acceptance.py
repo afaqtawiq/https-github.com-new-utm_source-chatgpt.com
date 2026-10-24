@@ -154,6 +154,23 @@ def run():
     assert msgs[2] == 'رسالة عدّلها الفريق يدويًا قبل الاعتماد للتواصل'
     assert dp.TRANSPORT_LICENCE not in msgs[3]
     print('PASS: clearance + transport offer; earlier pending drafts upgraded, edited/approved untouched.')
+
+    # Openings that re-introduce the sender are replaced (AI) or dropped (no AI); good ones stay.
+    assert not dp.valid_opening('نتواصل معكم من شركة آفاق طويق للتخليص الجمركي والخدمات اللوجستية.')
+    redundant = dp._with_opening(dp.template_message('Redundant Co', pitch), 'نتواصل معكم من شركة آفاق طويق للتخليص الجمركي.')
+    good = dp._with_opening(dp.template_message('Good Co', pitch), 'يسعدنا التواصل مع فريقكم بشأن شحناتكم القادمة إلى جدة.')
+    with db() as c:
+        r1, r2, r3 = (c.execute('''INSERT INTO daily_prospects(source_key,company_name,score,segment,reason,message,message_source,status,batch_date,created_at,updated_at)
+            VALUES(%s,%s,50,'general','r',%s,'ai','pending',%s,%s,%s) RETURNING id''', (k, n, m, date(2026, 10, 23), now, now)).fetchone()['id']
+            for k, n, m in (('directory:9101', 'Redundant Co', redundant), ('directory:9102', 'Good Co', good), ('directory:9103', 'Redundant Two', redundant)))
+    with patch('app.daily_prospects.ai_opening', side_effect=['يسعدنا خدمة شحناتكم القادمة عبر جدة.', None]):
+        assert dp.repair_openings() == 2
+    fixed = one('SELECT message,message_source FROM daily_prospects WHERE id=?', (r1,))
+    assert fixed['message_source'] == 'ai' and fixed['message'].split('\n')[2] == 'يسعدنا خدمة شحناتكم القادمة عبر جدة.'
+    assert one('SELECT message FROM daily_prospects WHERE id=?', (r2,))['message'] == good
+    dropped = one('SELECT message,message_source FROM daily_prospects WHERE id=?', (r3,))
+    assert dropped['message_source'] == 'template' and dropped['message'] == dp.template_message('Redundant Co', pitch)
+    print('PASS: redundant AI openings repaired.')
     client.close()
 
 
