@@ -154,11 +154,13 @@ def refresh_pending_messages():
     return changed
 
 
-AI_SYSTEM = ('You write one short Arabic opening sentence for a first business message from Afaq Tuwaiq, a Saudi '
-             'licensed customs broker and licensed land transport company that offers clearance and transport together, to a company that imports goods. Use only the company name, '
-             'city and activity provided. Do not invent facts, numbers, prices, names, dates, links or claims about the '
-             'company. Polite Saudi business tone, at most 160 characters, no greeting (it is added separately). '
-             'Reply only with JSON: {"opening": "..."}')
+AI_SYSTEM = ('You write one short Arabic sentence that goes right after the greeting of a first business message '
+             'to a company that imports goods. The sender (a licensed customs broker and transport company) introduces '
+             'itself in the next sentence, so do NOT name or describe the sender, and do not use the words آفاق or طويق. '
+             'Speak only about the recipient: acknowledge its activity and city and say that its incoming shipments may '
+             'benefit from clearance and transport handled together. Use only the company name, city and activity provided. '
+             'Do not invent facts, numbers, prices, names, dates, links or claims. Polite Saudi business tone, at most 160 '
+             'characters, no greeting. Reply only with JSON: {"opening": "..."}')
 
 
 def ai_opening(company_name, city, label):
@@ -184,7 +186,8 @@ def ai_opening(company_name, city, label):
 
 def valid_opening(text):
     # Reject anything that could carry an invented fact: digits, links, emails, prices.
-    return (10 <= len(text) <= 200 and not re.search(r'[0-9٠-٩@]|https?:|www\.|ريال|SAR|\$|%', text)
+    # The sender is introduced by the template; an opening that introduces it again is redundant.
+    return (10 <= len(text) <= 200 and not re.search(r'[0-9٠-٩@]|https?:|www\.|ريال|SAR|\$|%|آفاق|افاق|طويق', text)
             and re.search(r'[؀-ۿ]', text) is not None)
 
 
@@ -229,9 +232,25 @@ def today():
     return datetime.now(RIYADH).date()
 
 
+def repair_openings(use_ai=True):
+    """Replace pending AI openings that fail the current rules (e.g. re-introduce the sender)."""
+    fixed = 0
+    for item in rows("SELECT id,company_name,city,activity,message FROM daily_prospects WHERE status='pending' AND message_source='ai'"):
+        lines = item['message'].split('\n')
+        if len(lines) < 4 or not lines[3].startswith('معكم') or valid_opening(lines[2]):
+            continue
+        opening = ai_opening(item['company_name'], item['city'], item['activity']) if use_ai else None
+        updated = '\n'.join(lines[:2] + ([opening] if opening else []) + lines[3:])
+        with db() as c:
+            fixed += c.execute("UPDATE daily_prospects SET message=%s,message_source=%s,updated_at=%s WHERE id=%s AND status='pending' AND message=%s",
+                               (updated, 'ai' if opening else 'template', utcnow(), item['id'], item['message'])).rowcount
+    return fixed
+
+
 def build_batch(day=None, limit=None, use_ai=True):
     """Fill today's list up to the daily target. Idempotent per day; safe to call repeatedly."""
     init()
+    repair_openings(use_ai)
     day = day or today()
     with db() as c:
         if not c.execute('SELECT pg_try_advisory_xact_lock(73002031) ok').fetchone()['ok']:
