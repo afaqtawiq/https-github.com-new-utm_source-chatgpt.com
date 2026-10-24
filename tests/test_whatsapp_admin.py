@@ -20,9 +20,24 @@ from starlette.requests import Request
 storage = types.ModuleType('app.storage')
 storage.db = lambda: None
 storage.get_session = lambda *_: None
+
+
+def unexpected_storage_call(*args, **kwargs):
+    raise AssertionError('Admin tests must use the isolated SQLite connection')
+
+
+# Imported transitively by the receiver's command assistant. Expose its storage
+# interface without silently accepting any unmocked database operation.
+for name in ('execute', 'log', 'one', 'rows', 'utcnow'):
+    setattr(storage, name, unexpected_storage_call)
+
 sys.modules['app.storage'] = storage
 from app import whatsapp_admin as admin
 from app import zernio_receiver as receiver
+
+# Retain the legacy handlers before another test imports the production team wiring.
+_legacy_owner_sender = admin.owner_sender
+_legacy_admin_reply = admin.admin_reply
 
 
 class Cursor:
@@ -90,6 +105,12 @@ class Connection:
 
 @pytest.fixture
 def db(monkeypatch):
+    # app.team installs process-wide hooks when imported by worker tests. This
+    # fixture exercises legacy admin routing; restore its original handlers and
+    # let monkeypatch restore the surrounding suite wiring after each test.
+    monkeypatch.setattr(receiver, 'team_reply', None)
+    monkeypatch.setattr(admin, 'owner_sender', _legacy_owner_sender)
+    monkeypatch.setattr(admin, 'admin_reply', _legacy_admin_reply)
     # Brochure persistence is covered with real PostgreSQL in its own acceptance suite.
     monkeypatch.setitem(sys.modules, 'app.campaign_cadence', types.SimpleNamespace(record_whatsapp_reply=lambda *args: None))
     c = Connection()

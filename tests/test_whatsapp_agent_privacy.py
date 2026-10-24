@@ -1502,6 +1502,156 @@ def cargo_price_rows():
     ]
 
 
+def test_transport_greeting_inquiry_short_origin_followup(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    greeting = chat_reply('السلام عليكم')
+    assert greeting.text == p.GREETING_REPLY and not provider['requests']
+    question = 'كم سعر النقل من الرياض إلى الدمام؟'
+    provider['answer'] = 'ما نوع الحمولة ووزنها؟'
+    inquiry = chat_reply(question)
+    rows = [chat_row(1, question=question, reply_text=inquiry.text)]
+    provider['answer'] = 'سأحجز النقل.'
+    follow = chat_reply('ومن جدة؟', rows)
+    assert not follow.ok and follow.text == 'تقصد من جدة إلى الدمام؟'
+    assert len(provider['requests']) == 2
+    body = json.loads(provider['requests'][-1].content)
+    assert 'tools' not in body
+    assert json.loads(body['messages'][0]['content'])['history'][0]['user'] == question
+
+
+@pytest.mark.parametrize('correction, present, absent', [
+    ('أقصد 20 طن', '20 طن', '25 طن'),
+    ('لا، من تبوك إلى حائل', 'من تبوك إلى حائل', 'من جدة إلى الدمام'),
+    ('البضاعة سيراميك', 'سيراميك', 'بن'),
+])
+def test_transport_correction_replaces_superseded_fact(provider, monkeypatch, correction, present, absent):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من جدة إلى الدمام؟', reply_text='ما نوع الحمولة؟'),
+            chat_row(2, question='بن 25 طن', reply_text='كيف التغليف؟')]
+    provider['answer'] = 'سأحجز النقل.'
+    reply = chat_reply(correction, rows)
+    assert not reply.ok and present in reply.text and absent not in reply.text
+    assert 'كم وزن' not in reply.text
+
+
+def test_transport_known_fields_not_reasked_on_price_question(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    question = 'كم سعر النقل من جدة إلى الدمام؟، البضاعة بن، الوزن 25 طن، في أكياس، التحميل غدا'
+    provider['answer'] = 'السعر 500 ريال.'
+    reply = chat_reply(question)
+    assert not reply.ok
+    assert all(part in reply.text for part in ('جدة', 'الدمام', 'بن', '25 طن', 'أكياس', 'غدا'))
+    assert all(part not in reply.text for part in ('ما نوع', 'كم وزن', 'متى', 'ما طريقة', '500'))
+
+
+@pytest.mark.parametrize('field,value', [('sender','different-customer'), ('conversation_id','different-thread'),
+                                         ('account_id','different-account'), ('authorization_generation',2)])
+def test_transport_short_origin_cannot_inherit_other_customer_destination(provider, monkeypatch, field, value):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    row = chat_row(1, question='كم سعر النقل من الرياض إلى الدمام؟', reply_text='ما نوع الحمولة؟')
+    row[field] = value
+    provider['answer'] = 'سأحجز النقل.'
+    reply = chat_reply('ومن جدة؟', [row])
+    body = json.loads(provider['requests'][-1].content)
+    assert json.loads(body['messages'][0]['content'])['history'] == []
+    assert 'الدمام' not in reply.text and not reply.ok
+
+
+@pytest.mark.parametrize('answer', ['تمام، نقدر نناقش ترتيب الشغل. وش أول نقطة؟',
+                                  'أنا نيرمين، المساعدة الرقمية لآفاق طويق. وش حاب نناقش؟'])
+def test_colloquial_work_discussion_keeps_digital_identity_and_no_tools(provider, answer):
+    provider['answer'] = answer
+    reply = chat_reply('خلينا نتكلم عن ترتيب الشغل')
+    assert reply.ok and reply.text == answer
+    assert 'tools' not in json.loads(provider['requests'][0].content)
+
+
+@pytest.mark.parametrize('question', ['كم سعر التخزين؟', 'أقصد الموعد', 'الوزن مو 25 طن',
+                                    'نقل من تبوك إلى حائل أو الرياض'])
+def test_transport_changed_service_or_ambiguous_correction_never_repeats_stale_details(provider, monkeypatch, question):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من جدة إلى الدمام؟', reply_text='ما نوع البضاعة؟'),
+            chat_row(2, question='بن 25 طن', reply_text='ما طريقة التغليف؟')]
+    provider['answer'] = 'سأحجز النقل.'
+    reply = chat_reply(question, rows)
+    assert not reply.ok
+    assert all(old not in reply.text for old in ('25', 'الدمام', 'جدة', 'بن'))
+
+
+def test_new_transport_shipment_does_not_reuse_previous_cargo(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من جدة إلى الدمام؟', reply_text='ما نوع البضاعة؟'),
+            chat_row(2, question='بن 25 طن', reply_text='كيف التغليف؟')]
+    provider['answer'] = 'سأحجز النقل.'
+    reply = chat_reply('شحنة جديدة من تبوك إلى حائل كم السعر؟', rows)
+    assert not reply.ok and 'تبوك' in reply.text and 'حائل' in reply.text
+    assert '25' not in reply.text and 'بن' not in reply.text and 'ما نوع البضاعة' in reply.text
+
+
+def test_short_loading_date_does_not_replace_known_cargo(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من جدة إلى الدمام؟', reply_text='ما نوع البضاعة؟'),
+            chat_row(2, question='بن 25 طن', reply_text='متى التحميل؟')]
+    provider['answer'] = 'سأحجز النقل.'
+    reply = chat_reply('غدا', rows)
+    assert not reply.ok and 'بن' in reply.text and 'غدا' in reply.text
+    assert 'متى' not in reply.text and 'ما طريقة التغليف' in reply.text
+
+
+def test_transport_acknowledgment_does_not_replace_known_cargo(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من جدة إلى الدمام؟', reply_text='ما نوع البضاعة؟'),
+            chat_row(2, question='بن 25 طن', reply_text='كيف التغليف؟')]
+    provider['answer'] = 'سأحجز النقل.'
+    reply = chat_reply('ممتاز', rows)
+    assert not reply.ok and 'بن' in reply.text and 'ممتاز' not in reply.text
+
+
+def test_transport_origin_proposal_confirmation_survives_rejected_model(provider, monkeypatch):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من الرياض إلى الدمام؟', reply_text='ما نوع البضاعة؟')]
+    provider['answer'] = 'سأحجز النقل.'
+    proposal = chat_reply('ومن جدة؟', rows)
+    assert proposal.text == 'تقصد من جدة إلى الدمام؟'
+    rows.append(chat_row(2, question='ومن جدة؟', reply_text=proposal.text))
+    confirmed = chat_reply('نعم', rows)
+    assert not confirmed.ok and 'من جدة إلى الدمام' in confirmed.text
+    assert 'الرياض' not in confirmed.text and 'سأحجز' not in confirmed.text
+
+
+@pytest.mark.parametrize('question', ['تخزين', 'كم سعر التخزين؟'])
+def test_transport_service_reset_never_falls_through_to_stale_legacy_context(provider, monkeypatch, question):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من الرياض إلى الدمام؟', reply_text='ما نوع البضاعة؟'),
+            chat_row(2, question='بن 25 طن', reply_text='كيف التغليف؟')]
+    provider['answer'] = 'سأحجز النقل.'
+    reply = chat_reply(question, rows)
+    assert not reply.ok
+    assert all(detail not in reply.text for detail in ('الرياض', 'الدمام', 'بن', '25', 'مدينتا'))
+
+
+@pytest.mark.parametrize('reply,answer', [('كيف التغليف؟', 'نعم'), ('تقصد من جدة إلى الدمام؟', 'لا')])
+def test_transport_proposal_requires_matching_confirmation_and_explicit_yes(provider, monkeypatch, reply, answer):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من الرياض إلى الدمام؟', reply_text='ما نوع البضاعة؟'),
+            chat_row(2, question='ومن جدة؟', reply_text=reply)]
+    provider['answer'] = 'سأحجز النقل.'
+    result = chat_reply(answer, rows)
+    assert not result.ok and 'حسب وصفك' not in result.text and 'الرياض' not in result.text
+
+
+@pytest.mark.parametrize('field,value', [('sender','other-customer'), ('conversation_id','other-thread'),
+                                        ('account_id','other-account'), ('authorization_generation',2)])
+def test_transport_confirmation_cannot_use_foreign_proposal(provider, monkeypatch, field, value):
+    monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
+    rows = [chat_row(1, question='كم سعر النقل من الرياض إلى الدمام؟', reply_text='ما نوع البضاعة؟'),
+            chat_row(2, question='ومن جدة؟', reply_text='تقصد من جدة إلى الدمام؟')]
+    rows[1][field] = value
+    provider['answer'] = 'سأحجز النقل.'
+    result = chat_reply('نعم', rows)
+    assert not result.ok and 'جدة' not in result.text
+
+
 def test_full_price_container_cargo_flow_retains_purpose_and_scoped_facts(provider, monkeypatch):
     monkeypatch.setattr(p, '_utc_now', lambda: CHAT_NOW)
     provider['answer'] = 'تمام، البضاعة سيراميك في حاوية 40 قدم من جدة إلى الرياض. كم وزن البضاعة؟'
