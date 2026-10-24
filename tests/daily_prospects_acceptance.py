@@ -198,8 +198,11 @@ def run():
         mail.password(uid); raise AssertionError('old mailbox password must not be used')
     except RuntimeError:
         pass
+    page = request('admin', 'GET', '/settings/email/spacemail')
+    assert page.status_code == 200 and 'يحتاج إعادة ربط' in page.text and 'متصل — تم اختبار' not in page.text, page.text[:300]
     with db() as c:
         c.execute('UPDATE spacemail_connections SET address=%s WHERE user_id=%s', (mail.ADDRESS, uid))
+    assert 'متصل — تم اختبار' in request('admin', 'GET', '/settings/email/spacemail').text
     assert mail.connection(uid)['status'] == 'connected' and mail.password(uid) == 'fixture-only'
     print('PASS: previous mailbox connection requires reconnect to the new official address.')
     client.close()

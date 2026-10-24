@@ -263,22 +263,27 @@ async def form(request, session):
 
 
 def render(session, error=None):
-    row = one('SELECT enabled,updated_at,synced_at,sync_error,test_status FROM spacemail_connections WHERE user_id=?', (session['user_id'],))
+    row = one('SELECT enabled,updated_at,synced_at,sync_error,test_status,address FROM spacemail_connections WHERE user_id=?', (session['user_id'],))
+    stale = bool(row and row['address'] != ADDRESS)
     body = '<h1>البريد الرسمي لآفاق طويق</h1><p dir="ltr">' + ADDRESS + '</p><p>إرسال SMTP مشفّر: 465 · استقبال IMAP مشفّر: 993 · mail.spacemail.com</p>'
     if error:
         body += '<p role="alert">' + e(error) + '</p>'
-    body += '<p>الحالة: ' + ('متصل — تم اختبار الدخول للإرسال والاستقبال' if row and row['enabled'] else 'لم يكتمل الربط') + '</p>'
+    if stale:
+        body += ('<p role="alert"><b>الحالة: يحتاج إعادة ربط.</b> الربط المحفوظ يخص البريد السابق ' + e(row['address']) +
+                 '؛ لا يُستخدم للإرسال أو الاستقبال. أدخل كلمة مرور ' + ADDRESS + ' أدناه لإكمال النقل.</p>')
+    else:
+        body += '<p>الحالة: ' + ('متصل — تم اختبار الدخول للإرسال والاستقبال' if row and row['enabled'] else 'لم يكتمل الربط') + '</p>'
     body += '<p>مزامنة الوارد كل دقيقة، دون حذف الرسائل أو تعليمها كمقروءة. أول مزامنة تجلب أحدث 50 رسالة. إرسال الردود يتم عبر اعتماد الرسائل، وتنبيهات الإنتاج حسب إعداداتها.</p>'
     body += '<a href="/official-inbox">صندوق الوارد الرسمي</a> · <a href="/production-monitor">متابعة الإنتاج</a>'
     body += '<form method="post" action="' + PATH + '/network">' + hidden_csrf(session) + '<button>فحص الوصول إلى خوادم البريد دون كلمة مرور</button></form>'
     if recent_stepup(session['id']):
         body += '<form method="post" action="' + PATH + '">' + hidden_csrf(session)
         body += '<label>البريد<input type="email" name="email" value="' + ADDRESS + '" readonly autocomplete="username"></label><label>كلمة مرور البريد<input type="password" name="password" autocomplete="current-password" required maxlength="1024"></label><button>اختبار الاتصال وحفظ الربط</button></form>'
-        if row and row['enabled']:
+        if row and row['enabled'] and not stale:
             body += '<form method="post" action="' + PATH + '/test">' + hidden_csrf(session) + '<p>اختبار واحد: إرسال رسالة من البريد الرسمي إلى نفسه والتحقق من ظهورها في الوارد.</p><button>اختبار الإرسال والاستقبال</button></form>'
     else:
         body += '<p><a href="/mfa/step-up?next=' + PATH + '">التحقق عبر Authenticator لربط البريد</a></p>'
-    if row:
+    if row and not stale:
         body += '<p>آخر مزامنة: ' + e(row['synced_at']) + ' · ' + e(row['sync_error']) + '</p><p>اختبار الإرسال: ' + e(row['test_status'] or 'لم ينفذ') + '</p>'
     return HTMLResponse(page(body), headers={'Cache-Control':'no-store'})
 
