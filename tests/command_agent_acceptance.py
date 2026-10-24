@@ -94,6 +94,28 @@ def run():
     assert 'Fixture Foods' in calls[1][-1]['content'][0]['content']
     print('PASS: read tools.')
 
+    from app.team import team
+    model, calls = scripted([('add_employee', {'name': 'ابو تميم فارس', 'phone': '0509666097', 'title': 'مندوب'})], 'جاهز.')
+    run_as(staff, 'ضيف موظف ابو تميم فارس 0509666097', model)
+    assert 'للمدير فقط' in calls[1][-1]['content'][0]['content'] and '966509666097' not in team()
+    model, calls = scripted([('add_employee', {'name': 'ابو تميم فارس', 'phone': '0509666097', 'title': 'مندوب'})], 'جاهز.')
+    run_as(manager, 'ضيف موظف ابو تميم فارس 0509666097', model)
+    assert '966509666097' not in team()
+    pending = one("SELECT * FROM whatsapp_voice_pending WHERE command LIKE '%%add_employee%%' ORDER BY expires_at DESC LIMIT 1")
+    r = ROLE.set(manager)
+    try:
+        with db() as c:
+            out = admin.run_command(c, pending['command'], 'e5')
+    finally:
+        ROLE.reset(r)
+    assert 'أُضيف' in out, out
+    member = team()['966509666097']
+    assert member['name'] == 'ابو تميم فارس' and member['short'] == 'ابو تميم' and member['manager'] is False
+    model, calls = scripted([('list_employees', {})], 'القائمة.')
+    run_as(staff, 'وريني الموظفين', model)
+    assert '966509666097' in calls[1][-1]['content'][0]['content']
+    print('PASS: employees added by the manager with confirmation, never as managers.')
+
 
 def main():
     import psycopg

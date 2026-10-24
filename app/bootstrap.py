@@ -171,6 +171,8 @@ from app.mail_agent import router as mail_agent_router, register_worker as regis
 init_mail_agent()
 app.include_router(mail_agent_router)
 register_mail_agent_worker(app)
+from app.employees import init as init_employees
+init_employees()
 from app.declarations import router as declarations_router, init as init_declarations
 init_declarations()
 app.include_router(declarations_router)

@@ -39,10 +39,12 @@ def team():
         members = json.loads(os.getenv('AFAQ_TEAM', '[]'))
     except ValueError:
         members = []
+    from app.employees import members as registered
+    members = (members if isinstance(members, list) else []) + registered()
     out = {}
-    for m in members if isinstance(members, list) else []:
+    for m in members:
         number = phone(m.get('phone')) if isinstance(m, dict) else ''
-        if number:
+        if number and number not in out:
             out[number] = {'name': str(m.get('name') or ''), 'short': str(m.get('short') or m.get('name') or '').strip(),
                            'role': str(m.get('role') or ''), 'manager': m.get('manager') is True}
     owner = phone(os.getenv('WHATSAPP_COMMAND_OWNER', ''))

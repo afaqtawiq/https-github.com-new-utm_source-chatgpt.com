@@ -101,7 +101,9 @@ def team_members():
     try:
         members = json.loads(os.getenv('AFAQ_TEAM', '[]'))
     except ValueError:
-        return []
+        members = []
+    from app.employees import members as registered
+    members = (members if isinstance(members, list) else []) + registered()
     return [m for m in members if isinstance(m, dict) and m.get('phone')]
 
 
