@@ -47,6 +47,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'find': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_number': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['find', 'stage']}},
     {'name': 'approve_prospects', 'description': "Approve today's pending daily prospects for contact (all, or those whose company name contains a text).",
      'input_schema': {'type': 'object', 'properties': {'company_contains': {'type': 'string'}}}},
+    {'name': 'list_employees', 'description': 'List company employees registered for the WhatsApp team lane.',
+     'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'add_employee', 'description': 'Register a company employee (name, mobile, job title) so they can use team commands on WhatsApp. Manager only; needs the confirmation code.',
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}, 'title': {'type': 'string'}}, 'required': ['name', 'phone']}},
+    {'name': 'remove_employee', 'description': "Stop an employee's WhatsApp team access (by name or phone). Manager only; needs the confirmation code.",
+     'input_schema': {'type': 'object', 'properties': {'who': {'type': 'string'}}, 'required': ['who']}},
     {'name': 'send_whatsapp', 'description': 'Prepare a WhatsApp message to a team member (by name/department) or any phone number. It is sent only after the manager confirms with the code.',
      'input_schema': {'type': 'object', 'properties': {'to': {'type': 'string'}, 'text': {'type': 'string'}}, 'required': ['to', 'text']}},
     {'name': 'send_email', 'description': 'Prepare an email from the official mailbox. It is sent only after the manager confirms with the code.',
@@ -198,6 +204,47 @@ def tool_approve_prospects(c, a):
     return f'تم اعتماد {changed} من مرشحي اليوم للتواصل؛ روابط واتساب جاهزة في صفحة «مرشحو اليوم».'
 
 
+def _employee_phone(value):
+    from app.team import phone
+    digits = phone(str(value or ''))
+    return '+' + digits if re.fullmatch(r'9665\d{8}', digits or '') else ''
+
+
+def tool_list_employees(c, a):
+    from app.team import team
+    members = team()
+    if not members:
+        return 'لا يوجد موظفون مسجلون.'
+    return 'فريق آفاق المسجل على واتساب:\n' + '\n'.join(
+        f"· {m['name'] or '—'}{' (' + m['role'] + ')' if m.get('role') else ''} · +{n}{' · مدير' if m.get('manager') else ''}" for n, m in members.items())
+
+
+def tool_add_employee(c, a):
+    if not _member().get('manager'):
+        return 'إضافة الموظفين للمدير فقط.'
+    name, title = _clean(a.get('name'), 100), _clean(a.get('title'), 100)
+    number = _employee_phone(a.get('phone'))
+    if len(name) < 2 or not number:
+        return 'اسم الموظف ورقم جوال سعودي صحيح مطلوبان.'
+    from app.team import team
+    if number.lstrip('+') in team():
+        return 'هذا الرقم مسجل في الفريق بالفعل.'
+    token = _pending(c, {'tool': 'add_employee', 'name': name, 'phone': number, 'title': title})
+    return f'جاهز لإضافة {name} ({title or "بدون مسمى"}) برقم {number} إلى فريق واتساب بصلاحيات موظف (ليس مدير). رمز التأكيد: {token}'
+
+
+def tool_remove_employee(c, a):
+    if not _member().get('manager'):
+        return 'إيقاف الموظفين للمدير فقط.'
+    who = _clean(a.get('who'), 100)
+    number = _employee_phone(who)
+    row = c.execute('SELECT id,name,phone FROM team_employees WHERE active AND (phone=%s OR name ILIKE %s) LIMIT 2', (number or '#', '%' + who + '%')).fetchall()
+    if len(row) != 1:
+        return 'حدد الموظف برقمه؛ لم أجد تطابقًا واحدًا في الموظفين المضافين من واتساب (أعضاء الإعداد الأساسي يُعدّلون من الإعدادات).'
+    token = _pending(c, {'tool': 'remove_employee', 'id': row[0]['id'], 'name': row[0]['name']})
+    return f"جاهز لإيقاف صلاحية {row[0]['name']} ({row[0]['phone']}). رمز التأكيد: {token}"
+
+
 def tool_send_whatsapp(c, a):
     text = _clean(a.get('text'), 900)
     if not text or not _clean(a.get('to')):
@@ -226,7 +273,7 @@ def tool_send_email(c, a):
 
 HANDLERS = {t['name']: globals()['tool_' + t['name']] for t in TOOLS}
 INTERNAL_WRITE = {'add_driver', 'add_shipment', 'add_customer', 'update_declaration', 'approve_prospects'}
-EXTERNAL = {'send_whatsapp', 'send_email'}
+EXTERNAL = {'send_whatsapp', 'send_email', 'add_employee', 'remove_employee'}
 
 
 def execute_confirmed(c, payload):
@@ -235,6 +282,17 @@ def execute_confirmed(c, payload):
     if not member.get('manager'):
         return 'الإرسال خارج الشركة يحتاج تأكيد المدير؛ لم يُرسل شيء.'
     action = json.loads(payload)
+    if action.get('tool') == 'add_employee':
+        from app.employees import init
+        init()
+        row = c.execute('''INSERT INTO team_employees(name,short,phone,title,added_by) VALUES(%s,%s,%s,%s,%s)
+            ON CONFLICT(phone) DO UPDATE SET active=TRUE,name=EXCLUDED.name,title=EXCLUDED.title,updated_at=NOW() RETURNING id''',
+            (action['name'], ' '.join(action['name'].split()[:2]) if re.match(r'^[اأ]بو\s', action['name']) else action['name'].split()[0],
+             action['phone'], action.get('title') or '', member.get('name') or '')).fetchone()
+        return f"✅ أُضيف {action['name']} إلى فريق آفاق (رقم {action['phone']}). يقدر الآن يرسل أوامر للوكيل من واتساب بصلاحيات موظف."
+    if action.get('tool') == 'remove_employee':
+        c.execute('UPDATE team_employees SET active=FALSE,updated_at=NOW() WHERE id=%s', (action['id'],))
+        return f"✅ أُوقفت صلاحية {action['name']} على واتساب."
     if action.get('tool') == 'send_whatsapp':
         from app.manager_actions import send_message
         return send_message(c, {'to': action['to'], 'text': action['text']})
