@@ -55,7 +55,7 @@ from app.production_monitor import router as production_monitor_router,register_
 from app.readiness import router as readiness_router
 from app.storage import get_session,one,execute,utcnow
 ROLE_PREFIX={'admin':None,'sales':('/operations','/control-tower','/security','/soc','/incidents','/team','/permissions'),'customs':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'transport':('/sales-center','/sales-copilot','/outbound','/quotes','/quote-workflow','/revenue-growth','/customer-success','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'finance':('/operations','/control-tower','/outbound','/sales-inbox','/security','/soc','/incidents','/team','/permissions','/phone-sales','/crm/contacts'),'viewer':()}
-SENSITIVE=[('manage_media','POST','/runway-studio/','/run'),('manage_media','POST','/settings/runway',''),('manage_media','POST','/media-studio/','/run'),('manage_media','POST','/settings/media',''),('manage_social','POST','/settings/social',''),('publish_social','POST','/content-center/','/schedule'),('send_email','POST','/outbound/','/send'),('send_email','POST','/mail-agent/','/send'),('send_email','POST','/mail-agent/settings',''),('send_email','POST','/shipping-agent-messages/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('make_phone_call','POST','/freight-workflow/','/contact-owner'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
+SENSITIVE=[('manage_media','POST','/runway-studio/','/run'),('manage_media','POST','/settings/runway',''),('manage_media','POST','/media-studio/','/run'),('manage_media','POST','/settings/media',''),('manage_social','POST','/settings/social',''),('publish_social','POST','/content-center/','/schedule'),('send_email','POST','/outbound/','/send'),('send_email','POST','/mail-agent/','/send'),('send_email','POST','/declarations/','/send'),('send_email','POST','/mail-agent/settings',''),('send_email','POST','/shipping-agent-messages/','/send'),('send_whatsapp','POST','/commands/broadcast/','/send'),('make_phone_call','POST','/freight-workflow/','/contact-owner'),('approve_quote','POST','/quotes/','/approve-commercial'),('approve_pricing','POST','/quotes/','/approve-pricing'),('accept_quote','POST','/quotes/','/accept'),('manage_gmail','POST','/settings/email',''),('manage_users','POST','/team/',''),('edit_operations','POST','/operations/',''),('edit_operations','POST','/control-tower/','')]
 def role_allowed(request,s):
  if not s:return True
  role=s.get('role','viewer');path=request.url.path
@@ -171,6 +171,9 @@ from app.mail_agent import router as mail_agent_router, register_worker as regis
 init_mail_agent()
 app.include_router(mail_agent_router)
 register_mail_agent_worker(app)
+from app.declarations import router as declarations_router, init as init_declarations
+init_declarations()
+app.include_router(declarations_router)
 
 # Manual operational subledger; no financial import, bank connector or background worker.
 from app.finance_schema import init_storage as init_finance_storage
