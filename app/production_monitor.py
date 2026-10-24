@@ -227,6 +227,7 @@ def dashboard(request: Request):
     body = '<div class="nav"><a href="/advert-studio">استوديو الإعلان</a><a href="/settings/email">اتصال البريد</a></div><div class="hero"><h1>متابعة الإنتاج والتنبيهات</h1><p>فحص كل دقيقة، وتنبيه واحد لكل مهمة عند التأخر وتنبيه عند الفشل. لا تعيد المراقبة التوليد المدفوع، ولا ترسل للدعم دون اعتماد.</p></div>'
     body += '<div class="card"><p>الحالة: ' + ('مفعّلة' if settings and settings['enabled'] else 'متوقفة') + '</p><p>حساب الإرسال: ' + e(sender or 'Gmail غير مربوط') + '</p>'
     body += '<p>يراقب المهام الجارية والأعطال الجديدة بعد التفعيل. يمكن توثيق مهمة متعثرة سابقة من نموذج الفحص أدناه.</p>'
+    body += '<form method="post" action="/production-monitor/check-email">' + hidden_csrf(s) + '<button class="btn">فحص صلاحية اتصال البريد دون إرسال</button></form>'
     from app.mfa_stepup import recent_stepup
     if not recent_stepup(s['id']):
         body += '<a class="btn" href="/mfa/step-up?next=/production-monitor">التحقق لإدارة التنبيهات</a>'
@@ -250,6 +251,29 @@ def dashboard(request: Request):
                 body += '<a href="/mfa/step-up?next=/production-monitor">التحقق قبل اعتماد رسالة الدعم</a>'
         body += '</div>'
     return HTMLResponse(page(body), headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/production-monitor/check-email', response_class=HTMLResponse)
+async def check_email(request: Request):
+    s = access(request)
+    await form(request, s)
+    # Refresh credentials only: never send a message or expose a token/error body.
+    try:
+        await run_in_threadpool(mail.access_token, s['user_id'])
+        message = 'نجح تجديد اتصال Gmail. هذا الفحص لا يرسل رسالة ولا يؤكد تسليم التنبيهات.'
+    except Exception as exc:
+        error = str(exc)
+        if error.startswith('Google OAuth ') and 'invalid_grant' in error:
+            message = 'رفض Google تجديد الاتصال (invalid_grant). أعد ربط Gmail ثم أعد الفحص.'
+        elif error.startswith('Google OAuth ') and 'invalid_client' in error:
+            message = 'رفض Google إعدادات تطبيق البريد (invalid_client). يلزم إصلاح إعدادات Google OAuth.'
+        elif error == 'Google OAuth is not fully configured':
+            message = 'إعدادات تطبيق Google OAuth غير مكتملة.'
+        elif error == 'Gmail is not connected':
+            message = 'Gmail غير مربوط. اربط حساب البريد ثم أعد الفحص.'
+        else:
+            message = 'تعذر تجديد اتصال Gmail. يلزم مراجعة اتصال الخدمة وإعدادات الربط قبل الاعتماد على التنبيهات.'
+    return HTMLResponse(page('<h1>فحص اتصال البريد</h1><p>' + e(message) + '</p><a href="/settings/email">إعداد Gmail</a> · <a href="/production-monitor">العودة للمتابعة</a>'), headers={'Cache-Control': 'no-store'})
 
 
 @router.post('/production-monitor/settings')
