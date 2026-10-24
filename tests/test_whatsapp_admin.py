@@ -564,21 +564,27 @@ def test_audio_without_key_does_not_execute(db, outbound):
     assert db.execute('SELECT count(*) n FROM drivers').fetchone()['n'] == 0
 
 
-def test_voice_confirmation_bound_to_conversation_and_single_use(db, outbound, monkeypatch):
+def test_voice_runs_like_text_and_internal_actions_need_no_code(db, outbound, monkeypatch):
     async def transcribe(*_): return 'آفاق أضف السائق محمد ورقمه 0501234567'
     monkeypatch.setattr(admin, 'transcribe', transcribe)
     p = payload('')
     p['message']['attachments'] = [{'type': 'audio'}]
     receive(p)
-    assert db.execute('SELECT count(*) n FROM drivers').fetchone()['n'] == 0
-    token = re.search(r'نفذ ([0-9A-F]{6})', outbound[-1]['message'])[1]
-    other = payload('نفذ ' + token, event='evt-2')
+    assert db.execute('SELECT count(*) n FROM drivers').fetchone()['n'] == 1
+    assert 'سمعت' in outbound[-1]['message'] and 'محمد' in outbound[-1]['message']
+
+
+def test_confirmation_code_bound_to_conversation_and_single_use(db, outbound, monkeypatch):
+    receive(payload('الأوامر', event='evt-0'))  # creates the confirmation table
+    db.execute("""INSERT INTO whatsapp_voice_pending(token,sender,conversation_id,command,expires_at)
+        VALUES('ABC123','966500000001','private-1','آفاق أضف السائق محمد ورقمه 0501234567',NOW()+INTERVAL '10 minutes')""")
+    other = payload('نفذ ABC123', event='evt-2')
     other['conversation']['id'] = 'private-2'
     receive(other)
     assert db.execute('SELECT count(*) n FROM drivers').fetchone()['n'] == 0
-    receive(payload('نفذ ' + token, event='evt-3'))
+    receive(payload('نفذ ABC123', event='evt-3'))
     assert db.execute('SELECT count(*) n FROM drivers').fetchone()['n'] == 1
-    receive(payload('نفذ ' + token, event='evt-4'))
+    receive(payload('نفذ ABC123', event='evt-4'))
     assert 'غير صالح' in outbound[-1]['message']
 
 

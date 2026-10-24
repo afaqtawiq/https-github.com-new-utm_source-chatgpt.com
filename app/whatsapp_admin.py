@@ -321,10 +321,8 @@ async def admin_reply(c, payload, sender):
     if index is not None:
         try:
             raw = await transcribe(payload, index)
-            token = secrets.token_hex(3).upper()
-            c.execute('''INSERT INTO whatsapp_voice_pending(token,sender,conversation_id,command,expires_at)
-                VALUES(%s,%s,%s,%s,NOW()+INTERVAL '10 minutes')''', (token, sender, conversation, raw))
-            reply = f'سمعت:\n{raw}\n\nللتنفيذ اكتب: نفذ {token}\nالرمز صالح 10 دقائق. لم أنفذ الأمر بعد.'
+            # Voice runs like text. Anything leaving the company still asks for «نفذ CODE».
+            reply = f'🎙 سمعت: {raw}\n\n' + run_command(c, raw, event_id)
         except ValueError as error:
             reply = str(error)
         except (httpx.HTTPError, KeyError, TypeError):

@@ -137,11 +137,16 @@ def accept_inbound(payload):
         attachments = []
     # Preserve existing independently authorized staff operational commands.
     # This lane never gains write privileges from a caption or document.
-    if not attachments and settings['mode'] == 'routine':
+    if settings['mode'] == 'routine':
         from app.team import identify
         _, member = identify(payload)
-        if member and deterministic_staff_command(str(message.get('text') or '')):
+        audio_only = bool(attachments) and all(isinstance(a, dict) and str(a.get('type') or '').lower() in ('audio', 'voice') for a in attachments)
+        if member and not attachments and deterministic_staff_command(str(message.get('text') or '')):
             return {'legacy_local_only':True}
+        # Verified team members' text and voice commands go to the command agent (tools,
+        # confirmation codes for anything external). Documents stay in this guarded lane.
+        if member and (not attachments or audio_only):
+            return {'legacy_local_only':True,'team_agent':True}
     snapshots = [attachment_snapshot(item, index, who['account_id']) for index,item in enumerate(attachments[:6])]
     decision = (privacy.screen_caption(str(message.get('text') or '')) if snapshots
                 else privacy.screen_question(str(message.get('text') or '')))

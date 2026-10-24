@@ -16,6 +16,7 @@ from app import ai_intake  # noqa: F401  (customer conversations understood by C
 from app import fasah_ai  # broker assistant inside the FASAH workspace
 from app import team  # noqa: F401  (manager and staff numbers, respectful replies, staff read-only)
 from app import manager_actions  # noqa: F401  (voice/image media fix, send WhatsApp messages on command)
+from app import command_agent  # noqa: F401  (team commands run through real platform tools)
 
 
 def _afaq_only(text, interactive="", previous=None):

@@ -138,7 +138,7 @@ async def receive(request: Request):
     if durable_inbound is not None:
         queued = await run_in_threadpool(durable_inbound, p)
         if queued is not None and queued.get('legacy_local_only') is True:
-            legacy_local_only = True
+            legacy_local_only = queued.get('team_agent') is not True
         elif queued is not None:
             return queued
     from app.whatsapp_admin import owner_sender, admin_reply, is_admin_command
