@@ -3,6 +3,7 @@
 This does not grant permission, approve content, waive MFA enrollment, or alter
 sessions. Callers must keep those checks and the one-attempt send claim.
 """
+from app.official_mailbox import ADDRESS
 import re
 
 
@@ -13,5 +14,5 @@ def is_manual_outbound_send(method, path):
 def official_manual_send_without_stepup(method, path, selected):
     return bool(is_manual_outbound_send(method, path) and selected
                 and selected.get('provider') == 'spacemail'
-                and selected.get('sender_email') == 'afaq@shodai.cc'
+                and selected.get('sender_email') == ADDRESS
                 and selected.get('status') == 'connected')

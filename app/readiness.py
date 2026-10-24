@@ -1,4 +1,5 @@
 """Configuration and operational evidence; configured never means live-tested."""
+from app.official_mailbox import ADDRESS as OFFICIAL_ADDRESS
 import os
 import json
 
@@ -22,7 +23,7 @@ def operational_status(user_id):
     mail_enabled = bool(mail and mail['enabled'])
     mail_tested = bool(mail_enabled and mail['test_status'] == 'received')
     result = [
-        {'name':'البريد الرسمي afaq@shodai.cc', 'configured':mail_enabled,
+        {'name':'البريد الرسمي '+OFFICIAL_ADDRESS, 'configured':mail_enabled,
          'state_label': ('تحتاج المزامنة مراجعة' if mail and mail['sync_error'] else
                          'نجح اختبار الإرسال والاستقبال' if mail_tested else 'يحتاج اختبارًا' if mail_enabled else 'غير مفعّل'),
          'detail': ('آخر مزامنة: ' + str(mail['synced_at'] or 'لم تسجل') if mail else 'اربط صندوق البريد الرسمي'),

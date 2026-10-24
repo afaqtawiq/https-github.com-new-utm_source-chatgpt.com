@@ -7,7 +7,7 @@ from app.manual_email_policy import (
 )
 
 
-OFFICIAL = {'provider': 'spacemail', 'sender_email': 'afaq@shodai.cc', 'status': 'connected'}
+OFFICIAL = {'provider': 'spacemail', 'sender_email': 'info@afaqtawiqs.net', 'status': 'connected'}
 
 
 @pytest.mark.parametrize('path', ['/outbound/1/send', '/outbound/234567890/send'])
@@ -49,14 +49,15 @@ def test_nearby_paths_and_other_email_actions_do_not_inherit_exception(path):
     {**OFFICIAL, 'provider': 'gmail'}, {**OFFICIAL, 'provider': 'Spacemail'},
     {**OFFICIAL, 'provider': 'spacemail '}, {**OFFICIAL, 'provider': None},
     {**OFFICIAL, 'sender_email': 'other@shodai.cc'},
+    {**OFFICIAL, 'sender_email': 'afaq@shodai.cc'},  # previous mailbox is no longer the official sender
     {**OFFICIAL, 'sender_email': 'afaq@other.invalid'},
-    {**OFFICIAL, 'sender_email': 'AFAQ@shodai.cc'},
+    {**OFFICIAL, 'sender_email': 'INFO@afaqtawiqs.net'},
     {**OFFICIAL, 'sender_email': 'afaq@SHODAI.CC'},
-    {**OFFICIAL, 'sender_email': ' afaq@shodai.cc'},
-    {**OFFICIAL, 'sender_email': 'afaq@shodai.cc '},
-    {**OFFICIAL, 'sender_email': 'Afaq <afaq@shodai.cc>'},
-    {**OFFICIAL, 'sender_email': 'afaq@shodai.cc.evil.invalid'},
-    {**OFFICIAL, 'sender_email': 'afaq@shodai.cc\r\nBcc: outsider@example.invalid'},
+    {**OFFICIAL, 'sender_email': ' info@afaqtawiqs.net'},
+    {**OFFICIAL, 'sender_email': 'info@afaqtawiqs.net '},
+    {**OFFICIAL, 'sender_email': 'Afaq <info@afaqtawiqs.net>'},
+    {**OFFICIAL, 'sender_email': 'info@afaqtawiqs.net.evil.invalid'},
+    {**OFFICIAL, 'sender_email': 'info@afaqtawiqs.net\r\nBcc: outsider@example.invalid'},
     {**OFFICIAL, 'sender_email': None},
     {**OFFICIAL, 'status': 'disconnected'}, {**OFFICIAL, 'status': 'pending'},
     {**OFFICIAL, 'status': 'Connected'}, {**OFFICIAL, 'status': None},

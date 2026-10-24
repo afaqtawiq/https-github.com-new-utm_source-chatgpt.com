@@ -184,6 +184,24 @@ def run():
     assert one('SELECT message FROM daily_prospects WHERE id=?', (b,))['message'] == dp._with_opening(dp.template_message('V2 AI', pitch), 'يسعدنا التواصل مع فريقكم بشأن شحناتكم القادمة إلى جدة.')
     assert dp.refresh_pending_messages() == 0
     print('PASS: official email added; second-release drafts upgraded.')
+
+    # A mailbox saved for the previous address must be reconnected before anything is sent from it.
+    import app.spacemail as mail
+    uid = sessions['admin']['user_id']
+    with db() as c:
+        c.execute("INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at) VALUES(%s,%s,TRUE,%s)",
+                  (uid, mail.cipher().encrypt(b'fixture-only').decode(), now))
+    assert mail.ADDRESS == 'info@afaqtawiqs.net'
+    state = mail.connection(uid)
+    assert state['status'] == 'reconnect_required' and state['sender_email'] == 'afaq@shodai.cc'
+    try:
+        mail.password(uid); raise AssertionError('old mailbox password must not be used')
+    except RuntimeError:
+        pass
+    with db() as c:
+        c.execute('UPDATE spacemail_connections SET address=%s WHERE user_id=%s', (mail.ADDRESS, uid))
+    assert mail.connection(uid)['status'] == 'connected' and mail.password(uid) == 'fixture-only'
+    print('PASS: previous mailbox connection requires reconnect to the new official address.')
     client.close()
 
 
@@ -205,7 +223,7 @@ def main():
         return connect(sock, address)
     try:
         env = {'DATABASE_URL': url + '?' + urlencode({'options': '-c search_path=' + schema + ' -c statement_timeout=30000'}, quote_via=quote),
-               'DISCOVERY_AUTO_ENABLED': '0', 'ENABLE_EXTERNAL_ACTIONS': '0', 'ANTHROPIC_API_KEY': '',
+               'DISCOVERY_AUTO_ENABLED': '0', 'ENABLE_EXTERNAL_ACTIONS': '0', 'ANTHROPIC_API_KEY': '', 'TOKEN_ENCRYPTION_KEY': secrets.token_urlsafe(32),
                'ADMIN_EMAIL': 'bootstrap@fixture.invalid', 'ADMIN_PASSWORD': secrets.token_urlsafe(32), 'BROWSER_COOKIE_SECURE': '0'}
         with patch.dict(os.environ, env), patch.object(socket.socket, 'connect', local_only):
             run()

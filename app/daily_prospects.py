@@ -108,7 +108,7 @@ def score_contact(row):
 TRANSPORT_LICENCE = '11/00098402'
 
 
-OFFICIAL_EMAIL = 'info@afaqtawiqs.net'
+from app.official_mailbox import ADDRESS as OFFICIAL_EMAIL  # noqa: E402
 
 
 def template_message(company_name, pitch):

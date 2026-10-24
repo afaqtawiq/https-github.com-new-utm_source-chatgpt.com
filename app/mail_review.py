@@ -4,6 +4,7 @@ A reviewed association is deliberately separate from the exact-thread link used
 by official_sales to authorize reply drafts. Delivery notices are provider claims,
 not proof of delivery, a customer reply, or authorization to retry.
 """
+from app.official_mailbox import ALL as OWN_ADDRESSES
 import datetime as dt
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -57,9 +58,9 @@ def review_items(uid, include_done=False):
         LEFT JOIN sales_prospects p ON p.id=l.prospect_id AND p.mail_user_id=i.user_id
         LEFT JOIN official_mail_reviews r ON r.inbox_id=i.id AND r.user_id=i.user_id
         WHERE i.user_id=? AND i.duplicate_of IS NULL
-          AND COALESCE(i.sender_address,'')<>'afaq@shodai.cc'
+          AND NOT (lower(COALESCE(i.sender_address,''))=ANY(?))
           AND (? OR COALESCE(r.status,'open')<>'done')
-        ORDER BY COALESCE(r.due_at,i.imported_at),i.id LIMIT ?''', (uid,include_done,LIMIT+1))
+        ORDER BY COALESCE(r.due_at,i.imported_at),i.id LIMIT ?''', (uid,list(OWN_ADDRESSES),include_done,LIMIT+1))
     sent = rows('''SELECT m.id,m.prospect_id,m.sent_at,m.recipient,p.company_name,p.status prospect_status,
         r.status review_status,r.due_at,r.notes
         FROM sales_prospects p JOIN outbound_messages m ON m.prospect_id=p.id AND m.mail_user_id=p.mail_user_id

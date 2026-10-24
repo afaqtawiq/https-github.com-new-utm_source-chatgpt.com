@@ -25,7 +25,7 @@ from app.live_activity import observe
 from app.mail_delivery import MailRecipientRejected, MailConnectionFailed
 
 router = APIRouter()
-ADDRESS = 'afaq@shodai.cc'
+from app.official_mailbox import ADDRESS, DOMAIN, PREVIOUS
 HOST = 'mail.spacemail.com'
 PATH = '/settings/email/spacemail'
 
@@ -34,6 +34,8 @@ with db() as c:
         user_id BIGINT PRIMARY KEY REFERENCES users(id), password_enc TEXT NOT NULL,
         enabled BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL,
         synced_at TIMESTAMPTZ, sync_error TEXT, test_status TEXT, test_id TEXT)''')
+    # Rows saved before this column existed hold the password of the previous mailbox.
+    c.execute("ALTER TABLE spacemail_connections ADD COLUMN IF NOT EXISTS address TEXT NOT NULL DEFAULT 'afaq@shodai.cc'")
     c.execute('''CREATE TABLE IF NOT EXISTS spacemail_inbox(
         id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id),
         uidvalidity TEXT NOT NULL, uid BIGINT NOT NULL, message_id TEXT,
@@ -63,15 +65,16 @@ def cipher():
 
 
 def connection(uid):
-    r = one('SELECT enabled FROM spacemail_connections WHERE user_id=?', (uid,))
+    r = one('SELECT enabled,address FROM spacemail_connections WHERE user_id=?', (uid,))
     if r:
-        return {'provider':'spacemail', 'sender_email':ADDRESS, 'status':'connected' if r['enabled'] else 'disconnected', 'scope':'imap'}
+        status = 'reconnect_required' if r['address'] != ADDRESS else 'connected' if r['enabled'] else 'disconnected'
+        return {'provider':'spacemail', 'sender_email':r['address'], 'status':status, 'scope':'imap'}
     return None
 
 
 def password(uid):
-    r = one('SELECT password_enc,enabled FROM spacemail_connections WHERE user_id=?', (uid,))
-    if not r or not r['enabled']:
+    r = one('SELECT password_enc,enabled,address FROM spacemail_connections WHERE user_id=?', (uid,))
+    if not r or not r['enabled'] or r['address'] != ADDRESS:
         raise RuntimeError('Official mailbox is not connected')
     return cipher().decrypt(r['password_enc'].encode()).decode()
 
@@ -115,7 +118,7 @@ def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, re
         raise RuntimeError('External actions are disabled')
     msg = EmailMessage()
     msg['From'], msg['To'], msg['Subject'] = ADDRESS, recipient, subject
-    msg['Date'], msg['Message-ID'] = formatdate(localtime=False), make_msgid(domain='shodai.cc')
+    msg['Date'], msg['Message-ID'] = formatdate(localtime=False), make_msgid(domain=DOMAIN)
     if automatic:
         msg['Auto-Submitted'] = 'auto-replied'
         msg['X-Auto-Response-Suppress'] = 'All'
@@ -304,8 +307,10 @@ async def save(request: Request):
     except Exception:
         return render(s, 'لم ينجح اختبار اتصال البريد. لم تتغير الإعدادات ولم تُحفظ كلمة المرور.')
     with db() as c:
-        c.execute('''INSERT INTO spacemail_connections(user_id,password_enc,updated_at) VALUES(%s,%s,%s)
-            ON CONFLICT(user_id) DO UPDATE SET password_enc=EXCLUDED.password_enc,enabled=TRUE,updated_at=EXCLUDED.updated_at''', (s['user_id'],encrypted,utcnow()))
+        c.execute('''INSERT INTO spacemail_connections(user_id,password_enc,updated_at,address) VALUES(%s,%s,%s,%s)
+            ON CONFLICT(user_id) DO UPDATE SET password_enc=EXCLUDED.password_enc,enabled=TRUE,updated_at=EXCLUDED.updated_at,
+            address=EXCLUDED.address,test_status=CASE WHEN spacemail_connections.address=EXCLUDED.address THEN spacemail_connections.test_status END,
+            sync_error=NULL''', (s['user_id'],encrypted,utcnow(),ADDRESS))
         # Never continue delivering official alerts through the previous Gmail identity.
         c.execute('UPDATE production_monitor_settings SET sender=%s,recipient=%s,updated_at=%s WHERE user_id=%s', (ADDRESS, ADDRESS, utcnow(), s['user_id']))
     return RedirectResponse(PATH, 303)
@@ -394,7 +399,7 @@ async def reply_draft(inbox_id: int, request: Request):
 
 
 def tick():
-    for row in rows('''SELECT s.user_id FROM spacemail_connections s JOIN users u ON u.id=s.user_id WHERE s.enabled=TRUE AND u.is_active=1 AND u.role='admin' '''):
+    for row in rows('''SELECT s.user_id FROM spacemail_connections s JOIN users u ON u.id=s.user_id WHERE s.enabled=TRUE AND s.address=%s AND u.is_active=1 AND u.role='admin' ''', (ADDRESS,)):
         try:
             sync(row['user_id'])
             with db() as c:

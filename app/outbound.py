@@ -1,4 +1,5 @@
 import os,html,urllib.parse,datetime
+from app.official_mailbox import ADDRESS as OFFICIAL_ADDRESS
 from fastapi import APIRouter,Request,HTTPException
 from fastapi.responses import HTMLResponse,RedirectResponse
 from app.storage import get_session,rows,one,execute,log,utcnow
@@ -175,7 +176,7 @@ def send_approved(mid,s):
    from app.prospect_outreach import content_digest
    import hmac
    if not m.get('approval_digest') or not hmac.compare_digest(m['approval_digest'],content_digest(m)):raise HTTPException(409,'Approved prospect content changed')
-   if selected.get('provider')!='spacemail' or selected.get('sender_email')!='afaq@shodai.cc':raise HTTPException(409,'Official mailbox is required')
+   if selected.get('provider')!='spacemail' or selected.get('sender_email')!=OFFICIAL_ADDRESS:raise HTTPException(409,'Official mailbox is required')
   if m.get('reply_inbox_id'):
    if selected.get('provider')!='spacemail':raise HTTPException(409,'Official mailbox is required')
    parent=validate_reply(c,m,s['user_id'])

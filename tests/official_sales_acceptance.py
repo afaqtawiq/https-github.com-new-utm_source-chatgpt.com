@@ -23,7 +23,7 @@ def run():
     client.post('/login',data={'email':os.environ['ADMIN_EMAIL'],'password':os.environ['ADMIN_PASSWORD']})
     session=get_session(client.cookies.get('gla_session'));uid=session['user_id'];csrf={'csrf':session['csrf']}
     with db() as c:
-        c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at) VALUES(%s,%s,TRUE,NOW())',(uid,mail.cipher().encrypt(b'fake-ci-only').decode()))
+        c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at,address) VALUES(%s,%s,TRUE,NOW(),%s)',(uid,mail.cipher().encrypt(b'fake-ci-only').decode(),mail.ADDRESS))
         c.execute('INSERT INTO user_mfa(user_id,mfa_enabled,updated_at) VALUES(%s,1,NOW())',(uid,))
         c.execute("INSERT INTO stepup_auth(session_id,user_id,verified_at,expires_at) VALUES(%s,%s,NOW(),NOW()+INTERVAL '10 minutes')",(session['id'],uid))
     now=utcnow()

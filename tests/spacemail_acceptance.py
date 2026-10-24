@@ -45,7 +45,7 @@ def run(client, app):
     smtp.send_message.return_value = {}
     with patch.object(m.smtplib, 'SMTP_SSL', return_value=smtp) as factory:
         mid = g.send_gmail(uid, m.ADDRESS, 'test', 'body')
-        assert mid.endswith('@shodai.cc>')
+        assert mid.endswith('@afaqtawiqs.net>')
         assert factory.call_args.args == (m.HOST,465)
         context = factory.call_args.kwargs['context']
         assert context.check_hostname and context.verify_mode==ssl.CERT_REQUIRED
