@@ -124,10 +124,36 @@ def run():
     info = score_contact({'company_name': 'Test Foods', 'phone': '0500000299', 'notes': 'جدة غذائية'})
     with patch('app.daily_prospects.ai_opening', return_value='يسعدنا خدمة شحناتكم الغذائية القادمة عبر ميناء جدة.'):
         text, source = compose('Test Foods', info)
-    assert source == 'ai' and 'يسعدنا خدمة شحناتكم' in text and text.startswith('السلام عليكم')
+    assert source == 'ai' and text.split('\n')[2] == 'يسعدنا خدمة شحناتكم الغذائية القادمة عبر ميناء جدة.' and 'Test Foods' in text
     with patch('app.daily_prospects.ai_opening', return_value=None):
         assert compose('Test Foods', info)[1] == 'template'
     print('PASS: AI opening guarded with template fallback.')
+
+    # Offer covers clearance and transport together with both licences.
+    assert '2513' in text and dp.TRANSPORT_LICENCE in text and 'التخليص الجمركي والنقل' in text
+    # Pending drafts from the earlier template are upgraded once; edited or decided ones are not touched.
+    pitch = dp.DEFAULT_PITCH
+    with db() as c:
+        ids = []
+        for key, msg, source, status in (
+                ('directory:9001', dp._previous_template('Old Plain', pitch), 'template', 'pending'),
+                ('directory:9002', '\n'.join([dp._previous_template('Old AI', pitch).split('\n')[0], 'يسعدنا خدمتكم في شحناتكم القادمة.'] + dp._previous_template('Old AI', pitch).split('\n')[2:]), 'ai', 'pending'),
+                ('directory:9003', 'رسالة عدّلها الفريق يدويًا قبل الاعتماد للتواصل', 'template', 'pending'),
+                ('directory:9004', dp._previous_template('Old Approved', pitch), 'template', 'approved')):
+            ids.append(c.execute('''INSERT INTO daily_prospects(source_key,company_name,score,segment,reason,message,message_source,status,batch_date,created_at,updated_at)
+                VALUES(%s,%s,50,'general','r',%s,%s,%s,%s,%s,%s) RETURNING id''', (key, key, msg, source, status, date(2026, 10, 23), now, now)).fetchone()['id'])
+    with db() as c:
+        c.execute("UPDATE daily_prospects SET company_name='Old Plain' WHERE id=%s", (ids[0],))
+        c.execute("UPDATE daily_prospects SET company_name='Old AI' WHERE id=%s", (ids[1],))
+        c.execute("UPDATE daily_prospects SET company_name='Old Approved' WHERE id=%s", (ids[3],))
+    first = dp.refresh_pending_messages(); second = dp.refresh_pending_messages()
+    assert first == 2 and second == 0
+    msgs = [one('SELECT message FROM daily_prospects WHERE id=?', (i,))['message'] for i in ids]
+    assert msgs[0] == dp.template_message('Old Plain', pitch)
+    assert msgs[1] == dp._with_opening(dp.template_message('Old AI', pitch), 'يسعدنا خدمتكم في شحناتكم القادمة.')
+    assert msgs[2] == 'رسالة عدّلها الفريق يدويًا قبل الاعتماد للتواصل'
+    assert dp.TRANSPORT_LICENCE not in msgs[3]
+    print('PASS: clearance + transport offer; earlier pending drafts upgraded, edited/approved untouched.')
     client.close()
 
 

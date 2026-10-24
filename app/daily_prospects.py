@@ -64,6 +64,7 @@ def init():
             outcome_note TEXT, decided_by BIGINT, decided_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)''')
         c.execute('CREATE INDEX IF NOT EXISTS daily_prospects_batch_idx ON daily_prospects(batch_date,status)')
+    refresh_pending_messages()
 
 
 def esc(value):
@@ -104,7 +105,21 @@ def score_contact(row):
             'phone': phone, 'email': email, 'reason': ' · '.join(reasons)}
 
 
+TRANSPORT_LICENCE = '11/00098402'
+
+
 def template_message(company_name, pitch):
+    return ('السلام عليكم ورحمة الله،\n'
+            f'تحية طيبة لفريق {company_name.strip()}.\n'
+            'معكم آفاق طويق للتخليص الجمركي والنقل '
+            f'(ترخيص مخلص جمركي رقم 2513 وترخيص نقل رقم {TRANSPORT_LICENCE}). {pitch}\n'
+            'عرضنا يشمل التخليص الجمركي والنقل البري المرخّص معًا، من الميناء أو المنفذ حتى مستودعكم، بجهة واحدة مسؤولة عن شحنتكم.\n'
+            'هل لديكم شحنات قادمة خلال الفترة القادمة؟ يسعدنا تقديم عرض سعر شامل للتخليص والنقل بعد معرفة '
+            'نوع البضاعة والوزن أو عدد الحاويات ومدينة التسليم.\n'
+            f'للتواصل: {PHONE}\n{WEBSITE}')
+
+
+def _previous_template(company_name, pitch):
     return ('السلام عليكم ورحمة الله،\n'
             f'تحية طيبة لفريق {company_name.strip()}.\n'
             f'معكم آفاق طويق للتخليص الجمركي والخدمات اللوجستية (ترخيص مخلص جمركي رقم 2513). {pitch}\n'
@@ -112,8 +127,35 @@ def template_message(company_name, pitch):
             f'للتواصل: {PHONE}\n{WEBSITE}')
 
 
+def _with_opening(text, opening):
+    lines = text.split('\n')
+    return '\n'.join(lines[:2] + [opening] + lines[2:])
+
+
+def refresh_pending_messages():
+    """Bring unedited pending drafts to the current template (clearance + transport offer)."""
+    pitches = {key: pitch for key, _, _, _, pitch in SEGMENTS}
+    changed = 0
+    for item in rows("SELECT id,company_name,segment,message,message_source FROM daily_prospects WHERE status='pending'"):
+        pitch = pitches.get(item['segment'], DEFAULT_PITCH)
+        old = _previous_template(item['company_name'], pitch)
+        current = template_message(item['company_name'], pitch)
+        if item['message'] == old:
+            updated = current
+        elif (item['message_source'] == 'ai' and item['message'].split('\n')[0] == old.split('\n')[0]
+              and item['message'].split('\n')[2:] == old.split('\n')[2:]):
+            # First release put the AI opening in place of the greeting line.
+            updated = _with_opening(current, item['message'].split('\n')[1])
+        else:
+            continue  # already current or edited by a person: never overwrite
+        with db() as c:
+            changed += c.execute("UPDATE daily_prospects SET message=%s,updated_at=%s WHERE id=%s AND status='pending' AND message=%s",
+                                 (updated, utcnow(), item['id'], item['message'])).rowcount
+    return changed
+
+
 AI_SYSTEM = ('You write one short Arabic opening sentence for a first business message from Afaq Tuwaiq, a Saudi '
-             'customs clearance and logistics company, to a company that imports goods. Use only the company name, '
+             'licensed customs broker and licensed land transport company that offers clearance and transport together, to a company that imports goods. Use only the company name, '
              'city and activity provided. Do not invent facts, numbers, prices, names, dates, links or claims about the '
              'company. Polite Saudi business tone, at most 160 characters, no greeting (it is added separately). '
              'Reply only with JSON: {"opening": "..."}')
@@ -151,8 +193,7 @@ def compose(company_name, info, use_ai=True):
     opening = ai_opening(company_name, info['city'], info['label']) if use_ai else None
     if not opening:
         return base, 'template'
-    first, rest = base.split('\n', 1)
-    return first + '\n' + opening + '\n' + rest.split('\n', 1)[1], 'ai'
+    return _with_opening(base, opening), 'ai'
 
 
 def candidates():
