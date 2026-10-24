@@ -717,3 +717,12 @@ def test_trusted_local_only_context_forbids_legacy_model(conversation_modules,mo
         assert ai.answer_question('تفاصيل حساسة من التاريخ') is None
     finally:
         ai.LEGACY_MODEL_DISABLED.reset(token)
+
+
+@pytest.mark.parametrize('typed', ['نفذABC124', 'نفذ abc124', 'ABC124', 'نفذ: ABC124'])
+def test_confirmation_code_accepts_common_typing(db, outbound, typed):
+    receive(payload('الأوامر', event='evt-0'))
+    db.execute("""INSERT INTO whatsapp_voice_pending(token,sender,conversation_id,command,expires_at)
+        VALUES('ABC124','966500000001','private-1','آفاق أضف السائق سالم ورقمه 0501234568',NOW()+INTERVAL '10 minutes')""")
+    receive(payload(typed, event='evt-typed'))
+    assert db.execute('SELECT count(*) n FROM drivers').fetchone()['n'] == 1

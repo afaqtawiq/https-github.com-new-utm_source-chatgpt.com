@@ -328,12 +328,18 @@ async def admin_reply(c, payload, sender):
         except (httpx.HTTPError, KeyError, TypeError):
             reply = 'تعذر تحويل الصوت الآن؛ لم أنفذ أي أمر. أرسله كتابةً.'
     elif raw:
-        confirmation = re.fullmatch(r'نفذ\s+([0-9A-Fa-f]{6})', normalize(raw))
+        # Accept «نفذ CODE», «نفذCODE» and the bare code; Arabic-Indic digits too.
+        typed = normalize(raw).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')).strip()
+        confirmation = re.fullmatch(r'(نفذ|نفّذ)?\s*[:،-]?\s*([0-9A-Fa-f]{6})', typed)
+        row = None
         if confirmation:
             row = c.execute('''UPDATE whatsapp_voice_pending SET consumed=TRUE
                 WHERE token=%s AND sender=%s AND conversation_id=%s AND NOT consumed AND expires_at>NOW()
-                RETURNING command''', (confirmation[1].upper(), sender, conversation)).fetchone()
-            reply = run_command(c, row['command'], event_id) if row else 'رمز التأكيد غير صالح أو استُخدم أو انتهت مدته؛ لم أنفذ الأمر.'
+                RETURNING command''', (confirmation[2].upper(), sender, conversation)).fetchone()
+        if row:
+            reply = run_command(c, row['command'], event_id)
+        elif confirmation and confirmation[1]:
+            reply = 'رمز التأكيد غير صالح أو استُخدم أو انتهت مدته؛ لم أنفذ الأمر.'
         else:
             reply = run_command(c, raw, event_id)
     else:
