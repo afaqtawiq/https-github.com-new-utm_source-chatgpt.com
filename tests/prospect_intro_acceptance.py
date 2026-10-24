@@ -35,8 +35,8 @@ def run():
     uid, csrf = session['user_id'], {'csrf': session['csrf']}
     now = utcnow()
     with db() as c:
-        c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at) VALUES(%s,%s,TRUE,%s)',
-                  (uid, mail.cipher().encrypt(b'fixture-only-not-a-real-secret').decode(), now))
+        c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at,address) VALUES(%s,%s,TRUE,%s,%s)',
+                  (uid, mail.cipher().encrypt(b'fixture-only-not-a-real-secret').decode(), now, mail.ADDRESS))
         c.execute('INSERT INTO user_mfa(user_id,mfa_enabled,updated_at) VALUES(%s,1,%s)', (uid, now))
         c.execute("INSERT INTO stepup_auth(session_id,user_id,verified_at,expires_at) VALUES(%s,%s,NOW(),NOW()+INTERVAL '30 minutes')", (session['id'], uid))
 
@@ -166,11 +166,11 @@ def run():
             response = post(path, expected=428)
             assert response.json()['detail'] == 'Recent MFA step-up required', (path, response.text)
 
-        official = {'provider': 'spacemail', 'sender_email': 'afaq@shodai.cc', 'status': 'connected'}
+        official = {'provider': 'spacemail', 'sender_email': 'info@afaqtawiqs.net', 'status': 'connected'}
         for selected in (
             None, {**official, 'provider': 'gmail'},
             {**official, 'sender_email': 'other@shodai.cc'},
-            {**official, 'sender_email': 'AFAQ@shodai.cc'},
+            {**official, 'sender_email': 'INFO@afaqtawiqs.net'},
             {**official, 'status': 'disconnected'},
         ):
             # Canonical selection checks the middleware; only patching the
@@ -388,8 +388,8 @@ def run():
             other = execute('INSERT INTO users(email,name,password_hash,role,created_at) VALUES(?,?,?,?,?)',
                             (role+'-prospect@example.invalid', 'Other fixture user', hash_password('local-only'), role, now))
             with db() as c:
-                c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at) VALUES(%s,%s,TRUE,%s)',
-                          (other, mail.cipher().encrypt(b'other-fixture-only').decode(), now))
+                c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at,address) VALUES(%s,%s,TRUE,%s,%s)',
+                          (other, mail.cipher().encrypt(b'other-fixture-only').decode(), now, mail.ADDRESS))
                 c.execute('INSERT INTO user_mfa(user_id,mfa_enabled,updated_at) VALUES(%s,1,%s)', (other, now))
             sid, token, _ = create_session(other)
             stranger = TestClient(app, base_url='http://testserver', headers={'origin': 'http://testserver'}, follow_redirects=False)

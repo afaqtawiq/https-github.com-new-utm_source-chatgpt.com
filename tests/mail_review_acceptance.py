@@ -21,7 +21,7 @@ def run():
     client.post('/login',data={'email':os.environ['ADMIN_EMAIL'],'password':os.environ['ADMIN_PASSWORD']})
     session=get_session(client.cookies.get('gla_session'));uid=session['user_id'];csrf={'csrf':session['csrf']};now=utcnow()
     with db() as c:
-        c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at) VALUES(%s,%s,TRUE,NOW())',(uid,mail.cipher().encrypt(b'fake-ci-only').decode()))
+        c.execute('INSERT INTO spacemail_connections(user_id,password_enc,enabled,updated_at,address) VALUES(%s,%s,TRUE,NOW(),%s)',(uid,mail.cipher().encrypt(b'fake-ci-only').decode(),mail.ADDRESS))
     pid=execute('''INSERT INTO sales_prospects(company_name,recipient,mail_user_id,source_url,source_email,identity_name,
         confidence,verified_at,exclusion_basis,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         ('Fixture prospect','buyer@example.invalid',uid,'https://example.invalid','buyer@example.invalid','Fixture prospect',

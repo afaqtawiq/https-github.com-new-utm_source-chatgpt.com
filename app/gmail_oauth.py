@@ -58,7 +58,7 @@ def settings(request:Request):
  action='<a href="/auth/google/start" style="display:inline-block;padding:12px 18px;background:#22c55e;color:#06120b;border-radius:10px;text-decoration:none;font-weight:bold">'+('إعادة ربط Gmail لتفعيل قراءة الردود' if c and not read_ok else 'ربط Gmail')+'</a>' if configured else '<b>إعداد Google OAuth غير مكتمل في Railway.</b>'
  if c and c.get('status')=='connected':action+='<form method="post" action="/settings/email/disconnect" style="margin-top:12px"><button>فصل الربط</button></form>'
  perms='الإرسال + قراءة الردود داخل محادثات المبيعات فقط' if read_ok else 'الإرسال مفعل؛ قراءة الردود تحتاج إعادة موافقة Google'
- return HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>إعداد البريد</title><body style="font-family:Arial;background:#07131f;color:white;padding:30px"><a href="/dashboard" style="color:white">الرئيسية</a><h1>قناة البريد</h1><p><a href="/settings/email/spacemail">ربط البريد الرسمي afaq@shodai.cc</a></p><p>'+status+'</p><p>'+perms+'. النظام لا يرسل أي رد تلقائي.</p>'+action+'</body></html>')
+ return HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>إعداد البريد</title><body style="font-family:Arial;background:#07131f;color:white;padding:30px"><a href="/dashboard" style="color:white">الرئيسية</a><h1>قناة البريد</h1><p><a href="/settings/email/spacemail">ربط البريد الرسمي info@afaqtawiqs.net</a></p><p>'+status+'</p><p>'+perms+'. النظام لا يرسل أي رد تلقائي.</p>'+action+'</body></html>')
 @router.get('/auth/google/start')
 def start(request:Request):
  s=auth(request);cid,sec,redir,key,scope=cfg();state=secrets.token_urlsafe(32);execute('UPDATE sessions SET csrf=? WHERE id=?',(state,s['id']))

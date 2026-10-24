@@ -2,11 +2,11 @@
 import html
 import re
 
-EMAIL = 'afaq@shodai.cc'
+EMAIL = 'info@afaqtawiqs.net'
 PHONE = '+966530130435'
 WEBSITE = 'https://www.afaqtwiq.com/'
 SUBJECT = 'خدمات آفاق طويق في ميناء جدة الإسلامي | التخليص والنقل والتخزين'
-TEMPLATE_NAME = 'afaaq_marketing_jeddah_brochure_v2_ar'
+TEMPLATE_NAME = 'afaaq_marketing_jeddah_brochure_v3_ar'
 SERVICES = [
     ('التخليص الجمركي', 'متابعة إجراءات التخليص في ميناء جدة.'),
     ('استقبال الشحنات', 'تنسيق وصول الشحنة ومتابعة المستندات.'),
