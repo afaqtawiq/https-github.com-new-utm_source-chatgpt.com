@@ -108,7 +108,21 @@ def score_contact(row):
 TRANSPORT_LICENCE = '11/00098402'
 
 
+OFFICIAL_EMAIL = 'info@afaqtawiqs.net'
+
+
 def template_message(company_name, pitch):
+    return ('السلام عليكم ورحمة الله،\n'
+            f'تحية طيبة لفريق {company_name.strip()}.\n'
+            'معكم آفاق طويق للتخليص الجمركي والنقل '
+            f'(ترخيص مخلص جمركي رقم 2513 وترخيص نقل رقم {TRANSPORT_LICENCE}). {pitch}\n'
+            'عرضنا يشمل التخليص الجمركي والنقل البري المرخّص معًا، من الميناء أو المنفذ حتى مستودعكم، بجهة واحدة مسؤولة عن شحنتكم.\n'
+            'هل لديكم شحنات قادمة خلال الفترة القادمة؟ يسعدنا تقديم عرض سعر شامل للتخليص والنقل بعد معرفة '
+            'نوع البضاعة والوزن أو عدد الحاويات ومدينة التسليم.\n'
+            f'للتواصل: {PHONE}\nالبريد: {OFFICIAL_EMAIL}\n{WEBSITE}')
+
+
+def _template_v2(company_name, pitch):
     return ('السلام عليكم ورحمة الله،\n'
             f'تحية طيبة لفريق {company_name.strip()}.\n'
             'معكم آفاق طويق للتخليص الجمركي والنقل '
@@ -133,21 +147,26 @@ def _with_opening(text, opening):
 
 
 def refresh_pending_messages():
-    """Bring unedited pending drafts to the current template (clearance + transport offer)."""
+    """Bring unedited pending drafts to the current template. Edited or decided drafts are never touched."""
     pitches = {key: pitch for key, _, _, _, pitch in SEGMENTS}
     changed = 0
     for item in rows("SELECT id,company_name,segment,message,message_source FROM daily_prospects WHERE status='pending'"):
         pitch = pitches.get(item['segment'], DEFAULT_PITCH)
-        old = _previous_template(item['company_name'], pitch)
         current = template_message(item['company_name'], pitch)
-        if item['message'] == old:
-            updated = current
-        elif (item['message_source'] == 'ai' and item['message'].split('\n')[0] == old.split('\n')[0]
-              and item['message'].split('\n')[2:] == old.split('\n')[2:]):
-            # First release put the AI opening in place of the greeting line.
-            updated = _with_opening(current, item['message'].split('\n')[1])
-        else:
-            continue  # already current or edited by a person: never overwrite
+        lines = item['message'].split('\n')
+        updated = None
+        for builder in (_previous_template, _template_v2):
+            old = builder(item['company_name'], pitch).split('\n')
+            if lines == old:
+                updated = current
+            elif item['message_source'] == 'ai' and len(lines) == len(old) and lines[0] == old[0] and lines[2:] == old[2:]:
+                updated = _with_opening(current, lines[1])  # first release replaced the greeting line
+            elif item['message_source'] == 'ai' and len(lines) == len(old) + 1 and lines[:2] == old[:2] and lines[3:] == old[2:]:
+                updated = _with_opening(current, lines[2])
+            if updated:
+                break
+        if not updated or updated == item['message']:
+            continue
         with db() as c:
             changed += c.execute("UPDATE daily_prospects SET message=%s,updated_at=%s WHERE id=%s AND status='pending' AND message=%s",
                                  (updated, utcnow(), item['id'], item['message'])).rowcount
