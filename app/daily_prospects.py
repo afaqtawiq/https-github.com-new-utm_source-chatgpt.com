@@ -30,6 +30,10 @@ BLOCKED = {'unsubscribed', 'do_not_contact', 'opted_out', 'محظور', 'إيق�
 
 SEGMENTS = [
     # key, label, score, patterns, pitch
+    ('uae_carrier', 'شركة شحن إماراتية (منفذ البطحاء)', 30,
+     r'الإمارات|الامارات|دبي|الشارقة|عجمان|أبوظبي|ابوظبي|أبو ظبي|ابو ظبي|رأس الخيمة|راس الخيمة|البطحاء|uae|dubai|sharjah|ajman|abu dhabi|ras al khaimah|batha|ghuwaifat',
+     'نكمل رحلة شحناتكم بعد منفذ البطحاء: نخلّص الشحنات الواردة وشحنات الترانزيت عبر حسابنا الخاص على منصة فسح، '
+     'ولدينا شركة استيراد وتصدير مسجّلة في السعودية يمكن شحن البضاعة باسمها كمستورد عند الحاجة، ثم ننقلها حتى باب عميلكم في أي مدينة سعودية مع متابعة يومية.'),
     ('china', 'استيراد من الصين', 25, r'الصين|صيني|china|chinese|وسيط توريد|sourcing',
      'نخدم المستوردين من الصين في تخليص الشحنات الكاملة والمجمّعة بميناء جدة، مع متابعة المستندات وشهادات المطابقة ونقلها حتى مستودعكم.'),
     ('food', 'مواد غذائية', 20, r'غذا|اغذي|أغذي|food|foods|توابل|spice|تمور|dates|فواكه|fruit|fisher|اسماك',
@@ -43,7 +47,7 @@ SEGMENTS = [
 ]
 DEFAULT_PITCH = ('نقدم التخليص الجمركي بميناء جدة والمنافذ البرية، واستقبال الشحنات والنقل البري والتخزين، '
                  'بخدمة واحدة من الميناء إلى مستودعكم.')
-CITY_SCORE = {'جدة': 15, 'جده': 15, 'jeddah': 15, 'الرياض': 8, 'riyadh': 8, 'الدمام': 8, 'dammam': 8, 'الخبر': 6, 'مكة': 6}
+CITY_SCORE = {'جدة': 15, 'جده': 15, 'jeddah': 15, 'الرياض': 8, 'riyadh': 8, 'الدمام': 8, 'dammam': 8, 'الخبر': 6, 'مكة': 6, 'دبي': 10, 'dubai': 10, 'الشارقة': 10, 'sharjah': 10, 'أبوظبي': 10, 'abu dhabi': 10, 'عجمان': 8, 'ajman': 8, 'رأس الخيمة': 8, 'ras al khaimah': 8}
 
 
 def daily_target():
@@ -87,13 +91,15 @@ def city_of(*values):
     for value in values:
         for city in CITY_SCORE:
             if city in _norm(value):
-                return {'جده': 'جدة', 'jeddah': 'جدة', 'riyadh': 'الرياض', 'dammam': 'الدمام'}.get(city, city)
+                return {'جده': 'جدة', 'jeddah': 'جدة', 'riyadh': 'الرياض', 'dammam': 'الدمام', 'dubai': 'دبي', 'sharjah': 'الشارقة',
+                        'abu dhabi': 'أبوظبي', 'ajman': 'عجمان', 'ras al khaimah': 'رأس الخيمة'}.get(city, city)
     return ''
 
 
 def score_contact(row):
     phone, email = whatsapp_number(row.get('phone')), email_address(row.get('email'))
-    segment, label, segment_score, pitch = classify(row.get('company_name'), row.get('activity'), row.get('notes'))
+    segment, label, segment_score, pitch = classify(row.get('company_name'), row.get('activity'),
+                                                    ' '.join(str(row.get(k) or '') for k in ('notes', 'city')))
     city = city_of(row.get('city'), row.get('notes'), row.get('company_name'))
     score = 30 + (15 if phone else 0) + (10 if email else 0) + (5 if row.get('website') else 0)
     score += segment_score + CITY_SCORE.get(city, 3 if city else 0)
