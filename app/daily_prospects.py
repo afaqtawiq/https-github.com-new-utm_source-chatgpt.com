@@ -30,10 +30,10 @@ BLOCKED = {'unsubscribed', 'do_not_contact', 'opted_out', 'محظور', 'إيق�
 
 SEGMENTS = [
     # key, label, score, patterns, pitch
-    ('uae_carrier', 'شركة شحن إماراتية (منفذ البطحاء)', 30,
-     r'الإمارات|الامارات|دبي|الشارقة|عجمان|أبوظبي|ابوظبي|أبو ظبي|ابو ظبي|رأس الخيمة|راس الخيمة|البطحاء|uae|dubai|sharjah|ajman|abu dhabi|ras al khaimah|batha|ghuwaifat',
-     'نكمل رحلة شحناتكم بعد منفذ البطحاء: نخلّص الشحنات الواردة وشحنات الترانزيت عبر حسابنا الخاص على منصة فسح، '
-     'ولدينا شركة استيراد وتصدير مسجّلة في السعودية يمكن شحن البضاعة باسمها كمستورد عند الحاجة، ثم ننقلها حتى باب عميلكم في أي مدينة سعودية مع متابعة يومية.'),
+    ('ceramics', 'سيراميك وبورسلين وأدوات صحية', 35,
+     r'سيراميك|سراميك|بورسلين|بورسلان|بلاط|رخام|جرانيت|غرانيت|دوات صحي|دوات الصحي|مغاسل|خلاطات|ارضيات|أرضيات|ceramic|porcelain|tile|tiles|marble|granite|sanitary|bathroom',
+     'نخدم مستوردي السيراميك والبورسلين والأدوات الصحية: نستقبل حاوياتكم في ميناء الملك عبدالعزيز بالدمام وميناء جدة الإسلامي والميناء الجاف بالرياض، '
+     'ونخلّصها عبر حسابنا الخاص على منصة فسح مع متابعة شهادات المطابقة، ثم ننقلها بشاحنات مناسبة للأحمال الثقيلة حتى مستودعاتكم ومعارضكم في الرياض، مع متابعة يومية لكل حاوية.'),
     ('china', 'استيراد من الصين', 25, r'الصين|صيني|china|chinese|وسيط توريد|sourcing',
      'نخدم المستوردين من الصين في تخليص الشحنات الكاملة والمجمّعة بميناء جدة، مع متابعة المستندات وشهادات المطابقة ونقلها حتى مستودعكم.'),
     ('food', 'مواد غذائية', 20, r'غذا|اغذي|أغذي|food|foods|توابل|spice|تمور|dates|فواكه|fruit|fisher|اسماك',
@@ -47,7 +47,9 @@ SEGMENTS = [
 ]
 DEFAULT_PITCH = ('نقدم التخليص الجمركي بميناء جدة والمنافذ البرية، واستقبال الشحنات والنقل البري والتخزين، '
                  'بخدمة واحدة من الميناء إلى مستودعكم.')
-CITY_SCORE = {'جدة': 15, 'جده': 15, 'jeddah': 15, 'الرياض': 8, 'riyadh': 8, 'الدمام': 8, 'dammam': 8, 'الخبر': 6, 'مكة': 6, 'دبي': 10, 'dubai': 10, 'الشارقة': 10, 'sharjah': 10, 'أبوظبي': 10, 'abu dhabi': 10, 'عجمان': 8, 'ajman': 8, 'رأس الخيمة': 8, 'ras al khaimah': 8}
+CITY_SCORE = {'الرياض': 15, 'riyadh': 15, 'جدة': 8, 'جده': 8, 'jeddah': 8, 'الدمام': 8, 'dammam': 8, 'الخبر': 6, 'مكة': 6}
+# UAE carriers (Batha campaign) are handled directly by the sales team, not by the agent's daily list.
+UAE_HANDLED = r'الإمارات|الامارات|دبي|الشارقة|عجمان|أبوظبي|ابوظبي|أبو ظبي|ابو ظبي|رأس الخيمة|راس الخيمة|البطحاء|\buae\b|dubai|sharjah|ajman|abu dhabi|ras al khaimah|batha|ghuwaifat|\+971|00971'
 
 
 def daily_target():
@@ -91,9 +93,13 @@ def city_of(*values):
     for value in values:
         for city in CITY_SCORE:
             if city in _norm(value):
-                return {'جده': 'جدة', 'jeddah': 'جدة', 'riyadh': 'الرياض', 'dammam': 'الدمام', 'dubai': 'دبي', 'sharjah': 'الشارقة',
-                        'abu dhabi': 'أبوظبي', 'ajman': 'عجمان', 'ras al khaimah': 'رأس الخيمة'}.get(city, city)
+                return {'جده': 'جدة', 'jeddah': 'جدة', 'riyadh': 'الرياض', 'dammam': 'الدمام'}.get(city, city)
     return ''
+
+
+def is_uae_handled(row):
+    text = _norm(' '.join(str(row.get(k) or '') for k in ('company_name', 'city', 'notes', 'activity', 'phone', 'email')))
+    return bool(re.search(UAE_HANDLED, text)) or str(row.get('email') or '').lower().strip().endswith('.ae')
 
 
 def score_contact(row):
@@ -105,7 +111,7 @@ def score_contact(row):
     score += segment_score + CITY_SCORE.get(city, 3 if city else 0)
     reasons = [label]
     if city:
-        reasons.append(city + (' — قريب من ميناء جدة' if city == 'جدة' else ''))
+        reasons.append(city + (' — السوق المستهدف' if city == 'الرياض' else ''))
     reasons.append('واتساب متاح' if phone else 'بريد فقط')
     return {'score': min(100, score), 'segment': segment, 'label': label, 'pitch': pitch, 'city': city,
             'phone': phone, 'email': email, 'reason': ' · '.join(reasons)}
@@ -238,6 +244,8 @@ def candidates():
     out, seen = [], set()
     for row in pool:
         if row['source_key'] in queued or str(row['status']).lower() in BLOCKED or not (row['company_name'] or '').strip():
+            continue
+        if is_uae_handled(row):
             continue
         info = score_contact(row)
         if not (info['phone'] or info['email']):
