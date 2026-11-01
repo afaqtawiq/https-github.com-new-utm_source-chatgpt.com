@@ -6,26 +6,24 @@ import httpx
 
 
 MAP_QUERIES = [
-    "شركات استيراد وتصدير في جدة السعودية",
-    "مستوردين مواد غذائية في الرياض السعودية",
-    "مصانع في الدمام السعودية",
-    "شركات تجارة دولية في السعودية",
-    "import export companies in Dubai UAE",
-    "food importers in Dubai UAE",
-    "manufacturers in Abu Dhabi UAE",
-    "warehouses and distributors in Sharjah UAE",
+    "معارض سيراميك في الرياض",
+    "شركات سيراميك وبورسلين في الرياض",
+    "مستودعات سيراميك في الرياض",
+    "معارض أدوات صحية في الرياض",
+    "شركات رخام وجرانيت في الرياض",
+    "مستوردي بلاط وسيراميك الرياض",
+    "ceramic tiles showroom Riyadh",
+    "porcelain tiles importer Riyadh",
 ]
 
 WEB_QUERIES = [
-    '"مطلوب تخليص جمركي" السعودية',
-    '"طلب عرض سعر" نقل بضائع السعودية',
-    '"مطلوب مستودع" OR "مطلوب تخزين" السعودية',
-    'site:haraj.com.sa مطلوب نقل بضائع',
-    'site:haraj.com.sa مطلوب تخليص جمركي',
-    '"customs clearance" RFQ Saudi Arabia',
-    '"transport services" tender Saudi Arabia',
-    '"warehousing" RFQ UAE',
-    '"freight services" tender UAE',
+    'شركة سيراميك الرياض استيراد',
+    'مستورد بورسلين الرياض',
+    'معرض سيراميك وأدوات صحية الرياض واتساب',
+    '"سيراميك" "الرياض" "استيراد" شركة',
+    'site:haraj.com.sa مطلوب نقل سيراميك الرياض',
+    'ceramic tiles importer Riyadh Saudi Arabia',
+    'porcelain tiles distributor Riyadh',
 ]
 
 
