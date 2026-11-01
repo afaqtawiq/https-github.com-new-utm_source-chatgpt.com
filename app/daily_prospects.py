@@ -70,6 +70,8 @@ def init():
             outcome_note TEXT, decided_by BIGINT, decided_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)''')
         c.execute('CREATE INDEX IF NOT EXISTS daily_prospects_batch_idx ON daily_prospects(batch_date,status)')
+        # UAE carriers are worked by the sales team directly; drop undecided agent drafts for them.
+        c.execute("DELETE FROM daily_prospects WHERE status='pending' AND segment='uae_carrier'")
     refresh_pending_messages()
 
 
