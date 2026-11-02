@@ -110,8 +110,10 @@ def init():
 
 def party_id(c, name, actor):
     from app import finance_service as service
-    row = c.execute("SELECT id FROM finance_party_display WHERE kind='counterparty' AND confirmed AND name=%s ORDER BY id LIMIT 1",
-                    (name,)).fetchone()
+    # Prefer the existing party whose name contains the rule name (e.g. «عمران (إقبال)»), oldest first,
+    # so claims join the customer's real statement instead of a new duplicate party.
+    row = c.execute("""SELECT id FROM finance_party_display WHERE kind='counterparty' AND confirmed
+        AND (name=%s OR name LIKE %s) ORDER BY id LIMIT 1""", (name, name + '%')).fetchone()
     if row:
         return row['id']
     return service.create_party({'name': name, 'identity_ref': 'billing:' + name, 'kind': 'counterparty', 'confirmed': '1'}, actor)
