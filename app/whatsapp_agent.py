@@ -496,6 +496,10 @@ async def status_page(request: Request):
     read_scope(request,current,account)
     body = '<h2>مساعد واتساب المستمر</h2><p>الوضع: ' + escape(settings['mode']) + '</p><p>الاختبار مخصص لرقم واحد موثق. لا تُمنح له صلاحية إدارية، ولا تُشارك المستندات غير المعتمدة مع النموذج. الحد اليومي لمحاولات النموذج: 10 للاختبار و50 للتشغيل المعتاد، دون شراء تلقائي.</p>'
     body += '<form method="post" action="/whatsapp-assistant/settings"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '">' + scope_fields(settings) + '<label>رقم المرسل التجريبي الدولي<input name="pilot_sender" value="' + escape(settings.get('pilot_sender') or '') + '" required></label><label>بصمة PDF التجريبي المراجع محليًا<input name="approved_sha256" value="' + escape(','.join(settings['approved_sha256'])) + '" required></label><input type="hidden" name="mode" value="owner_pilot"><label><input type="checkbox" name="confirm" value="yes" required>أوافق على الاختبار والرد على هذا الرقم فقط، والملف المطابق لهذه البصمة لا يتضمن أسرارًا أو بيانات بنكية.</label><button>تفعيل الاختبار المحدود</button></form>'
+    body += ('<form method="post" action="/whatsapp-assistant/settings"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '">' + scope_fields(settings)
+             + '<input type="hidden" name="mode" value="routine"><label><input type="checkbox" name="confirm" value="yes" required>'
+             'أوافق على أن يفهم الوكيل رسائل كل العملاء على واتساب ويرد عليها تلقائيًا بالذكاء الاصطناعي (بدون تنفيذ أي إجراء أو إرسال لطرف آخر).</label>'
+             '<button>تفعيل الرد الذكي لكل العملاء</button></form>')
     body += '<form method="post" action="/whatsapp-assistant/settings"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '">' + scope_fields(settings) + '<input type="hidden" name="mode" value="off"><input type="hidden" name="confirm" value="yes"><button>إيقاف المسار الجديد</button></form>'
     body += '<p><a href="/mfa/step-up?next=/whatsapp-assistant">التحقق الإضافي قبل تغيير التشغيل</a></p>'
     for job in jobs:
@@ -512,9 +516,14 @@ async def update_settings(request: Request):
     if form.get('confirm') != 'yes':
         raise HTTPException(400,'Explicit approval required')
     mode = form.get('mode')
-    if mode not in ('off','owner_pilot'):
-        raise HTTPException(400,'Routine activation requires completed pilot evidence')
+    if mode not in ('off','owner_pilot','routine'):
+        raise HTTPException(400,'Unknown mode')
     kwargs = {'mode':mode}
+    if mode == 'routine':
+        if current.get('role') != 'admin':
+            raise HTTPException(403,'Owner approval required')
+        kwargs['acceptance'] = {'owner_receipt_confirmed':True,'direct_owner_activation':True,
+                                'confirmed_by':str(current['user_id']),'confirmed_at':datetime.now(timezone.utc).isoformat()}
     if mode == 'owner_pilot':
         sender = z.phone(form.get('pilot_sender'))
         hashes = [item.strip().lower() for item in form.get('approved_sha256','').split(',') if item.strip()]

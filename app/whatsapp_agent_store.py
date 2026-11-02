@@ -234,7 +234,7 @@ def update_settings(account_id, *, mode=None, pilot_sender=_UNSET,
         if not isinstance(acceptance, dict):
             raise ValueError("acceptance must be an object")
         if set(acceptance) - {"owner_receipt_confirmed", "document_job_id", "followup_job_id",
-                              "confirmed_at", "confirmed_by"}:
+                              "confirmed_at", "confirmed_by", "direct_owner_activation"}:
             raise ValueError("unsupported acceptance field")
     with (db_factory or database)() as connection:
         settings = _settings(connection, account_id, now=now, lock=True)
@@ -258,7 +258,13 @@ def update_settings(account_id, *, mode=None, pilot_sender=_UNSET,
                       ("mode", "pilot_sender", "approved_sha256"))
         if settings["mode"] == "routine":
             if original["mode"] != "routine":
-                _validate_acceptance(connection, account_id, settings)
+                acceptance = settings["acceptance"]
+                # The owner may switch customer replies on directly (explicit, MFA-stepped-up
+                # admin form). Otherwise the documented PDF pilot evidence is still required.
+                if not (acceptance.get("direct_owner_activation") is True
+                        and acceptance.get("owner_receipt_confirmed") is True
+                        and acceptance.get("confirmed_by")):
+                    _validate_acceptance(connection, account_id, settings)
             elif (changed or settings["acceptance"] != original["acceptance"]):
                 raise ValueError("routine authorization changes require a new owner pilot")
         settings["authorization_generation"] += int(changed)
