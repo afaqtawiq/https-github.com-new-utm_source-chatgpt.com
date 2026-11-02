@@ -217,3 +217,6 @@ register_daily_poster_worker(app)
 from app.billing_rules import router as billing_rules_router, init as init_billing_rules
 init_billing_rules()
 app.include_router(billing_rules_router)
+from app.owner_briefing import register_worker as register_owner_briefing, init as init_owner_briefing
+init_owner_briefing()
+register_owner_briefing(app)
