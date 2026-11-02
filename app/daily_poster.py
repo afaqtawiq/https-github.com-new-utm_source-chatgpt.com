@@ -134,12 +134,14 @@ def gradient(w, h):
 
 
 def mark(draw, x, y, s):
-    """Afaq Tuwaiq logo mark (traced from the brand artwork): side stripe, main peak, gold chevron. s = width."""
-    k = s / 252
-    q = lambda pts: [(x + (a - 70) * k, y + (b - 8) * k) for a, b in pts]
-    draw.polygon(q([(70, 150), (102, 150), (166, 54), (154, 32)]), fill='white')
-    draw.polygon(q([(118, 150), (215, 8), (322, 150), (284, 150), (215, 58), (156, 150)]), fill='white')
-    draw.polygon(q([(180, 150), (214, 78), (272, 150), (246, 150), (214, 108), (204, 150)]), fill=GOLD)
+    """Afaq Tuwaiq brand mark (as published on the brochure/Snapchat): gold rounded frame, mountains, sun, white base."""
+    k = s / 80
+    p = lambda a, b: (x + a * k, y + b * k)
+    draw.rounded_rectangle([p(2, 2), p(78, 78)], radius=20 * k, fill=(62, 84, 66, 255), outline=GOLD, width=max(3, int(2.4 * k)))
+    draw.line([p(14, 56), p(32, 22), p(42, 40), p(50, 28), p(66, 56)], fill=GOLD, width=max(4, int(3.4 * k)), joint='curve')
+    draw.line([p(13, 58), p(67, 58)], fill='white', width=max(4, int(3.4 * k)))
+    r = 4.2 * k
+    draw.ellipse([x + 57 * k - r, y + 18 * k - r, x + 57 * k + r, y + 18 * k + r], fill=GOLD2)
 
 
 def decor(img):
@@ -164,10 +166,10 @@ def render_poster(topic, size=(1080, 1350)):
     img = decor(gradient(w, h))
     d = ImageDraw.Draw(img, 'RGBA')
     m = 72
-    with Image.open(FONTS.parent / 'afaq-logo-horizontal-white.png') as logo:
-        logo = logo.convert('RGBA')
-        logo.thumbnail((600, 200))
-        img.alpha_composite(logo, (w - m - logo.width, 50))
+    mark(d, w - m - 130, 52, 130)
+    put(d, 'آفاق طويق', (w - m - 160, 98), 520, 70, 'white', anchor='rm')
+    face = font(30, True)
+    d.text((w - m - 160, 160), 'A F A Q   T U W A I Q', font=face, fill=GOLD2, anchor='rm')
     # topic chip
     chip, cf, ck = fit(d, topic['chip'], 400, 34, False)
     cw = d.textlength(chip, font=cf, **ck) + 56
