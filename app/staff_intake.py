@@ -53,10 +53,10 @@ def context_for_model():
 
 
 async def internal_reply(c, payload, sender, context):
-    from app.load_vision import image_index
+    from app.load_vision import image_index, pdf_index
     message = payload.get('message') or {}
-    # Images go to the guarded document reader, audio keeps the existing confirmation.
-    if image_index(message) is not None or admin.audio_index(message) is not None:
+    # Images and PDFs go to the document reader, audio keeps the existing confirmation.
+    if image_index(message) is not None or pdf_index(message) is not None or admin.audio_index(message) is not None:
         return None
     text = str(message.get('text') or '').strip()
     value = admin.normalize(text).casefold()
