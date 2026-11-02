@@ -236,6 +236,25 @@ async def processing(job):
     if job['account_id'] != z.account_id() or not enabled(settings,job['sender']):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
+    if not data.get('attachments') and data.get('question_allowed') and data.get('question'):
+        def negotiation_open(sender):
+            try:
+                from app import owner_negotiation
+                return owner_negotiation.active(sender)
+            except Exception:
+                return None
+        if await run_in_threadpool(negotiation_open, job['sender']):
+            from app import owner_negotiation
+            history = await run_in_threadpool(store.recent_exchanges, account_id=job['account_id'], sender=job['sender'],
+                                              conversation_id=job['conversation_id'], before_job_id=jid)
+            if not await run_in_threadpool(store.reserve_model, jid, lease):
+                return
+            answer = await owner_negotiation.reply(job['sender'], data['question'], history)
+            await run_in_threadpool(store.save_model, jid, lease,
+                                    reply_text=answer or 'وصلت رسالتك، وفريق النقل في آفاق طويق بيتابع معك.',
+                                    diagnostics={'model_success': bool(answer), 'model_attempted': True, 'model_reason': 'owner_negotiation'})
+            await run_in_threadpool(store.prepare_reply, jid, lease)
+            return
     local_reason = None
     text, digest, source_id = '', None, None
     review_id = None
