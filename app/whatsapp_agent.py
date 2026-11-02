@@ -203,6 +203,30 @@ async def fetch_document(job):
     return content
 
 
+def customer_declaration_status(sender):
+    """Latest recorded stage of this customer's open declarations (matched by WhatsApp number), or None."""
+    digits = re.sub(r'\D', '', str(sender or ''))[-9:]
+    if len(digits) < 9:
+        return None
+    try:
+        from app.declarations import STAGE_LABELS
+        from app.storage import rows
+        found = rows('''SELECT d.id,d.declaration_number,d.bill_number,d.port,
+            (SELECT stage FROM customs_declaration_events e WHERE e.declaration_id=d.id ORDER BY e.id DESC LIMIT 1) stage
+            FROM customs_declarations d WHERE right(regexp_replace(d.customer_phone,'\\D','','g'),9)=? ORDER BY d.id DESC LIMIT 5''', (digits,))
+    except Exception:
+        return None
+    found = [r for r in found if r.get('stage') not in ('closed',)]
+    if not found:
+        return None
+    lines = ['هذه آخر حالة مسجلة لشحناتك لدينا:']
+    for r in found:
+        ref = r.get('declaration_number') or r.get('bill_number') or ('ملف ' + str(r['id']))
+        lines.append('• ' + str(ref) + (' — ' + r['port'] if r.get('port') else '') + ': ' + STAGE_LABELS.get(r.get('stage'), 'قيد المتابعة'))
+    lines.append('لأي تفاصيل إضافية تواصل مع فريق العمليات على 0507665873.')
+    return '\n'.join(lines)
+
+
 async def processing(job):
     jid, lease, data = job['id'], job['lease_token'], job['payload']
     settings = await run_in_threadpool(store.get_settings,job['account_id'])
@@ -327,6 +351,12 @@ async def processing(job):
             document_status = 'ok' if text else 'none'
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,review_id=review_id,
             diagnostics={'document_context_reason':'prior_unread_attachment','unread_source_job_id':unread['id']} if unread and document_status in ('unavailable','quarantined') else {})
+    if not data.get('question_allowed') and data.get('question_reason') == 'live_status_unavailable':
+        status_reply = await run_in_threadpool(customer_declaration_status, job['sender'])
+        if status_reply:
+            await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=status_reply,
+                diagnostics={'model_attempted':False,'model_success':False,'model_reason':'declaration_status'})
+            return
     if not data.get('question_allowed'):
         if data.get('question_reason') == 'broker_execution_request':
             reply = privacy.BROKER_EXECUTION_REPLY
