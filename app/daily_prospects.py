@@ -428,7 +428,9 @@ def home(request: Request, status: str = 'pending', day: str = ''):
     body = ('<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/opportunities">الفرص</a><a href="/accounts">العملاء</a>'
             '<a href="/outbound">العروض والرسائل</a><a href="/customer-campaigns">حملات العملاء</a></div>'
             '<div class="head"><div><h1 style="margin:0">مرشحو اليوم</h1><p class="muted">قائمة يومية مرتبة من قاعدة العملاء المسجلين ('
-            + esc(str(d)) + '). لا يُرسل شيء تلقائيًا: الاعتماد يحول الجهة إلى فرصة ومهمة اتصال، والتواصل يتم من واتساب الفريق أو بعد موافقة الإرسال.</p></div>'
+            + esc(str(d)) + ('). التواصل التلقائي مفعّل بتفويض المالك: يرسل الوكيل الرسالة التعريفية بالبريد وواتساب لعدد محدد يوميًا، ويحترم طلبات الإيقاف ولا يكرر التواصل مع نفس الجهة.</p></div>'
+               if os.getenv('AUTO_OUTREACH', '0') == '1' else
+               '). لا يُرسل شيء تلقائيًا: الاعتماد يحول الجهة إلى فرصة ومهمة اتصال، والتواصل يتم من واتساب الفريق أو بعد موافقة الإرسال.</p></div>')
             + build + '</div><div class="kpis">' + kpis + '</div><div class="tabs">' + tabs + '</div>' + bulk + cards)
     return page('مرشحو اليوم', body)
 
