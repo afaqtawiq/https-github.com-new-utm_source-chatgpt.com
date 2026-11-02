@@ -197,6 +197,8 @@ app.include_router(whatsapp_outgoing_diagnostic_router)
 from app.comment_responder import router as comment_router, register_worker as register_comment_worker
 app.include_router(comment_router)
 register_comment_worker(app)
+from app.comment_autoreply import register_worker as register_auto_comment_worker
+register_auto_comment_worker(app)
 
 # Additive company-only archive; disabled until reviewed migration/activation.
 from app import company_documents
