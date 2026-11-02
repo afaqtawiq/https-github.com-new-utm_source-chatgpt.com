@@ -13,6 +13,7 @@ def test_natural_transport_worker_journey_retains_context_without_execution(setu
         answer = 'ما نوع الحمولة ووزنها؟' if len(bodies) == 1 else 'سأحجز النقل.'
         return httpx.Response(200, json={'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': answer}]})
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic-test-only')
+    monkeypatch.setenv('WHATSAPP_NATURAL_REPLIES', '0')  # exercises the guarded path itself
     monkeypatch.setattr(privacy, 'understand', REAL_UNDERSTAND)
     monkeypatch.setattr(privacy.httpx, 'AsyncClient', lambda **kw: original_client(transport=httpx.MockTransport(model), **kw))
     for number, text in enumerate(('السلام عليكم', 'كم سعر النقل من الرياض إلى الدمام؟', 'ومن جدة؟'), 1):

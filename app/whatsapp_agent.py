@@ -339,7 +339,7 @@ async def processing(job):
         elif data.get('question_kind') == 'clarify':
             reply = 'ما الذي تريد معرفته؟ أقدر أساعدك بسؤال عن المستند أو استفسار تشغيلي واضح.'
         else:
-            reply = 'تحتاج هذه الرسالة مراجعة محلية قبل استخدامها في الفهم الآلي. اكتب السؤال دون أسرار أو بيانات بنكية.'
+            reply = 'وصلتني رسالتك، وفريق آفاق طويق بيتابع معك. وإذا عندك سؤال عن التخليص أو النقل اكتبه هنا وأجاوبك مباشرة.'
     elif document_status == 'reference_unavailable':
         reply = 'الرسالة المشار إليها لا تتيح لي ملفًا مقروءًا في هذه المحادثة. لم أستخدم مستندًا آخر بدلًا منها؛ يلزم إرفاق الملف نفسه لمراجعته.'
     elif document_status == 'quarantined':
@@ -372,6 +372,15 @@ async def processing(job):
                 allowed = await run_in_threadpool(store.model_authorized,jid,lease)
                 if not allowed or z.account_id() != job['account_id']:
                     raise store.StateConflict('Model scope changed before request')
+            if not text and not data.get('attachments'):
+                from app import whatsapp_natural
+                await model_guard()
+                natural = await whatsapp_natural.reply(data['question'], conversation_history)
+                if natural:
+                    await run_in_threadpool(store.save_model,jid,lease,reply_text=natural,
+                                            diagnostics={'model_success':True,'model_attempted':True,'model_reason':'natural_answer'})
+                    await run_in_threadpool(store.prepare_reply,jid,lease)
+                    return
             result = await privacy.understand(data['question'],text,history=(),document_sha256=digest,
                                              approved_hashes=model_hashes,before_request=model_guard,reviewed_excerpt=bool(review_id),
                                              conversation_history=conversation_history,conversation_scope=conversation_scope,
