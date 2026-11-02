@@ -969,8 +969,9 @@ def test_team_text_and_voice_go_to_command_agent_documents_stay(setup, monkeypat
     voice = payload(12, '')
     voice['message']['attachments'] = [{'type': 'audio'}]
     assert agent.accept_inbound(voice) == {'legacy_local_only': True, 'team_agent': True}
+    # Owner decision (Nov 2026): staff PDFs (customs declarations/invoices) go to the team lane for billing.
     document = agent.accept_inbound(payload(13, 'لخص المستند', True))
-    assert document is None or document.get('team_agent') is not True
+    assert document == {'legacy_local_only': True, 'team_agent': True}
     monkeypatch.setenv('AFAQ_TEAM', '[]')
     monkeypatch.delenv('WHATSAPP_COMMAND_OWNER', raising=False)
     outsider = agent.accept_inbound(payload(14, 'ضيف عميل'))

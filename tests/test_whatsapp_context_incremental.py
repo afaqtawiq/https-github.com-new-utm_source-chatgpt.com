@@ -38,7 +38,7 @@ def test_incremental_context_preserves_claude_staff_routing(setup, monkeypatch):
     voice['message']['attachments'] = [{'type': 'audio'}]
     assert agent.accept_inbound(voice) == {'legacy_local_only': True, 'team_agent': True}
     document = agent.accept_inbound(payload(73, 'لخص المستند', True))
-    assert document and document.get('team_agent') is not True
+    assert document == {'legacy_local_only': True, 'team_agent': True}  # staff PDFs -> team lane (billing)
     team.identify = lambda event: (None, None)
     customer = agent.accept_inbound(payload(74, 'ومن جدة؟'))
     assert customer and customer.get('team_agent') is not True
