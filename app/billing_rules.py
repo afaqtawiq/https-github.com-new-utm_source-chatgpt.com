@@ -46,6 +46,8 @@ def fold(text):
 
 def is_yasmen(supplier, invoice_no):
     s = fold(supplier)
+    if re.search(r'(غير|ليس|مش|not|other)', s):
+        return False
     if 'ياسمين' in s or 'yasmen' in s or 'yasmin' in s:
         return True
     return not s.strip() and str(invoice_no or '').strip().upper().startswith('AB')
@@ -214,7 +216,7 @@ def page(request: Request):
     body += ('<div class="card"><form method="post" action="/billing"><div class="formgrid">'
              '<input name="number" placeholder="رقم البيان" required><select name="kind"><option value="import">استيراد</option><option value="export">تصدير / إعادة تصدير</option></select>'
              '<input name="party" placeholder="المستورد/المصدّر (مثال: سلة الرحائب)"><input name="invoice_no" placeholder="رقم الفاتورة">'
-             '<input name="invoice_value" placeholder="قيمة الفاتورة"><input name="supplier" placeholder="الجهة المصدِّرة للفاتورة (الياسمين / غيرها)">'
+             '<input name="invoice_value" placeholder="قيمة الفاتورة"><select name="supplier"><option value="">الجهة المصدِّرة للفاتورة…</option><option value="الياسمين">الياسمين</option><option value="جهة أخرى (عمران)">جهة أخرى (عمران)</option></select>'
              '<input name="duty" placeholder="رسوم جمركية من فسح (لفواتير الياسمين)"><input name="other" placeholder="رسوم أخرى من فسح">'
              '<input name="date" type="date"></div><button class="btn">احسب وسجّل مسودات</button></form></div>')
     body += '<div class="card scroll"><table><tr><th>البيان</th><th>النوع</th><th>الجهة</th><th>الفاتورة</th><th>القيود</th><th>الحالة</th></tr>'
@@ -224,7 +226,8 @@ def page(request: Request):
         links = ' '.join('<a href="/finance/documents/' + str(x) + '">#' + str(x) + '</a>' for x in json.loads(r['finance_ids'] or '[]'))
         body += ('<tr><td>' + e(r['number']) + '</td><td>' + ('تصدير' if r['kind'] == 'export' else 'استيراد') + '</td><td>' + e(r['party']) +
                  '</td><td>' + e(r['invoice_no']) + ' · ' + e(r['invoice_value']) + '</td><td>' + cells + '<br>' + links +
-                 '</td><td><span class="pill">' + e(r['status']) + '</span> ' + e(r['error'] or '') + '</td></tr>')
+                 '</td><td><span class="pill">' + e(r['status']) + '</span> ' + e(r['error'] or '') +
+                 '<form method="post" action="/billing/' + str(r['id']) + '/void"><button class="btn danger">إلغاء المسودات لإعادة التسجيل</button></form></td></tr>')
     body += '</table></div>'
     return HTMLResponse(layout(body), headers={'Cache-Control': 'no-store'})
 
@@ -241,3 +244,27 @@ async def submit(request: Request):
         message = str(exc)
     return HTMLResponse(layout('<div class="card"><pre style="white-space:pre-wrap">' + e(message) +
                                '</pre><a class="btn" href="/billing">رجوع</a> <a class="btn" href="/finance">المالية</a></div>'))
+
+
+def void(row_id, actor):
+    """Void this declaration's finance drafts (posted ones need a reversal in /finance) and free it for re-entry."""
+    from app import finance_service as service
+    with db() as c:
+        row = c.execute('SELECT * FROM billing_declarations WHERE id=%s', (row_id,)).fetchone()
+    if not row:
+        raise ValueError('السجل غير موجود')
+    for doc_id in json.loads(row['finance_ids'] or '[]'):
+        service.void_document(doc_id, actor, {'reason': 'إلغاء مسودة فوترة البيان ' + row['number'] + ' لإعادة التسجيل بالبيانات الصحيحة'})
+    with db() as c:
+        c.execute('DELETE FROM billing_declarations WHERE id=%s', (row_id,))
+    log(actor, 'billing_declaration_voided', 'billing_declaration', row_id, row['number'])
+
+
+@router.post('/billing/{row_id}/void')
+async def void_route(row_id: int, request: Request):
+    session = admin_session(request)
+    try:
+        void(row_id, session['user_id'])
+    except Exception as exc:
+        raise HTTPException(409, str(getattr(exc, 'detail', exc))[:200]) from None
+    return RedirectResponse('/billing', 303)
