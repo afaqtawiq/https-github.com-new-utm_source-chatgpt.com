@@ -133,14 +133,12 @@ def gradient(w, h):
 
 
 def mark(draw, x, y, s):
-    """Afaq mountain mark (same geometry as the brochure SVG, 80×80 viewbox)."""
-    k = s / 80
-    p = lambda a, b: (x + a * k, y + b * k)
-    draw.rounded_rectangle([p(2, 2), p(78, 78)], radius=20 * k, outline=GOLD, width=max(2, int(2 * k)))
-    draw.line([p(14, 58), p(32, 24), p(42, 42), p(50, 30), p(66, 58)], fill=GOLD2, width=max(3, int(3.2 * k)), joint='curve')
-    draw.line([p(14, 58), p(66, 58)], fill='white', width=max(3, int(3.2 * k)))
-    r = 4 * k
-    draw.ellipse([x + 56 * k - r, y + 20 * k - r, x + 56 * k + r, y + 20 * k + r], fill=GOLD2)
+    """Afaq Tuwaiq logo mark: two peaks with the gold triangle (white on navy), s = width."""
+    k = s / 100
+    q = lambda pts: [(x + a * k, y + b * k) for a, b in pts]
+    draw.polygon(q([(0, 60), (13, 60), (42, 16), (35, 6)]), fill='white')
+    draw.polygon(q([(20, 60), (56, 1), (100, 60), (86, 60), (56, 19), (34, 60)]), fill='white')
+    draw.polygon(q([(45, 60), (58, 41), (71, 60)]), fill=GOLD)
 
 
 def decor(img):
@@ -165,9 +163,9 @@ def render_poster(topic, size=(1080, 1350)):
     img = decor(gradient(w, h))
     d = ImageDraw.Draw(img, 'RGBA')
     m = 72
-    mark(d, w - m - 110, 70, 110)
-    put(d, 'آفاق طويق', (w - m - 140, 104), 520, 64, GOLD2, anchor='rm')
-    put(d, 'للتخليص الجمركي والنقل', (w - m - 140, 160), 520, 34, MUTED, anchor='rm', black=False)
+    mark(d, w - m - 150, 78, 150)
+    put(d, 'آفاق طويق', (w - m - 180, 104), 520, 64, GOLD2, anchor='rm')
+    put(d, 'للتخليص الجمركي والنقل', (w - m - 180, 160), 520, 34, MUTED, anchor='rm', black=False)
     # topic chip
     chip, cf, ck = fit(d, topic['chip'], 400, 34, False)
     cw = d.textlength(chip, font=cf, **ck) + 56
