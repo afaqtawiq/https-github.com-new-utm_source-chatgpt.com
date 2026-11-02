@@ -145,7 +145,8 @@ def create_documents(d, items, actor):
                 'invoice_ref': d.get('invoice_no') or '', 'customs_ref': str(d['number']),
                 'notes': 'قيد تلقائي وفق قواعد الفوترة المعتمدة من صاحب الحساب. ' + it['label'] + '. قيمة الفاتورة ' +
                          str(d.get('invoice_value') or '-') + ' كما هي دون تحويل عملة. مسودة بانتظار المراجعة والترحيل.',
-                'idempotency_key': str(uuid.uuid5(uuid.NAMESPACE_URL, 'billing:' + str(d['number']) + ':' + str(d.get('kind')) + ':' + it['party']))}
+                'idempotency_key': str(uuid.uuid5(uuid.NAMESPACE_URL, 'billing:' + str(d.get('row_id')) + ':' + str(d['number']) + ':' +
+                                                  str(d.get('kind')) + ':' + it['party'] + ':' + str(parties[it['party']])))}
         doc_id = service.create_document(form, actor)
         ids.append(doc_id)
         if it['kind'] == 'claim':
@@ -185,7 +186,7 @@ def record(d, actor):
     if not claimed:
         return items, [], 'هذا البيان مسجل مسبقًا في الحسابات؛ لم يتكرر القيد.'
     try:
-        ids = create_documents(d, items, actor)
+        ids = create_documents({**d, 'row_id': claimed['id']}, items, actor)
         status, error = 'drafted', None
     except Exception as exc:
         ids, status, error = [], 'failed', str(getattr(exc, 'detail', exc))[:300]
