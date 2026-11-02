@@ -300,9 +300,11 @@ async def handle_pdf(c, payload, sender, index):
     caption = _text((payload.get('message') or {}).get('text'), 2000)
     command = '[ملف PDF]' + ('\nتعليق الموظف: ' + caption if caption else '')
     try:
-        got = await media_bytes(payload, index, {'application/pdf'}, 10 * 1024 * 1024)
+        got = await media_bytes(payload, index, {'application/pdf', 'application/octet-stream', 'binary/octet-stream', ''}, 10 * 1024 * 1024)
         if not got:
             raise ValueError('تعذر تنزيل الملف؛ أعد إرساله.')
+        if not got[0].startswith(b'%PDF'):
+            raise ValueError('الملف ليس PDF صالحًا؛ أعد إرساله.')
         fields = await extract_pdf(got[0])
         command += '\nقراءة الملف: ' + json.dumps(fields, ensure_ascii=False)[:1500]
         if fields.get('document_kind') in ('customs_declaration', 'commercial_invoice'):

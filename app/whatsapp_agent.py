@@ -140,7 +140,7 @@ def accept_inbound(payload):
     if settings['mode'] == 'routine':
         from app.team import identify
         _, member = identify(payload)
-        audio_only = bool(attachments) and all(isinstance(a, dict) and (str(a.get('type') or '').lower() in ('audio', 'voice', 'image')
+        audio_only = bool(attachments) and all(isinstance(a, dict) and (str(a.get('type') or '').lower() in ('audio', 'voice', 'image', 'document', 'file')
                                                                           or str(a.get('mimeType') or '').lower().startswith('image/')
                                                                           or str(a.get('mimeType') or '').lower() == 'application/pdf')
                                                for a in attachments)  # staff voice notes, photos and PDFs (invoices/declarations) -> team lane
