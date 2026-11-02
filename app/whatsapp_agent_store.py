@@ -19,7 +19,7 @@ LEASE_SECONDS = 300
 MAX_READ_ATTEMPTS = 3
 DOCUMENT_REVIEW_TTL_SECONDS = 3600
 MAX_DOCUMENT_REVIEW_TTL_SECONDS = 86400
-DAILY_MODEL_LIMITS = {"owner_pilot": 10, "routine": 50}
+DAILY_MODEL_LIMITS = {"owner_pilot": 10, "routine": 400}
 MODEL_BUDGET_NOTICE = ('وصلت رسالتك. وصلنا للحد اليومي للفهم الآلي في التجربة؛ '
                        'يتجدد الساعة ٣ صباحًا بتوقيت السعودية. أرسل سؤالك من جديد بعد ذلك، '
                        'لأن الرسائل المتوقفة لا تُعاد تلقائيًا.')

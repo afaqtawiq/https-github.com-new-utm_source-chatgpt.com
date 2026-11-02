@@ -306,7 +306,7 @@ def test_routine_requires_actual_sent_document_followup_and_owner_receipt(db):
         store.update_settings('a', mode='routine', acceptance=acceptance, db_factory=db, now=NOW)
     sent(db, second, generated=True)
     assert store.update_settings('a', mode='routine', acceptance=acceptance, db_factory=db, now=NOW)['mode'] == 'routine'
-    assert store.DAILY_MODEL_LIMITS == {'owner_pilot': 10, 'routine': 50}
+    assert store.DAILY_MODEL_LIMITS == {'owner_pilot': 10, 'routine': 400}
 
 
 @pytest.mark.parametrize('kwargs', [{'mode': 'automatic'}, {'mode': 'owner_pilot'},
