@@ -101,6 +101,10 @@ async def reply(question, history=()):
     """Return a natural grounded answer, or None (caller then uses the guarded path)."""
     if not enabled():
         return None
+    ref = re.search(r'(?:موافق|اوافق|أوافق)\s*(AFT-\d+)', str(question), re.I)
+    if ref:
+        return ('تم استلام موافقتك على الحمولة ' + ref.group(1).upper() + ' 👍 سيتواصل معك فريق النقل في آفاق طويق لتأكيد التحميل. '
+                'للاستفسار: 0507665873')
     from app import whatsapp_agent_privacy as privacy
     if privacy.identity_requested(str(question)):
         return None

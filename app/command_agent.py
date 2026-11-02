@@ -51,6 +51,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name']}},
     {'name': 'record_payment', 'description': 'Record money RECEIVED from a customer as a finance draft receipt (owner posts it later). e.g. «استلمنا 50000 من الياسمين حوالة 123». date YYYY-MM-DD optional; ref = transfer/cheque reference.',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'amount': {'type': 'string'}, 'date': {'type': 'string'}, 'ref': {'type': 'string'}}, 'required': ['name', 'amount']}},
+    {'name': 'broadcast_load', 'description': 'Offer a freight load to ALL registered drivers on WhatsApp (or only Saudi/UAE numbers). Use when staff send a load to be distributed to drivers. driver_price = the price offered to the driver (if only the owner/agreed price is given, the driver price is that minus 150 SAR commission). Needs the manager confirmation code before sending.',
+     'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'weight': {'type': 'string', 'description': 'tons'}, 'driver_price': {'type': 'string'}, 'unloading': {'type': 'string'}, 'payment': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']}}, 'required': ['origin', 'destination', 'weight', 'driver_price']}},
+    {'name': 'broadcast_status', 'description': 'Delivery status of a load broadcast (e.g. «حالة الإرسال AFT-12»); latest if no reference.',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'approve_prospects', 'description': "Approve today's pending daily prospects for contact (all, or those whose company name contains a text).",
      'input_schema': {'type': 'object', 'properties': {'company_contains': {'type': 'string'}}}},
     {'name': 'list_employees', 'description': 'List company employees registered for the WhatsApp team lane.',
@@ -233,6 +237,23 @@ def tool_record_payment(c, a):
     return collections.record_payment(a.get('name'), a.get('amount'), system_user(), date=date, ref=_clean(a.get('ref'), 80))
 
 
+def tool_broadcast_load(c, a):
+    from app import load_broadcast
+    load, count, error = load_broadcast.prepare(a)
+    if error:
+        return error + '. أكمل البيانات وأعد الطلب.'
+    if not count:
+        return 'لا يوجد سائقون مسجلون لهذه الفئة.'
+    token = _pending(c, {'tool': 'broadcast_load', **load})
+    return (f"جاهز لإرسال الحمولة إلى {count} سائق:\n" + load_broadcast.message('AFT-…', load) +
+            f"\nللإرسال اكتب: نفذ {token}")
+
+
+def tool_broadcast_status(c, a):
+    from app import load_broadcast
+    return load_broadcast.status_text(a.get('ref'))
+
+
 def tool_approve_prospects(c, a):
     from app import daily_prospects as dp
     contains = _clean(a.get('company_contains'), 100)
@@ -337,6 +358,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'send_whatsapp':
         from app.manager_actions import send_message
         return send_message(c, {'to': action['to'], 'text': action['text']})
+    if action.get('tool') == 'broadcast_load':
+        from app import load_broadcast
+        return load_broadcast.start(action, member.get('name') or '')
     if action.get('tool') == 'send_email':
         from app import spacemail
         user = c.execute('''SELECT s.user_id FROM spacemail_connections s JOIN users u ON u.id=s.user_id
