@@ -64,13 +64,23 @@ def summary(fields):
 
 
 async def opening(phone, origin, destination):
+    """Try the approved owner-inquiry templates (v4, v3 short, v2) — the first approved match is sent."""
     from app import zernio_whatsapp as z
-    from app.transport_owner import short_inquiry
-    await z.send(phone, short_inquiry(origin, destination))
+    from app.transport_owner import inquiry, legacy_v2_inquiry, short_inquiry
+    last = None
+    for build in (inquiry, short_inquiry, legacy_v2_inquiry):
+        try:
+            await z.send(phone, build(origin, destination))
+            return
+        except z.WhatsAppBlocked as exc:
+            last = exc
+            if 'قالب' not in str(exc):
+                raise
+    raise last
 
 
 def start(action, actor):
-    """Executed after the manager's confirmation code."""
+    """Executed after the manager's confirmation code. Sends the opening message and reports the real result."""
     import asyncio
     import threading
     init()
@@ -79,17 +89,28 @@ def start(action, actor):
     with db() as c:
         nid = c.execute('''INSERT INTO owner_negotiations(phone,status,fields,created_by,created_at,updated_at)
             VALUES(%s,'open',%s,%s,%s,%s) RETURNING id''', (phone, json.dumps(fields, ensure_ascii=False), actor, utcnow(), utcnow())).fetchone()['id']
+    outcome = {}
 
     def run():
         try:
             asyncio.run(opening(phone, fields['origin'], fields['destination']))
+            outcome['ok'] = True
         except Exception as exc:
+            outcome['error'] = str(exc)[:200]
             print('OWNER_NEGOTIATION_OPEN_FAILED', nid, type(exc).__name__, str(exc)[:160], flush=True)
             with db() as c:
                 c.execute("UPDATE owner_negotiations SET status='open_failed',updated_at=%s WHERE id=%s", (utcnow(), nid))
-    threading.Thread(target=run, daemon=True).start()
-    return (f'✅ بدأت المحادثة مع صاحب الحمولة (+{phone}) — ملف رقم {nid}. سأجمع منه التفاصيل والسعر بشكل طبيعي '
-            'وأرسل لك الملخص للاعتماد. لن أقبل أو أرفض أي سعر.')
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(45)
+    if outcome.get('ok'):
+        return (f'✅ أرسلت رسالة الاستفسار لصاحب الحمولة (+{phone}) — ملف رقم {nid}. سأكمل معه بشكل طبيعي وأرسل لك الملخص '
+                'للاعتماد. لن أقبل أو أرفض أي سعر.')
+    if 'error' in outcome:
+        return (f'❌ لم تصل رسالة الافتتاح لصاحب الحمولة (+{phone}): {outcome["error"]}\n'
+                'السبب غالبًا أن قوالب «استفسار الحمولة» غير معتمدة في Meta لهذا الرقم. الحل المؤقت: ابدأ أنت المحادثة معه '
+                'من رقم الوكيل (أو يراسلنا هو)، ثم أعد الأمر وسأكمل التفاوض داخل نافذة الـ24 ساعة.')
+    return f'⏳ جارٍ إرسال رسالة الافتتاح لصاحب الحمولة (+{phone}) — ملف {nid}.'
 
 
 async def notify_manager(text):
