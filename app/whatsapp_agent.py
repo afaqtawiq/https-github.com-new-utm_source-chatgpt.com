@@ -522,6 +522,9 @@ async def update_settings(request: Request):
     if mode == 'routine':
         if current.get('role') != 'admin':
             raise HTTPException(403,'Owner approval required')
+        existing = await run_in_threadpool(store.get_settings,account)
+        if existing['mode'] == 'routine':
+            return RedirectResponse('/whatsapp-assistant',303)
         kwargs['acceptance'] = {'owner_receipt_confirmed':True,'direct_owner_activation':True,
                                 'confirmed_by':str(current['user_id']),'confirmed_at':datetime.now(timezone.utc).isoformat()}
     if mode == 'owner_pilot':
@@ -532,8 +535,12 @@ async def update_settings(request: Request):
         kwargs.update(pilot_sender=sender,approved_sha256=hashes,acceptance={})
     try:
         await run_in_threadpool(store.update_settings,account,expected_generation=generation,**kwargs)
-    except (ValueError,store.StateConflict):
-        raise HTTPException(409,'Invalid or stale pilot settings') from None
+    except store.StateConflict:
+        raise HTTPException(409,'الإعدادات تغيّرت؛ أعد فتح الصفحة ثم حاول مرة أخرى.') from None
+    except ValueError as error:
+        logger.warning('whatsapp assistant settings rejected: %s', error)
+        print('WHATSAPP_ASSISTANT_SETTINGS_REJECTED', str(error)[:200], flush=True)
+        raise HTTPException(409,'تعذر حفظ الإعداد: ' + str(error)[:160]) from None
     return RedirectResponse('/whatsapp-assistant',303)
 
 
