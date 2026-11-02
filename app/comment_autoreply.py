@@ -1,4 +1,4 @@
-"""Owner-authorised automatic replies to public comments on Afaq's published YouTube/TikTok videos.
+"""Owner-authorised automatic replies to public comments: YouTube/TikTok via Zernio, Facebook/Instagram via Meta.
 
 Enabled only with AFAQ_AUTO_COMMENTS=1 and ENABLE_EXTERNAL_ACTIONS=1. Every 10 minutes the
 worker reads the comments of videos the agent published (Zernio post results), and answers each
@@ -156,6 +156,75 @@ async def poll_once():
     return stats
 
 
+def meta_comments(conn, graph):
+    """Top-level comments on the Afaq Page's and Instagram account's recent posts, as (platform, account, post, id, text)."""
+    out = []
+    posts = graph('GET', conn['page_id'] + '/posts', conn['token'], params={'fields': 'id', 'limit': 10}).get('data') or []
+    for p in posts:
+        data = graph('GET', p['id'] + '/comments', conn['token'], params={
+            'fields': 'id,message,from,comments.limit(25){from}', 'filter': 'toplevel', 'limit': 50}).get('data') or []
+        for cm in data:
+            if (cm.get('from') or {}).get('id') == conn['page_id']:
+                continue
+            if any((r.get('from') or {}).get('id') == conn['page_id'] for r in (cm.get('comments') or {}).get('data') or []):
+                continue
+            out.append(('facebook', conn['page_id'], p['id'], cm.get('id'), cm.get('message') or ''))
+    if conn.get('ig_id'):
+        own = (conn.get('ig_username') or '').lower()
+        media = graph('GET', conn['ig_id'] + '/media', conn['token'], params={'fields': 'id', 'limit': 10}).get('data') or []
+        for m in media:
+            data = graph('GET', m['id'] + '/comments', conn['token'], params={
+                'fields': 'id,text,username,replies{username}', 'limit': 50}).get('data') or []
+            for cm in data:
+                if (cm.get('username') or '').lower() == own:
+                    continue
+                if any((r.get('username') or '').lower() == own for r in (cm.get('replies') or {}).get('data') or []):
+                    continue
+                out.append(('instagram', conn['ig_id'], m['id'], cm.get('id'), cm.get('text') or ''))
+    return out
+
+
+async def poll_meta_once():
+    """Facebook Page + Instagram replies straight through Meta (no intermediary)."""
+    from app.meta_connect import MetaError, connected, credentials, graph
+    stats = {'checked': 0, 'sent': 0, 'held': 0}
+    if not await run_in_threadpool(connected):
+        return stats
+    conn = await run_in_threadpool(credentials)
+    try:
+        items = await run_in_threadpool(meta_comments, conn, graph)
+    except MetaError as exc:
+        print('AUTO_COMMENTS_META_READ', str(exc)[:160], flush=True)
+        return stats
+    for platform, account, post, cid, text in items:
+        if not cid or not text.strip():
+            continue
+        stats['checked'] += 1
+        if not await run_in_threadpool(budget_ok):
+            break
+        if not await run_in_threadpool(claim, account, cid, post, platform, text):
+            continue
+        reply = await compose(text)
+        if not reply:
+            await run_in_threadpool(finish, account, cid, 'held')
+            stats['held'] += 1
+            continue
+        await run_in_threadpool(finish, account, cid, 'sending', reply)
+        path = cid + ('/comments' if platform == 'facebook' else '/replies')
+        status, provider_id = 'uncertain', None
+        try:
+            result = await run_in_threadpool(lambda: graph('POST', path, conn['token'], data={'message': reply}))
+            status, provider_id = 'sent', str(result.get('id') or '')
+        except MetaError as exc:
+            status = 'rejected'
+            print('AUTO_COMMENTS_META_REPLY', platform, str(exc)[:160], flush=True)
+        except Exception as exc:
+            print('AUTO_COMMENTS_META_ERROR', type(exc).__name__, flush=True)
+        await run_in_threadpool(finish, account, cid, status, reply, provider_id)
+        stats['sent'] += status == 'sent'
+    return stats
+
+
 def register_worker(app):
     async def loop():
         await asyncio.sleep(60)
@@ -166,6 +235,14 @@ def register_worker(app):
                     stats = await poll_once()
                     if stats['checked']:
                         print('AUTO_COMMENTS', stats, flush=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    print('AUTO_COMMENTS_ERROR', type(exc).__name__, str(exc)[:200], flush=True)
+                try:
+                    meta = await poll_meta_once()
+                    if meta['checked']:
+                        print('AUTO_COMMENTS_META', meta, flush=True)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
