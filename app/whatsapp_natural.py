@@ -31,6 +31,27 @@ SYSTEM = """أنت موظف خدمة العملاء على واتساب لمؤس
 """
 
 
+TARIFF_TOOL = {'name': 'tariff_search', 'description': 'Search the GCC unified customs tariff (12-digit codes, Arabic/English descriptions, duty rates) for a product. Give up to 3 Arabic and 3 English tariff-style phrasings of the goods.',
+               'input_schema': {'type': 'object', 'properties': {'ar': {'type': 'array', 'items': {'type': 'string'}},
+                                                                 'en': {'type': 'array', 'items': {'type': 'string'}}}}}
+TARIFF_RULES = '''
+عند سؤال العميل عن الجمارك أو الرسوم أو التعرفة أو البند الجمركي لبضاعة معينة: استخدم أداة tariff_search، ثم اذكر أقرب بند أو بندين
+(رقم البند ووصفه ونسبة الرسم) بصياغة مختصرة، ووضح أنه تصنيف مبدئي من التعرفة الجمركية الموحدة لدول الخليج والبند النهائي يحدده
+المخلص في فسح حسب مواصفات المنتج، وأن ضريبة القيمة المضافة 15% تضاف عند الاستيراد، وقد تلزم شهادات (سابر/الغذاء والدواء) حسب المنتج.
+إذا لم تجد بندًا واضحًا اطلب وصفًا أدق للمنتج (المادة، الاستخدام). اعرض حساب الرسوم المتوقعة فقط إذا ذكر العميل قيمة البضاعة.
+'''
+
+
+def tariff_result(args):
+    from app import tariff_lookup
+    try:
+        items = tariff_lookup.search_many(args.get('ar'), args.get('en'))
+        import json as _json
+        return _json.dumps(tariff_lookup.as_prompt(items[:8]), ensure_ascii=False) if items else 'لا توجد نتائج مطابقة.'
+    except Exception:
+        return 'تعذر البحث في التعرفة الآن.'
+
+
 def model():
     return (os.getenv('WHATSAPP_NATURAL_MODEL') or os.getenv('COMMAND_AGENT_MODEL')
             or os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5')).strip()
@@ -88,17 +109,27 @@ async def reply(question, history=()):
     if not key or not re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', name):
         return None
     from app.customs_knowledge import KNOWLEDGE
-    body = {'model': name, 'max_tokens': 700, 'system': SYSTEM + KNOWLEDGE,
-            'messages': messages(question, history)}
+    msgs = messages(question, history)
+    text = ''
     try:
         async with httpx.AsyncClient(timeout=40) as client:
-            r = await client.post('https://api.anthropic.com/v1/messages', json=body,
-                                  headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
-        if r.status_code != 200:
-            print('WHATSAPP_NATURAL_HTTP', r.status_code, flush=True)
-            return None
-        data = r.json()
-        text = '\n'.join(p.get('text', '') for p in data.get('content', []) if isinstance(p, dict) and p.get('type') == 'text')
+            for _ in range(3):
+                body = {'model': name, 'max_tokens': 900, 'system': SYSTEM + TARIFF_RULES + KNOWLEDGE,
+                        'messages': msgs, 'tools': [TARIFF_TOOL]}
+                r = await client.post('https://api.anthropic.com/v1/messages', json=body,
+                                      headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
+                if r.status_code != 200:
+                    print('WHATSAPP_NATURAL_HTTP', r.status_code, flush=True)
+                    return None
+                data = r.json()
+                content = data.get('content', [])
+                uses = [p for p in content if isinstance(p, dict) and p.get('type') == 'tool_use']
+                if not uses:
+                    text = '\n'.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
+                    break
+                msgs = msgs + [{'role': 'assistant', 'content': content},
+                               {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': u['id'],
+                                                             'content': tariff_result(u.get('input') or {})} for u in uses]}]
     except (httpx.HTTPError, ValueError) as exc:
         print('WHATSAPP_NATURAL_ERROR', type(exc).__name__, flush=True)
         return None
