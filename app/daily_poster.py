@@ -166,15 +166,19 @@ def render_poster(topic, size=(1080, 1350)):
     img = decor(gradient(w, h))
     d = ImageDraw.Draw(img, 'RGBA')
     m = 72
-    mark(d, w - m - 130, 52, 130)
-    put(d, 'آفاق طويق', (w - m - 160, 98), 520, 70, 'white', anchor='rm')
-    face = font(30, True)
-    d.text((w - m - 160, 160), 'A F A Q   T U W A I Q', font=face, fill=GOLD2, anchor='rm')
+    with Image.open(FONTS.parent / 'afaq-logo-official.png') as logo:
+        logo = logo.convert('RGBA')
+        logo.thumbnail((190, 200))
+        cw, ch = logo.width + 36, logo.height + 24
+        d.rounded_rectangle([w - m - cw, 30, w - m, 30 + ch], radius=26, fill=(255, 255, 255, 255))
+        img.alpha_composite(logo, (w - m - cw + 18, 42))
+    put(d, 'آفاق طويق', (w - m - cw - 30, 104), 480, 64, 'white', anchor='rm')
+    put(d, 'للتخليص الجمركي والخدمات اللوجستية', (w - m - cw - 30, 168), 480, 32, MUTED, anchor='rm', black=False)
     # topic chip
     chip, cf, ck = fit(d, topic['chip'], 400, 34, False)
     cw = d.textlength(chip, font=cf, **ck) + 56
-    d.rounded_rectangle([w - m - cw, 268, w - m, 324], radius=28, fill=GOLD)
-    d.text((w - m - cw / 2, 296), chip, font=cf, fill=NAVY, anchor='mm', **ck)
+    d.rounded_rectangle([w - m - cw, 278, w - m, 334], radius=28, fill=GOLD)
+    d.text((w - m - cw / 2, 306), chip, font=cf, fill=NAVY, anchor='mm', **ck)
     put(d, topic['head'], (w - m, 420), w - 2 * m, 112, 'white', anchor='rm')
     put(d, topic['sub'], (w - m, 530), w - 2 * m, 46, MUTED, anchor='rm', black=False)
     d.rectangle([w - m - 160, 590, w - m, 596], fill=GOLD)
