@@ -220,3 +220,5 @@ app.include_router(billing_rules_router)
 from app.owner_briefing import register_worker as register_owner_briefing, init as init_owner_briefing
 init_owner_briefing()
 register_owner_briefing(app)
+from app.collections_desk import router as collections_router
+app.include_router(collections_router)
