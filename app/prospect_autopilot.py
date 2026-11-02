@@ -60,7 +60,7 @@ async def ensure_template():
 
 
 def system_user():
-    row = one('''SELECT u.id FROM users u WHERE u.is_active AND u.role='admin'
+    row = one('''SELECT u.id FROM users u WHERE u.is_active::text IN ('1','true','t') AND u.role='admin'
         ORDER BY (SELECT COUNT(*) FROM spacemail_connections s WHERE s.user_id=u.id) DESC, u.id LIMIT 1''')
     return row['id'] if row else None
 
