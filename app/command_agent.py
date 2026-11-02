@@ -45,6 +45,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}, 'email': {'type': 'string'}, 'city': {'type': 'string'}, 'notes': {'type': 'string'}}, 'required': ['name']}},
     {'name': 'update_declaration', 'description': 'Update a customs declaration follow-up: find it by customer name, bill or declaration number; set stage and optionally the declaration number. Stages: submitted, under_review, inspection, duties_due, duties_paid, released, delivered, closed.',
      'input_schema': {'type': 'object', 'properties': {'find': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_number': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['find', 'stage']}},
+    {'name': 'record_declaration_billing', 'description': 'Record a customs declaration in the accounts using the owner-approved billing rules (الياسمين / عمران / سلة الرحائب) and create finance drafts. Use when staff send a declaration number with invoice value and the issuing company, e.g. «بيان 5 بتاريخ 3 الياسمين قيمة الفاتورة 500 الرسوم 200». supplier = the company that issued the invoice (from the Emirates). party = importer/exporter (default سلة الرحائب). duty = total FASAH fees if given.',
+     'input_schema': {'type': 'object', 'properties': {'number': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['import', 'export']}, 'supplier': {'type': 'string'}, 'invoice_no': {'type': 'string'}, 'invoice_value': {'type': 'string'}, 'duty': {'type': 'string'}, 'other': {'type': 'string'}, 'party': {'type': 'string'}, 'date': {'type': 'string', 'description': 'YYYY-MM-DD, or just the day number if only a day was given'}}, 'required': ['number']}},
     {'name': 'approve_prospects', 'description': "Approve today's pending daily prospects for contact (all, or those whose company name contains a text).",
      'input_schema': {'type': 'object', 'properties': {'company_contains': {'type': 'string'}}}},
     {'name': 'list_employees', 'description': 'List company employees registered for the WhatsApp team lane.',
@@ -190,6 +192,25 @@ def tool_update_declaration(c, a):
               (d['id'], stage, 'واتساب: ' + _clean(a.get('note'), 300), message, 'draft' if message else 'none'))
     return (f"تم تحديث بيان {d['customer_name']} إلى «{STAGE_LABELS[stage]}»" + (f" ورقم البيان {d['declaration_number']}" if d['declaration_number'] else '') +
             ('. رسالة العميل جاهزة في صفحة البيان للإرسال.' if message else '.'))
+
+
+def tool_record_declaration_billing(c, a):
+    import datetime as _dt
+    from app import billing_rules
+    from app.prospect_autopilot import system_user
+    date = None
+    raw = str(a.get('date') or '').strip()
+    if raw:
+        try:
+            date = _dt.date.fromisoformat(raw)
+        except ValueError:
+            today = _dt.date.today()
+            date = today.replace(day=int(raw)) if raw.isdigit() and 1 <= int(raw) <= 28 else None
+    try:
+        _, _, message = billing_rules.record({**a, 'date': date}, system_user())
+    except ValueError as exc:
+        return 'تعذر التسجيل: ' + str(exc)
+    return message
 
 
 def tool_approve_prospects(c, a):

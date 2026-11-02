@@ -214,3 +214,6 @@ from app.daily_poster import router as daily_poster_router, init as init_daily_p
 init_daily_poster()
 app.include_router(daily_poster_router)
 register_daily_poster_worker(app)
+from app.billing_rules import router as billing_rules_router, init as init_billing_rules
+init_billing_rules()
+app.include_router(billing_rules_router)
