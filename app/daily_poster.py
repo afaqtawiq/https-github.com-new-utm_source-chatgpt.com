@@ -164,9 +164,10 @@ def render_poster(topic, size=(1080, 1350)):
     img = decor(gradient(w, h))
     d = ImageDraw.Draw(img, 'RGBA')
     m = 72
-    mark(d, w - m - 150, 80, 150)
-    put(d, 'آفاق طويق', (w - m - 180, 104), 520, 64, GOLD2, anchor='rm')
-    put(d, 'للتخليص الجمركي والنقل', (w - m - 180, 160), 520, 34, MUTED, anchor='rm', black=False)
+    with Image.open(FONTS.parent / 'afaq-logo-horizontal-white.png') as logo:
+        logo = logo.convert('RGBA')
+        logo.thumbnail((600, 200))
+        img.alpha_composite(logo, (w - m - logo.width, 50))
     # topic chip
     chip, cf, ck = fit(d, topic['chip'], 400, 34, False)
     cw = d.textlength(chip, font=cf, **ck) + 56
