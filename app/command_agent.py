@@ -47,6 +47,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'find': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_number': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['find', 'stage']}},
     {'name': 'record_declaration_billing', 'description': 'Record a customs declaration in the accounts using the owner-approved billing rules (الياسمين / عمران / سلة الرحائب) and create finance drafts. Use when staff send a declaration number with invoice value and the issuing company, e.g. «بيان 5 بتاريخ 3 الياسمين قيمة الفاتورة 500 الرسوم 200». supplier = the company that issued the invoice (from the Emirates). party = importer/exporter (default سلة الرحائب). duty = total FASAH fees if given.',
      'input_schema': {'type': 'object', 'properties': {'number': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['import', 'export']}, 'supplier': {'type': 'string'}, 'invoice_no': {'type': 'string'}, 'invoice_value': {'type': 'string'}, 'duty': {'type': 'string'}, 'other': {'type': 'string'}, 'party': {'type': 'string'}, 'date': {'type': 'string', 'description': 'YYYY-MM-DD, or just the day number if only a day was given'}}, 'required': ['number']}},
+    {'name': 'customer_balance', 'description': 'Outstanding receivable balance of a customer/counterparty in finance (posted only), oldest claim, last payment, drafts awaiting approval. e.g. «كم على الياسمين».',
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name']}},
+    {'name': 'record_payment', 'description': 'Record money RECEIVED from a customer as a finance draft receipt (owner posts it later). e.g. «استلمنا 50000 من الياسمين حوالة 123». date YYYY-MM-DD optional; ref = transfer/cheque reference.',
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'amount': {'type': 'string'}, 'date': {'type': 'string'}, 'ref': {'type': 'string'}}, 'required': ['name', 'amount']}},
     {'name': 'approve_prospects', 'description': "Approve today's pending daily prospects for contact (all, or those whose company name contains a text).",
      'input_schema': {'type': 'object', 'properties': {'company_contains': {'type': 'string'}}}},
     {'name': 'list_employees', 'description': 'List company employees registered for the WhatsApp team lane.',
@@ -211,6 +215,22 @@ def tool_record_declaration_billing(c, a):
     except ValueError as exc:
         return 'تعذر التسجيل: ' + str(exc)
     return message
+
+
+def tool_customer_balance(c, a):
+    from app import collections_desk as collections
+    return collections.customer_balance_text(a.get('name'))
+
+
+def tool_record_payment(c, a):
+    import datetime as _dt
+    from app import collections_desk as collections
+    from app.prospect_autopilot import system_user
+    try:
+        date = _dt.date.fromisoformat(str(a.get('date'))) if a.get('date') else None
+    except ValueError:
+        date = None
+    return collections.record_payment(a.get('name'), a.get('amount'), system_user(), date=date, ref=_clean(a.get('ref'), 80))
 
 
 def tool_approve_prospects(c, a):

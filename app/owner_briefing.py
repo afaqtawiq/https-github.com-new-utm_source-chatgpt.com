@@ -141,6 +141,8 @@ def briefing_text(today=None):
             'comments': q("SELECT COUNT(*) FROM afaq_auto_comment_replies WHERE status='sent' AND created_at::date=%s", (y,)),
             'poster': q('SELECT status FROM afaq_daily_posters WHERE day=%s', (y,)),
             'broken': q('SELECT COUNT(*) FROM owner_health WHERE NOT ok'),
+            'receivable': q('''SELECT COALESCE(SUM(e.signed_minor),0) FROM finance_entries e JOIN finance_documents d ON d.id=e.document_id
+                             WHERE e.side='receivable' AND d.status IN ('posted','reversed') AND d.currency='SAR' '''),
         }
     fmt = lambda v: '—' if v is None else str(v)
     lines = ['☀️ صباح الخير — ملخص آفاق طويق ليوم ' + y.isoformat(), '',
@@ -149,6 +151,7 @@ def briefing_text(today=None):
              '• بيانات مفتوحة: ' + fmt(data['open_decl']) + ' — منها بانتظار سداد الرسوم: ' + fmt(data['duties']),
              '', '💰 المالية',
              '• قيود بانتظار اعتمادك وترحيلك: ' + fmt(data['drafts']) + ' (صفحة المالية)',
+             '• إجمالي المستحق لكم: ' + ('—' if data['receivable'] is None else format(data['receivable'] / 100, ',.2f')) + ' ريال (صفحة التحصيل)',
              '', '📣 المبيعات والتسويق',
              '• عملاء رد عليهم الوكيل في واتساب: ' + fmt(data['customers']),
              '• شركات تم التواصل معها: ' + fmt(data['contacted']),
