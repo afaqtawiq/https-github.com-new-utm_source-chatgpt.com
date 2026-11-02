@@ -30,6 +30,7 @@ from app.storage import db, log, one, utcnow
 router = APIRouter()
 FONTS = Path(__file__).parent / 'assets' / 'fonts'
 WHATSAPP = '0507665873'
+WHATSAPP2 = '0530130435'
 APP_URL = 'app.afaqtawiqs.net'
 LICENCES = 'ترخيص التخليص 2513 · ترخيص النقل 11/00098402'
 NAVY, NAVY2 = (7, 19, 31), (16, 46, 66)
@@ -83,7 +84,7 @@ def topic_for(day):
 def caption(topic):
     lines = ['آفاق طويق | ' + topic['head'], topic['sub'], '']
     lines += ['✔️ ' + p for p in topic['points']]
-    lines += ['', '📲 واتساب: ' + WHATSAPP, '🌐 https://' + APP_URL, LICENCES, '', topic['tags']]
+    lines += ['', '📲 واتساب: ' + WHATSAPP + ' | ' + WHATSAPP2, '🌐 https://' + APP_URL, LICENCES, '', topic['tags']]
     return '\n'.join(lines)
 
 
@@ -133,12 +134,12 @@ def gradient(w, h):
 
 
 def mark(draw, x, y, s):
-    """Afaq Tuwaiq logo mark: two peaks with the gold triangle (white on navy), s = width."""
-    k = s / 100
-    q = lambda pts: [(x + a * k, y + b * k) for a, b in pts]
-    draw.polygon(q([(0, 60), (13, 60), (42, 16), (35, 6)]), fill='white')
-    draw.polygon(q([(20, 60), (56, 1), (100, 60), (86, 60), (56, 19), (34, 60)]), fill='white')
-    draw.polygon(q([(45, 60), (58, 41), (71, 60)]), fill=GOLD)
+    """Afaq Tuwaiq logo mark (traced from the brand artwork): side stripe, main peak, gold chevron. s = width."""
+    k = s / 252
+    q = lambda pts: [(x + (a - 70) * k, y + (b - 8) * k) for a, b in pts]
+    draw.polygon(q([(70, 150), (102, 150), (166, 54), (154, 32)]), fill='white')
+    draw.polygon(q([(118, 150), (215, 8), (322, 150), (284, 150), (215, 58), (156, 150)]), fill='white')
+    draw.polygon(q([(180, 150), (214, 78), (272, 150), (246, 150), (214, 108), (204, 150)]), fill=GOLD)
 
 
 def decor(img):
@@ -163,7 +164,7 @@ def render_poster(topic, size=(1080, 1350)):
     img = decor(gradient(w, h))
     d = ImageDraw.Draw(img, 'RGBA')
     m = 72
-    mark(d, w - m - 150, 78, 150)
+    mark(d, w - m - 150, 80, 150)
     put(d, 'آفاق طويق', (w - m - 180, 104), 520, 64, GOLD2, anchor='rm')
     put(d, 'للتخليص الجمركي والنقل', (w - m - 180, 160), 520, 34, MUTED, anchor='rm', black=False)
     # topic chip
@@ -182,7 +183,7 @@ def render_poster(topic, size=(1080, 1350)):
     # contact panel
     top = h - 330
     d.rounded_rectangle([m - 12, top, w - m + 12, h - 60], radius=34, fill=(4, 14, 24, 235), outline=GOLD, width=3)
-    put(d, 'واتساب ' + WHATSAPP, (w // 2, top + 72), w - 2 * m - 60, 58, GOLD2)
+    put(d, 'واتساب ' + WHATSAPP + '  |  ' + WHATSAPP2, (w // 2, top + 72), w - 2 * m - 60, 54, GOLD2)
     face = font(44, True)
     d.text((w // 2, top + 152), APP_URL, font=face, fill='white', anchor='mm')
     put(d, LICENCES, (w // 2, top + 222), w - 2 * m - 60, 30, MUTED, black=False)
@@ -355,7 +356,7 @@ def save_drafts(day, topic, text, image_url, uid):
             ids.append(c.execute('''INSERT INTO social_content(title,platform,content_type,body,media_url,scheduled_at,status,created_by,created_at,updated_at)
                 VALUES(%s,%s,'post',%s,%s,%s,'draft',%s,%s,%s) RETURNING id''',
                 ('بوستر يومي ' + day.isoformat() + ' — ' + topic['head'], platform, text[:2800] if platform == 'LinkedIn' else
-                 (topic['head'] + ' — ' + topic['sub'] + '\nواتساب ' + WHATSAPP + '\nhttps://' + APP_URL)[:270],
+                 (topic['head'] + ' — ' + topic['sub'] + '\nواتساب ' + WHATSAPP + ' | ' + WHATSAPP2 + '\nhttps://' + APP_URL)[:270],
                  image_url, now, uid, now, now)).fetchone()['id'])
     return ids
 
