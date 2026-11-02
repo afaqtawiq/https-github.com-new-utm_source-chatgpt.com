@@ -140,7 +140,9 @@ def accept_inbound(payload):
     if settings['mode'] == 'routine':
         from app.team import identify
         _, member = identify(payload)
-        audio_only = bool(attachments) and all(isinstance(a, dict) and str(a.get('type') or '').lower() in ('audio', 'voice') for a in attachments)
+        audio_only = bool(attachments) and all(isinstance(a, dict) and (str(a.get('type') or '').lower() in ('audio', 'voice', 'image')
+                                                                          or str(a.get('mimeType') or '').lower().startswith('image/'))
+                                               for a in attachments)  # staff voice notes and photos (invoices) -> team lane
         if member and not attachments and deterministic_staff_command(str(message.get('text') or '')):
             return {'legacy_local_only':True}
         # Verified team members' text and voice commands go to the command agent (tools,
