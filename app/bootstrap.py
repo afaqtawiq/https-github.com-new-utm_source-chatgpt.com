@@ -222,3 +222,5 @@ init_owner_briefing()
 register_owner_briefing(app)
 from app.collections_desk import router as collections_router
 app.include_router(collections_router)
+from app.load_broadcast import init as init_load_broadcast
+init_load_broadcast()
