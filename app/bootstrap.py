@@ -224,3 +224,5 @@ from app.collections_desk import router as collections_router
 app.include_router(collections_router)
 from app.load_broadcast import init as init_load_broadcast
 init_load_broadcast()
+from app.owner_negotiation import init as init_owner_negotiation
+init_owner_negotiation()

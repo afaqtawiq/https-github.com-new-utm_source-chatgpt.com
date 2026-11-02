@@ -53,6 +53,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'amount': {'type': 'string'}, 'date': {'type': 'string'}, 'ref': {'type': 'string'}}, 'required': ['name', 'amount']}},
     {'name': 'broadcast_load', 'description': 'Offer a freight load to ALL registered drivers on WhatsApp (or only Saudi/UAE numbers). Use when staff send a load to be distributed to drivers. driver_price = the price offered to the driver (if only the owner/agreed price is given, the driver price is that minus 150 SAR commission). Needs the manager confirmation code before sending.',
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'weight': {'type': 'string', 'description': 'tons'}, 'driver_price': {'type': 'string'}, 'unloading': {'type': 'string'}, 'payment': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']}}, 'required': ['origin', 'destination', 'weight', 'driver_price']}},
+    {'name': 'negotiate_owner', 'description': 'Start a natural WhatsApp conversation with a load owner (by phone) to collect the load details and price. origin/destination = the route if known. Needs the manager confirmation code before the first message.',
+     'input_schema': {'type': 'object', 'properties': {'phone': {'type': 'string'}, 'origin': {'type': 'string'}, 'destination': {'type': 'string'}}, 'required': ['phone', 'origin', 'destination']}},
+    {'name': 'approve_owner_load', 'description': 'Manager approves a collected load file and sets OUR commission; the load is then offered to all drivers at owner price minus commission. e.g. «اعتمد الحمولة 4 عمولة 300».',
+     'input_schema': {'type': 'object', 'properties': {'file': {'type': 'string'}, 'commission': {'type': 'string'}}, 'required': ['file', 'commission']}},
+    {'name': 'owner_load_status', 'description': 'Show what was collected so far from a load owner (file number).',
+     'input_schema': {'type': 'object', 'properties': {'file': {'type': 'string'}}, 'required': ['file']}},
     {'name': 'broadcast_status', 'description': 'Delivery status of a load broadcast (e.g. «حالة الإرسال AFT-12»); latest if no reference.',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'approve_prospects', 'description': "Approve today's pending daily prospects for contact (all, or those whose company name contains a text).",
@@ -249,6 +255,35 @@ def tool_broadcast_load(c, a):
             f"\nللإرسال اكتب: نفذ {token}")
 
 
+def tool_negotiate_owner(c, a):
+    from app import owner_negotiation
+    phone = owner_negotiation.digits(a.get('phone'))
+    if len(phone) < 11:
+        return 'رقم صاحب الحمولة غير واضح.'
+    if not _clean(a.get('origin')) or not _clean(a.get('destination')):
+        return 'اذكر مسار الحمولة (من وإلى) لأفتح المحادثة برسالة معتمدة.'
+    token = _pending(c, {'tool': 'negotiate_owner', 'phone': phone, 'origin': _clean(a.get('origin'), 60), 'destination': _clean(a.get('destination'), 60)})
+    return f"جاهز لبدء المحادثة مع صاحب الحمولة +{phone} بخصوص {_clean(a.get('origin'))} → {_clean(a.get('destination'))}. للبدء اكتب: نفذ {token}"
+
+
+def tool_approve_owner_load(c, a):
+    from app import owner_negotiation
+    if not _member().get('manager'):
+        return 'اعتماد الحمولة وتحديد العمولة للمدير فقط.'
+    return owner_negotiation.approve(a.get('file'), a.get('commission'), _member().get('name') or '')
+
+
+def tool_owner_load_status(c, a):
+    import json as _json
+    from app import owner_negotiation
+    owner_negotiation.init()
+    m = re.search(r'\d+', str(a.get('file') or ''))
+    row = c.execute('SELECT * FROM owner_negotiations WHERE id=%s', (int(m.group(0)),)).fetchone() if m else None
+    if not row:
+        return 'لا يوجد ملف بهذا الرقم.'
+    return f"ملف {row['id']} — الحالة: {row['status']}\n" + (owner_negotiation.summary(_json.loads(row['fields'] or '{}')) or 'لا تفاصيل بعد.')
+
+
 def tool_broadcast_status(c, a):
     from app import load_broadcast
     return load_broadcast.status_text(a.get('ref'))
@@ -358,6 +393,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'send_whatsapp':
         from app.manager_actions import send_message
         return send_message(c, {'to': action['to'], 'text': action['text']})
+    if action.get('tool') == 'negotiate_owner':
+        from app import owner_negotiation
+        return owner_negotiation.start(action, member.get('name') or '')
     if action.get('tool') == 'broadcast_load':
         from app import load_broadcast
         return load_broadcast.start(action, member.get('name') or '')
