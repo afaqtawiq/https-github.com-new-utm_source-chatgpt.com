@@ -205,3 +205,12 @@ from app import company_documents
 if company_documents.ENABLED:
  company_documents.init_storage()
 app.include_router(company_documents.router)
+
+# Direct Meta (Facebook Page + Instagram) connection and the owner-authorised daily poster.
+from app.meta_connect import router as meta_connect_router, init as init_meta_connect
+init_meta_connect()
+app.include_router(meta_connect_router)
+from app.daily_poster import router as daily_poster_router, init as init_daily_poster, register_worker as register_daily_poster_worker
+init_daily_poster()
+app.include_router(daily_poster_router)
+register_daily_poster_worker(app)
