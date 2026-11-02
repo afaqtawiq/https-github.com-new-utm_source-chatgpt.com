@@ -445,6 +445,13 @@ def _run_discovery_cycle(run_id=None):
         stats['daily_prospects'] = build_batch().get('added', 0)
     except Exception as exc:
         print('DAILY_PROSPECTS_ERROR', type(exc).__name__, str(exc)[:200], flush=True)
+    try:
+        import asyncio
+        from app import prospect_autopilot
+        if prospect_autopilot.enabled():
+            print('AUTO_OUTREACH', asyncio.run(prospect_autopilot.run()), flush=True)
+    except Exception as exc:
+        print('AUTO_OUTREACH_ERROR', type(exc).__name__, str(exc)[:200], flush=True)
     pilot_stats = {"pilot_target": 0, "pilot_active": 0, "pilot_activated": 0}
     stats.update(pilot_stats)
     update_run(run_id, 'فحص إعدادات البحث الخارجي وجمع النتائج المتاحة', result=stats)
