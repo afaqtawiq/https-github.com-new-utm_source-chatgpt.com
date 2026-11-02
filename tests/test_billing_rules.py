@@ -32,3 +32,8 @@ def test_export_salla_100_and_supplier_name_wins():
     items = by_party(br.compute({'kind': 'import', 'party': 'x', 'supplier': 'الياسمين', 'invoice_value': '500', 'duty': '200'}))
     assert items['الياسمين']['amount'] == D('200') + 300 + 1450 + 700 + D('75.00') + D('12.50')
     assert 'سلة الرحائب' not in items
+
+
+def test_negated_supplier_is_omran():
+    items = by_party(br.compute({'kind': 'import', 'party': 'سلة الرحائب', 'invoice_value': '20500', 'supplier': 'غير الياسمين'}))
+    assert 'عمران' in items and 'الياسمين' not in items
