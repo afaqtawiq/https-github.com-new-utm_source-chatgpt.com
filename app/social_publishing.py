@@ -335,6 +335,8 @@ def publication_panel(content_id, session):
         body += '<p>' + e(result['platform']) + ': ' + e(result['status'])
         if result.get('url'):
             body += ' <a target="_blank" rel="noopener" href="' + e(result['url']) + '">فتح الفيديو</a>'
+        if result.get('error'):
+            body += ' — سبب الفشل: ' + e(result['error'])
         body += '</p>'
     if session.get('role') == 'admin' and record['provider_post_id']:
         body += '<form method="post" action="/content-center/' + str(content_id) + '/sync-publication">' + hidden_csrf(session) + '<button class="btn">تحديث نتيجة النشر</button></form>'

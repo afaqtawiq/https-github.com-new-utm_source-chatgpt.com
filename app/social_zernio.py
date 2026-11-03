@@ -1,4 +1,5 @@
 """Zernio publishing contract; no credentials or remote responses are logged."""
+import json
 import datetime as dt
 import ipaddress
 import re
@@ -181,7 +182,11 @@ def publication_result(data, expected):
         allowed_hosts = {'youtube': {'www.youtube.com', 'youtube.com', 'youtu.be'}, 'tiktok': {'www.tiktok.com', 'tiktok.com'}}
         if u.scheme != 'https' or u.hostname not in allowed_hosts.get(p.get('platform'), set()) or u.username or u.password:
             url = ''
-        results.append({'platform': p.get('platform'), 'accountId': account_id, 'status': str(p.get('status') or 'unknown'), 'url': url})
+        error = p.get('errorMessage') or p.get('error') or p.get('failureReason') or ''
+        if isinstance(error, dict):
+            error = error.get('message') or json.dumps(error, ensure_ascii=False)
+        results.append({'platform': p.get('platform'), 'accountId': account_id, 'status': str(p.get('status') or 'unknown'), 'url': url,
+                        'error': str(error)[:300]})
     if actual != expected_pairs or len(platforms) != len(expected_pairs):
         raise PublishingError('حسابات نتيجة النشر لا تطابق الحسابات المعتمدة؛ يلزم فحص Zernio.')
     state = post.get('status')
