@@ -84,7 +84,8 @@ def topic_for(day):
 def caption(topic):
     lines = ['آفاق طويق | ' + topic['head'], topic['sub'], '']
     lines += ['✔️ ' + p for p in topic['points']]
-    lines += ['', '📲 واتساب: ' + WHATSAPP + ' | ' + WHATSAPP2, '🌐 https://' + APP_URL, LICENCES, '', topic['tags']]
+    lines += ['', '📲 واتساب: ' + WHATSAPP + ' | ' + WHATSAPP2, '🧮 احسب تكلفة شحنتك فورًا: ' + base_url() + '/price?src=social',
+              '🌐 https://' + APP_URL, LICENCES, '', topic['tags']]
     return '\n'.join(lines)
 
 
