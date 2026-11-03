@@ -167,7 +167,14 @@ class Task:
         req = route.request
         if self.stopped.is_set():
             return route.abort()
-        if req.is_navigation_request() and not allowed(req.url, self.domains, self.loopback):
+        # Only top-level page navigations are restricted; embedded frames of an allowed site (sign-in widgets,
+        # accessibility tools) must load or the site itself breaks.
+        top = False
+        try:
+            top = req.is_navigation_request() and req.frame.parent_frame is None
+        except Exception:
+            top = req.is_navigation_request()
+        if top and not allowed(req.url, self.domains, self.loopback):
             self.blocked.append(req.url)
             return route.abort('blockedbyclient')
         return route.continue_()
