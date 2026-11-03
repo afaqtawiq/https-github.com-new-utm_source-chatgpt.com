@@ -134,7 +134,7 @@ label{display:block;font-weight:600;margin:12px 0 6px}select,input{width:100%;pa
 @media(max-width:520px){.grid{grid-template-columns:1fr}.seg{grid-template-columns:1fr}}
 </style></head><body><div class="w">
 <div class="brand">آفاق طويق | AFAQ TWIQ</div><h1>احسب سعر شحنتك الآن</h1>
-<p class="sub">تخليص جمركي ونقل بري من الميناء إلى مستودعك — بالأسعار المعتمدة، بدون انتظار.</p>
+<p class="sub">تخليص جمركي في جميع المنافذ السعودية — البحرية والجوية والبرية — ونقل بري إلى مستودعك، بالأسعار المعتمدة وبدون انتظار.</p>
 <div class="card">
 <label>الخدمة</label><div class="seg" id="svc"><button data-v="both" class="on">تخليص + نقل</button><button data-v="clearance">تخليص فقط</button><button data-v="transport">نقل فقط</button></div>
 <div class="grid"><div><label for="n">عدد الحاويات في البوليصة</label><input id="n" type="number" min="1" max="200" value="1"></div>
@@ -142,7 +142,7 @@ label{display:block;font-weight:600;margin:12px 0 6px}select,input{width:100%;pa
 </div>
 <div class="card"><div class="row"><span>التخليص الجمركي</span><span id="c">—</span></div><div class="row"><span>النقل البري</span><span id="t">—</span></div>
 <div class="total" id="tot">—</div>
-<p class="note">الأسعار معتمدة وصالحة 15 يومًا، الشاحنة حتى 27 طن. لا تشمل الرسوم الجمركية وضريبة الاستيراد والرسوم الحكومية وأجور الموانئ والخط الملاحي؛ يتحملها المستورد حسب فواتيرها. للمسارات الأخرى يرسل الفريق عرضًا خاصًا.</p></div>
+<p class="note">الأسعار معتمدة وصالحة 15 يومًا، الشاحنة حتى 27 طن. لا تشمل الرسوم الجمركية وضريبة الاستيراد والرسوم الحكومية وأجور الموانئ والخط الملاحي؛ يتحملها المستورد حسب فواتيرها. أجور التخليص نفسها في جميع المنافذ؛ وللنقل من منافذ ومسارات أخرى (الدمام، المنافذ البرية، المطارات…) يرسل الفريق عرضًا خاصًا.</p></div>
 <div class="card"><label for="co">اسم الشركة</label><input id="co" autocomplete="organization" placeholder="مثال: مؤسسة النخبة للتجارة">
 <label for="ph">رقم الجوال (واتساب)</label><input id="ph" inputmode="tel" autocomplete="tel" placeholder="05xxxxxxxx">
 <input class="hp" id="website" tabindex="-1" autocomplete="off">
