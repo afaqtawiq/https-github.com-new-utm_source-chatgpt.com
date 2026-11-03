@@ -65,6 +65,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'event': {'type': 'string', 'enum': ['delivered', 'driver_returned', 'returned']}, 'note': {'type': 'string'}, 'date': {'type': 'string'}}, 'required': ['container', 'event']}},
     {'name': 'containers_status', 'description': 'Open containers not yet returned, with days left / overdue and cost so far. Optional filter (container or customer).',
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
+    {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
+     'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
     {'name': 'whatsapp_templates', 'description': 'Approval status in Meta of the WhatsApp templates (owner inquiry, driver offer, marketing). e.g. «حالة القوالب».',
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'approve_owner_load', 'description': 'Manager approves a collected load file and sets OUR commission; the load is then offered to all drivers at owner price minus commission. e.g. «اعتمد الحمولة 4 عمولة 300».',
@@ -339,6 +341,14 @@ def tool_container_update(c, a):
 def tool_containers_status(c, a):
     from app import container_returns
     return container_returns.status_text(a.get('filter') or '')
+
+
+def tool_party_statement(c, a):
+    from app import statement_import
+    m = re.search(r'(\d{4})-(\d{1,2})', str(a.get('month') or ''))
+    if not m:
+        return 'اذكر الشهر، مثل 2026-10.'
+    return statement_import.statement_text(a.get('party') or '', f'{m.group(1)}-{int(m.group(2)):02d}')
 
 
 def tool_whatsapp_templates(c, a):
