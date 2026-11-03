@@ -109,7 +109,8 @@ async def lead(request: Request):
 def page(src: str = ''):
     p = prices()
     data = json.dumps({'tiers': p['tiers'], 'routes': p['routes']}, ensure_ascii=False)
-    options = ''.join(f'<option value="{html.escape(k)}">{html.escape(k)}</option>' for k in p['routes'])
+    options = ''.join(f'<option value="{html.escape(k)}"{" selected" if k == "من ميناء جدة الإسلامي إلى الرياض" else ""}>{html.escape(k)}</option>'
+                      for k in p['routes'])
     source = html.escape(re.sub(r'[^\w-]', '', src)[:40])
     return HTMLResponse(PAGE.replace('__ROUTES__', options).replace('__DATA__', data).replace('__SRC__', source),
                         headers={'Cache-Control': 'no-store'})
@@ -129,7 +130,7 @@ label{display:block;font-weight:600;margin:12px 0 6px}select,input{width:100%;pa
 .seg button.on{background:var(--teal);border-color:var(--teal);color:#032;font-weight:800}
 .total{font-size:34px;font-weight:800;color:var(--gold);margin:6px 0}.row{display:flex;justify-content:space-between;color:var(--muted);margin:4px 0}
 .note{font-size:13px;color:var(--muted);line-height:1.8}.cta{width:100%;margin-top:14px;padding:14px;border:0;border-radius:14px;background:var(--gold);color:#231800;font:inherit;font-weight:800;font-size:17px;cursor:pointer}
-.err{color:#ffb4a8;margin-top:8px;min-height:20px}.hp{position:absolute;left:-9999px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.err{color:#ffb4a8;margin-top:8px;min-height:20px}.hp{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}html,body{overflow-x:hidden}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 @media(max-width:520px){.grid{grid-template-columns:1fr}.seg{grid-template-columns:1fr}}
 </style></head><body><div class="w">
 <div class="brand">آفاق طويق | AFAQ TWIQ</div><h1>احسب سعر شحنتك الآن</h1>
