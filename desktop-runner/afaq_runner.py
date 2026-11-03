@@ -394,7 +394,7 @@ def main():
     from playwright.sync_api import sync_playwright
     print('جهاز آفاق طويق يعمل. للإيقاف الكامل: Ctrl+C', flush=True)
     with sync_playwright() as pw:
-        kwargs = dict(user_data_dir=str(PROFILE), headless=args.headless, accept_downloads=True, locale='ar-SA')
+        kwargs = dict(user_data_dir=str(PROFILE), headless=args.headless, accept_downloads=True, locale='ar-SA', chromium_sandbox=True)
         try:
             context = pw.chromium.launch_persistent_context(channel='chrome', **kwargs)
         except Exception:
