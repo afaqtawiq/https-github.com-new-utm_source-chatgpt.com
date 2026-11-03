@@ -344,18 +344,18 @@ class Task:
             page.bring_to_front()
         self.keep.add(page)
         asked = False
-        end = time.time() + 6 * 60  # time for you to sign in yourself in this window
+        end = time.time() + 10 * 60  # time for you to sign in yourself in this window
         while time.time() < end:
             self.wait(page, 3)
             if '/login' in page.url:
                 if not asked:
-                    self.step('فسح يطلب تسجيل الدخول: سجّل دخولك بنفسك في نافذة الجهاز (لن أكتب كلمة المرور أو الرمز). أنتظرك 6 دقائق.', False)
+                    self.step('فسح يطلب تسجيل الدخول: سجّل دخولك بنفسك في نافذة الجهاز (لن أكتب كلمة المرور أو الرمز). أنتظرك 10 دقائق.', False)
                     asked = True
                 continue
             if page.get_by_text(label, exact=True).count():
                 break
         else:
-            raise ValueError('لم يكتمل تسجيل الدخول في فسح خلال 6 دقائق')
+            raise ValueError('لم يكتمل تسجيل الدخول في فسح خلال 10 دقائق')
         try:
             decline = page.get_by_role('button', name='رفض', exact=True)
             if decline.count() and decline.first.is_visible():
@@ -409,11 +409,18 @@ class Task:
             if box is not None:
                 break
         if box is None:
-            raise ValueError('لم أجد خانة تصفية اسم المستورد/المصدر')
+            # The export list has no name filter: read the pages and filter by name here instead.
+            try:
+                page.keyboard.press('Escape')
+            except Exception:
+                pass
+            self.step('لا توجد خانة تصفية بالاسم في هذه القائمة؛ سأقرأ الصفحات وأصفّي بالاسم')
+            return False
         box.fill(name)
         page.get_by_role('button', name='تطبيق الاختيارات').first.click(timeout=8000)
         self.wait(page, 5)
         self.step('صفّيت القائمة على: ' + name, page=page)
+        return True
 
     def next_page(self, page, number):
         before = (self.list_rows(page) or [[None]])[0][0]
@@ -449,9 +456,11 @@ class Task:
     def do_fasah_declarations(self):
         which = self.params.get('which', 'import')
         page = self.fasah_list(which)
-        if self.params.get('party'):
-            self.filter_party(page, self.params['party'], which)
-        rows = self.collect(page, self.params.get('since'), self.params.get('pages', 3))
+        party = self.params.get('party')
+        filtered = self.filter_party(page, party, which) if party else True
+        rows = self.collect(page, self.params.get('since'), self.params.get('pages', 3) if filtered else 20)
+        if party and not filtered:
+            rows = [r for r in rows if party in r[3]]
         path = self.dir / f'fasah-{which}.csv'
         with open(path, 'w', newline='', encoding='utf-8-sig') as f:
             w = csv.writer(f)
