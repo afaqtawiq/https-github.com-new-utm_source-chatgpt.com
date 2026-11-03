@@ -59,6 +59,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'driver_phone': {'type': 'string'}}, 'required': ['ref']}},
     {'name': 'load_acceptances', 'description': 'Which drivers accepted a broadcast load (e.g. «مين وافق على AFT-7»).',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}, 'required': ['ref']}},
+    {'name': 'track_container', 'description': 'Register or update a container to follow until it is RETURNED EMPTY: last free day (free_until, YYYY-MM-DD), delivery date, return place (depot/yard), customer and driver phones, bill, confirmed daily cost. test=true for a trial container. e.g. «سجل الحاوية MSKU1234567 العميل الحياة آخر يوم مجاني 10/11 الإرجاع ساحة جدة سائق 0551234567».',
+     'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'customer': {'type': 'string'}, 'customer_phone': {'type': 'string'}, 'driver_phone': {'type': 'string'}, 'bill': {'type': 'string'}, 'free_until': {'type': 'string'}, 'delivered_on': {'type': 'string'}, 'return_place': {'type': 'string'}, 'daily_cost': {'type': 'string'}, 'test': {'type': 'boolean'}}, 'required': ['container']}},
+    {'name': 'container_update', 'description': 'Container status: delivered (to customer), driver_returned (driver SAYS it was returned — stays open), returned (ONLY with proof: EIR/receipt number or who confirmed, put it in note).',
+     'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'event': {'type': 'string', 'enum': ['delivered', 'driver_returned', 'returned']}, 'note': {'type': 'string'}, 'date': {'type': 'string'}}, 'required': ['container', 'event']}},
+    {'name': 'containers_status', 'description': 'Open containers not yet returned, with days left / overdue and cost so far. Optional filter (container or customer).',
+     'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'whatsapp_templates', 'description': 'Approval status in Meta of the WhatsApp templates (owner inquiry, driver offer, marketing). e.g. «حالة القوالب».',
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'approve_owner_load', 'description': 'Manager approves a collected load file and sets OUR commission; the load is then offered to all drivers at owner price minus commission. e.g. «اعتمد الحمولة 4 عمولة 300».',
@@ -318,6 +324,21 @@ def tool_load_acceptances(c, a):
     if not rows:
         return f'لم يوافق أي سائق على AFT-{m.group(1)} بعد.'
     return f'الموافقون على AFT-{m.group(1)}:\n' + '\n'.join(f"• {r.get('driver_name') or 'سائق'} +{r['phone']}" + (f" — {r['vehicle_type']}" if r.get('vehicle_type') else '') for r in rows)
+
+
+def tool_track_container(c, a):
+    from app import container_returns
+    return container_returns.track(a, _member().get('name') or '')
+
+
+def tool_container_update(c, a):
+    from app import container_returns
+    return container_returns.update(a, _member().get('name') or '')
+
+
+def tool_containers_status(c, a):
+    from app import container_returns
+    return container_returns.status_text(a.get('filter') or '')
 
 
 def tool_whatsapp_templates(c, a):
