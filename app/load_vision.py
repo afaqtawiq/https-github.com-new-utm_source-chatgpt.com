@@ -17,6 +17,7 @@ from urllib.parse import quote
 import httpx
 
 from app import whatsapp_admin as admin
+from app.storage import db
 
 IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
 MAX_BYTES = 5 * 1024 * 1024
@@ -384,6 +385,29 @@ async def handle_pdf(c, payload, sender, index):
     return audit(c, payload, sender, reply, command)
 
 
+async def handle_video(c, payload, sender, index):
+    from app import transport_desk, video_publish
+    from app.manager_actions import media_bytes
+    from app.staff_intake import audit
+    caption = _text((payload.get('message') or {}).get('text'), 2000)
+    try:
+        got = await media_bytes(payload, index, video_publish.VIDEO_TYPES, 60 * 1024 * 1024)
+        if not got:
+            raise ValueError('تعذر تنزيل الفيديو؛ أعد إرساله.')
+        vid = video_publish.save(got[0], got[1], caption, sender)
+        transport_desk.init()
+        token = transport_desk.pending(c, sender, (payload.get('conversation') or {}).get('id'), {'tool': 'publish_video', 'video_id': vid}, 120)
+        with db() as conn:
+            text = conn.execute('SELECT caption FROM team_videos WHERE id=%s', (vid,)).fetchone()['caption']
+        reply = ('🎬 وصلني الفيديو #' + str(vid) + ' وجهزته للنشر على فيسبوك وإنستغرام (ريلز) ويوتيوب وتيك توك.\n\nالنص:\n' + text
+                 + '\n\nللنشر اكتب: نفذ ' + token + '\n(لتغيير النص أعد إرسال الفيديو مع النص الذي تريده.)')
+    except ValueError as error:
+        reply = str(error)
+    except (httpx.HTTPError, KeyError, TypeError):
+        reply = 'تعذر استلام الفيديو الآن؛ أعد إرساله بعد قليل.'
+    return audit(c, payload, sender, reply, '[فيديو]' + ('\n' + caption if caption else ''))
+
+
 _original_admin_reply = admin.admin_reply
 
 
@@ -395,6 +419,11 @@ async def admin_reply(c, payload, sender):
     if index is not None and admin.audio_index(message) is None:
         admin.ensure_admin(c)
         return await handle_image(c, payload, sender, index)
+    from app import video_publish
+    vidx = video_publish.video_index(message)
+    if vidx is not None:
+        admin.ensure_admin(c)
+        return await handle_video(c, payload, sender, vidx)
     pdf = pdf_index(message)
     if pdf is not None and admin.audio_index(message) is None:
         admin.ensure_admin(c)

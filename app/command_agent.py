@@ -468,6 +468,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'negotiate_owner':
         from app import owner_negotiation
         return owner_negotiation.start(action, member.get('name') or '')
+    if action.get('tool') == 'publish_video':
+        from app import video_publish
+        return video_publish.publish(action['video_id'], member.get('name') or '')
     if action.get('tool') == 'assign_driver':
         from app import transport_desk
         return transport_desk.assign(action)

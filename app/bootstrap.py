@@ -234,3 +234,6 @@ from app.container_returns import router as container_returns_router, register_w
 init_container_returns()
 register_container_returns(app)
 app.include_router(container_returns_router)
+from app.video_publish import router as video_publish_router, init as init_video_publish
+init_video_publish()
+app.include_router(video_publish_router)
