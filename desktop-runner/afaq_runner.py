@@ -358,23 +358,35 @@ class Task:
             raise ValueError('لم يكتمل تسجيل الدخول في فسح خلال 6 دقائق')
         self.step('فسح مفتوح بعد تسجيل الدخول', page=page)
         opened = False
-        for attempt in (lambda: page.get_by_role('link', name=label, exact=True).first,
-                        lambda: page.locator('a', has_text=label).first,
-                        lambda: page.get_by_text('البيان الجمركي و الفسح').first,
-                        lambda: page.get_by_role('link', name=label, exact=True).first,
-                        lambda: page.get_by_text(label, exact=True).last):
+        # Decline optional cookies (privacy-preserving choice) so the banner does not cover the menu.
+        try:
+            decline = page.get_by_role('button', name='رفض', exact=True)
+            if decline.count() and decline.first.is_visible():
+                decline.first.click(timeout=5000)
+        except Exception:
+            pass
+        section = 'البيان الجمركي و الفسح'
+        for _ in range(8):  # the home page keeps loading for a while after sign-in
+            self.poll()
             try:
-                target = attempt()
-                if target.count():
-                    target.click(timeout=8000, force=True)
-                    self.wait(page, 4)
-                    if page.get_by_text('رقم البيان').count() and page.get_by_text('إنشاء بيان جديد').count():
-                        opened = True
-                        break
+                link = page.get_by_role('link', name=label, exact=True)
+                if not (link.count() and link.first.is_visible()):
+                    menu = page.get_by_text(section, exact=True)
+                    if menu.count():
+                        menu.first.click(timeout=8000)
+                        self.wait(page, 2)
+                link = page.get_by_role('link', name=label, exact=True)
+                if link.count() and link.first.is_visible():
+                    link.first.click(timeout=8000)
+                    self.wait(page, 5)
+                if page.get_by_text('إنشاء بيان جديد').count() and page.get_by_text('رقم البيان').count():
+                    opened = True
+                    break
             except Stop:
                 raise
             except Exception:
-                continue
+                pass
+            self.wait(page, 4)
         if not opened:
             raise ValueError('لم أجد قائمة «' + label + '» في فسح بعد الدخول')
         self.wait(page, 3)
