@@ -56,7 +56,8 @@ def caption_for(text):
     text = (text or '').strip()
     words = len(text.split())
     body = text if words >= 4 else DEFAULT
-    return body + ('' if '0507665873' in body else FOOTER)
+    from app.daily_poster import base_url
+    return body + ('' if '0507665873' in body else FOOTER + '\n🧮 احسب تكلفة شحنتك: ' + base_url() + '/price?src=video')
 
 
 def save(data, mime, text, actor):

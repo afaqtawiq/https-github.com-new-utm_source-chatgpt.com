@@ -125,3 +125,6 @@ jobs:
       - run: python tests/customer_care_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python tests/growth_acceptance.py
+        env:
+          AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
