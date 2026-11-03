@@ -325,17 +325,22 @@ class Task:
 
     def do_fasah_declarations(self):
         which = self.params.get('which', 'import')
-        page = self.open(FASAH)
-        for i in range(60):  # up to 5 minutes for you to sign in yourself in this window
-            if '/login' not in page.url:
-                break
-            if i == 0:
-                self.step('فسح يطلب تسجيل الدخول: سجّل دخولك بنفسك في نافذة الجهاز (لن أكتب كلمة المرور أو الرمز)', False)
-            self.wait(page, 5)
-        if '/login' in page.url:
-            raise ValueError('لم يتم تسجيل الدخول خلال 5 دقائق')
-        self.wait(page, 5)
         label = 'بيان التصدير' if which == 'export' else 'بيان الاستيراد'
+        page = self.open(FASAH)
+        asked = False
+        end = time.time() + 6 * 60  # time for you to sign in yourself in this window
+        while time.time() < end:
+            self.wait(page, 3)
+            if '/login' in page.url:
+                if not asked:
+                    self.step('فسح يطلب تسجيل الدخول: سجّل دخولك بنفسك في نافذة الجهاز (لن أكتب كلمة المرور أو الرمز). أنتظرك 6 دقائق.', False)
+                    asked = True
+                continue
+            if page.get_by_text(label, exact=True).count():
+                break
+        else:
+            raise ValueError('لم يكتمل تسجيل الدخول في فسح خلال 6 دقائق')
+        self.step('فسح مفتوح بعد تسجيل الدخول', page=page)
         page.get_by_text(label, exact=True).first.click()
         self.wait(page, 6)
         self.step('فتحت قائمة ' + label, page=page)
