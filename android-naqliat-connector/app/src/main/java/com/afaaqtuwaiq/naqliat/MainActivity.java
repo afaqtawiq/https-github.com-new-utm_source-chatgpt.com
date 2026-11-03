@@ -2,67 +2,87 @@ package com.afaaqtuwaiq.naqliat;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
+import android.util.Base64;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
-import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.TextRecognition;
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 import org.json.JSONObject;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+/** Sends a Naqliat load screenshot to the Afaq system; the server reads the Arabic text with Claude. */
 public class MainActivity extends Activity {
     private EditText server;
     private EditText token;
+    private TextView status;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL); box.setPadding(36,48,36,36); box.setGravity(Gravity.RIGHT);
         TextView title = new TextView(this); title.setText("موصل نقليات - آفاق طويق"); title.setTextSize(25); box.addView(title);
-        TextView note = new TextView(this); note.setText("يقرأ التطبيق بيانات الحمولات الظاهرة داخل نقليات فقط. لا يقرأ كلمات المرور أو رموز التحقق."); note.setTextSize(16); note.setPadding(0,24,0,24); box.addView(note);
-        server = new EditText(this); server.setHint("رابط نظام آفاق طويق"); server.setInputType(InputType.TYPE_TEXT_VARIATION_URI); server.setText(getPreferences().getString("server", "https://gulf-logistics-ai-v7-production.up.railway.app")); box.addView(server);
-        token = new EditText(this); token.setHint("رمز ربط الجهاز"); token.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); token.setText(getPreferences().getString("token", "")); box.addView(token);
-        Button save = new Button(this); save.setText("حفظ إعدادات الربط"); save.setOnClickListener(v -> { getPreferences().edit().putString("server", server.getText().toString().trim()).putString("token", token.getText().toString().trim()).apply(); Toast.makeText(this,"تم الحفظ",Toast.LENGTH_SHORT).show(); }); box.addView(save);
-        Button ocr = new Button(this); ocr.setText("اختيار لقطة شاشة واستخراج الحمولة"); ocr.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), 42)); box.addView(ocr);
-        TextView steps = new TextView(this); steps.setText("لا يحتاج التطبيق إلى صلاحية إمكانية الوصول. أدخل بيانات الحمولة أو استخدم مشاركة تفاصيل الحمولة إلى النظام عند توفرها."); steps.setTextSize(16); steps.setPadding(0,28,0,0); box.addView(steps);
+        TextView note = new TextView(this); note.setText("صوّر شاشة تفاصيل الحمولة في نقليات، ثم اضغط مشاركة واختر «موصل نقليات»، أو اختر الصورة من الزر أدناه. تصلك الحمولة في واتساب مع رمز التفاوض."); note.setTextSize(16); note.setPadding(0,24,0,24); box.addView(note);
+        server = new EditText(this); server.setHint("رابط نظام آفاق طويق"); server.setInputType(InputType.TYPE_TEXT_VARIATION_URI); server.setText(prefs().getString("server", "https://gulf-logistics-ai-v7-production.up.railway.app")); box.addView(server);
+        token = new EditText(this); token.setHint("رمز ربط الجهاز"); token.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); token.setText(prefs().getString("token", "")); box.addView(token);
+        Button save = new Button(this); save.setText("حفظ إعدادات الربط"); save.setOnClickListener(v -> { prefs().edit().putString("server", server.getText().toString().trim()).putString("token", token.getText().toString().trim()).apply(); Toast.makeText(this,"تم الحفظ",Toast.LENGTH_SHORT).show(); }); box.addView(save);
+        Button pick = new Button(this); pick.setText("اختيار لقطة شاشة الحمولة وإرسالها"); pick.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), 42)); box.addView(pick);
+        status = new TextView(this); status.setTextSize(17); status.setPadding(0,28,0,0); box.addView(status);
         setContentView(box);
+        handleShare(getIntent());
     }
-    private android.content.SharedPreferences getPreferences() { return getSharedPreferences("connector", MODE_PRIVATE); }
+
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); handleShare(intent); }
+
+    private void handleShare(Intent intent) {
+        if (intent != null && Intent.ACTION_SEND.equals(intent.getAction())) {
+            Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (uri != null) send(uri);
+        }
+    }
+
+    private android.content.SharedPreferences prefs() { return getSharedPreferences("connector", MODE_PRIVATE); }
+
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data); if(requestCode!=42 || resultCode!=RESULT_OK || data==null) return;
-        try { Uri uri=data.getData(); InputImage image=InputImage.fromFilePath(this,uri); TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(image).addOnSuccessListener(r -> sendOcr(r.getText())).addOnFailureListener(e -> Toast.makeText(this,"تعذر قراءة الصورة، جرّب لقطة أوضح",Toast.LENGTH_LONG).show()); } catch(Exception e){ Toast.makeText(this,"تعذر فتح الصورة",Toast.LENGTH_SHORT).show(); }
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 42 && resultCode == RESULT_OK && data != null && data.getData() != null) send(data.getData());
     }
-    private void sendOcr(String raw) {
+
+    private void show(String text) { runOnUiThread(() -> { status.setText(text); Toast.makeText(this, text, Toast.LENGTH_LONG).show(); }); }
+
+    private void send(Uri uri) {
+        show("جارٍ إرسال الصورة وقراءتها…");
         new Thread(() -> { try {
-            String base=getPreferences().getString("server","").replaceAll("/+$",""); String key=getPreferences().getString("token","");
-            if(base.isEmpty()||key.isEmpty()){ runOnUiThread(() -> Toast.makeText(this,"أكمل إعدادات الربط",Toast.LENGTH_LONG).show()); return; }
-            String text=raw.replace('\u00a0',' ').replaceAll("\\s+"," ").trim();
-            Matcher route=Pattern.compile("(?:مطلوب\\s+من|من)\\s*:?\\s*(.+?)\\s+(?:إلى|الى|إلي|الي)\\s*:?\\s*(.+?)(?=\\s+(?:الحمولة|نوع الشاحنة|الوصف|[0-9٠-٩]+\\s*طن)|$)").matcher(text);
-            boolean routeFound=route.find();
-            Matcher weight=Pattern.compile("([0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)\\s*(?:\\+\\s*)?طن").matcher(text);
-            Matcher phone=Pattern.compile("(?:\\+|00)?966\\s*5(?:[\\s-]*\\d){8}").matcher(text);
-            Matcher vehicle=Pattern.compile("نوع الشاحنة\\s*:?\\s*(.+?)(?=\\s+(?:حوالي|الدفع|التنزيل|$))").matcher(text);
-            JSONObject json=new JSONObject(); json.put("origin",routeFound?route.group(1).trim():"غير محدد"); json.put("destination",routeFound?route.group(2).trim():"غير محدد");
-            if(weight.find()) json.put("weight_tons",Double.parseDouble(arabicDigits(weight.group(1)).replace(',','.')));
-            if(phone.find()) json.put("owner_phone",phone.group());
-            if(vehicle.find()) json.put("vehicle_type",vehicle.group(1).trim());
-            json.put("description",raw); json.put("raw_text",raw); json.put("capture_method","android_ocr");
-            HttpURLConnection c=(HttpURLConnection)new URL(base+"/api/v7/naqliat/loads").openConnection(); c.setRequestMethod("POST"); c.setConnectTimeout(15000); c.setReadTimeout(15000); c.setDoOutput(true); c.setRequestProperty("Content-Type","application/json; charset=utf-8"); c.setRequestProperty("Authorization","Bearer "+key);
-            try(OutputStream os=c.getOutputStream()){os.write(json.toString().getBytes(StandardCharsets.UTF_8));}
-            int code=c.getResponseCode(); c.disconnect(); runOnUiThread(() -> Toast.makeText(this,code>=200&&code<300?(routeFound?"تم إرسال الحمولة إلى النظام":"تم الإرسال؛ راجع المنشأ والوجهة في النظام"):"تعذر حفظ الحمولة: "+code,Toast.LENGTH_LONG).show());
-        } catch(Exception e){ runOnUiThread(() -> Toast.makeText(this,"تعذر الاتصال بالخادم",Toast.LENGTH_LONG).show()); } }).start();
+            String base = prefs().getString("server","").replaceAll("/+$",""); String key = prefs().getString("token","");
+            if (base.isEmpty() || key.isEmpty()) { show("أكمل إعدادات الربط أولًا"); return; }
+            Bitmap bitmap; try (InputStream in = getContentResolver().openInputStream(uri)) { bitmap = BitmapFactory.decodeStream(in); }
+            if (bitmap == null) { show("تعذر فتح الصورة"); return; }
+            int longest = Math.max(bitmap.getWidth(), bitmap.getHeight());
+            if (longest > 1800) { float s = 1800f / longest; bitmap = Bitmap.createScaledBitmap(bitmap, Math.round(bitmap.getWidth()*s), Math.round(bitmap.getHeight()*s), true); }
+            ByteArrayOutputStream jpg = new ByteArrayOutputStream(); bitmap.compress(Bitmap.CompressFormat.JPEG, 85, jpg);
+            JSONObject json = new JSONObject(); json.put("image_base64", Base64.encodeToString(jpg.toByteArray(), Base64.NO_WRAP)); json.put("mime", "image/jpeg");
+            HttpURLConnection c = (HttpURLConnection) new URL(base + "/api/v7/naqliat/screenshot").openConnection();
+            c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(90000); c.setDoOutput(true);
+            c.setRequestProperty("Content-Type","application/json; charset=utf-8"); c.setRequestProperty("Authorization","Bearer " + key);
+            try (OutputStream os = c.getOutputStream()) { os.write(json.toString().getBytes(StandardCharsets.UTF_8)); }
+            int code = c.getResponseCode();
+            InputStream body = code < 400 ? c.getInputStream() : c.getErrorStream();
+            String text = ""; if (body != null) { ByteArrayOutputStream b = new ByteArrayOutputStream(); byte[] buf = new byte[4096]; int n; while ((n = body.read(buf)) > 0) b.write(buf, 0, n); text = b.toString("UTF-8"); }
+            c.disconnect();
+            String message = code == 401 ? "رمز الربط غير صحيح" : "تعذر الإرسال: " + code;
+            try { JSONObject r = new JSONObject(text); if (r.has("message")) message = r.getString("message"); } catch (Exception ignored) {}
+            show(message);
+        } catch (Exception e) { show("تعذر الاتصال بنظام آفاق طويق"); } }).start();
     }
-    private String arabicDigits(String value){ return value.replace('٠','0').replace('١','1').replace('٢','2').replace('٣','3').replace('٤','4').replace('٥','5').replace('٦','6').replace('٧','7').replace('٨','8').replace('٩','9'); }
 }
