@@ -1,9 +1,5 @@
 plugins { id("com.android.application") }
 
-dependencies {
-    implementation("com.google.mlkit:text-recognition:16.0.1")
-}
-
 android {
     namespace = "com.afaaqtuwaiq.naqliat"
     compileSdk = 35
@@ -11,8 +7,8 @@ android {
         applicationId = "com.afaaqtuwaiq.naqliat"
         minSdk = 23
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.3.0"
     }
     signingConfigs {
         getByName("debug") {

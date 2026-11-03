@@ -248,6 +248,44 @@ def ingest_naqliat_load(payload: NaqliatLoad, request: Request, background_tasks
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None}
 
+class NaqliatScreenshot(BaseModel):
+    image_base64: str = Field(min_length=100, max_length=8_000_000)
+    mime: str = Field(default="image/jpeg", max_length=40)
+
+
+@router.post("/api/v7/naqliat/screenshot")
+async def ingest_naqliat_screenshot(payload: NaqliatScreenshot, request: Request, background_tasks: BackgroundTasks):
+    """Owner request (Nov 2026): the phone sends the load screenshot itself; Claude reads the Arabic text."""
+    import base64 as _b64
+    from starlette.concurrency import run_in_threadpool
+    expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not expected or not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(401, "Connector authorization failed")
+    mime = payload.mime if payload.mime in ("image/jpeg", "image/png", "image/webp") else "image/jpeg"
+    try:
+        data = _b64.b64decode(payload.image_base64, validate=False)
+    except ValueError:
+        raise HTTPException(400, "Invalid image")
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Image too large")
+    from app import load_vision
+    try:
+        fields = await load_vision.extract(data, mime)
+    except Exception as exc:
+        return {"ok": False, "message": "تعذر قراءة الصورة: " + str(exc)[:120]}
+    if not load_vision.verified_single_load(fields):
+        return {"ok": False, "message": "الصورة ليست شاشة تفاصيل حمولة واضحة؛ صوّر شاشة تفاصيل الحمولة."}
+    saved = await run_in_threadpool(load_vision.save_load, fields)
+    if not saved:
+        return {"ok": False, "message": "لم أقرأ مدينة التحميل والتنزيل."}
+    from app.transport_desk import notify_capture
+    background_tasks.add_task(notify_capture, saved[0])
+    return {"ok": True, "id": saved[0], "created": saved[1], "origin": fields.get("origin"), "destination": fields.get("destination"),
+            "owner_phone": fields.get("owner_phone"),
+            "message": "تم: " + str(fields.get("origin")) + " ← " + str(fields.get("destination")) + " — أرسلتها لك في واتساب"}
+
+
 @router.post("/api/v7/naqliat/ocr")
 def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: BackgroundTasks):
     expected = os.getenv("NAQLIAT_CONNECTOR_TOKEN", "")
