@@ -77,7 +77,9 @@ load = response.json()
 assert load['origin'] == 'الرياض' and load['destination'] == 'جدة' and load['owner_phone'] == '+966500000001'
 shipment = one('SELECT * FROM shipments WHERE reference=?', ('NQ-' + str(load['id']),))
 sid = shipment['id']
-assert one('SELECT status FROM freight_negotiations WHERE shipment_id=?', (sid,))['status'] == 'contact_blocked'
+# Owner policy (Nov 2026): a captured load is offered to the manager; the owner is never contacted automatically.
+negotiation_row = one('SELECT status,provider_message_id FROM freight_negotiations WHERE shipment_id=?', (sid,))
+assert negotiation_row['status'] == 'ready_to_contact' and negotiation_row['provider_message_id'] is None
 repeat = connector.post('/api/v7/naqliat/ocr', json={'raw_text': raw}, headers={'Authorization': 'Bearer local-ci-connector'})
 assert repeat.status_code == 200 and not repeat.json()['created']
 # Recover the existing capture from its saved source, without re-upload,

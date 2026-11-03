@@ -67,8 +67,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
-    {'name': 'runner_task', 'description': 'Create a task for the WORK COMPUTER (browser on the office PC): download_test (first trial), read_page (url), download_file (url), fasah_declarations (which: import/export — read the FASAH list, save CSV). Read-only; allowed sites only.',
-     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fasah_declarations']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}}, 'required': ['kind']}},
+    {'name': 'runner_task', 'description': 'Manager only. Create a task for the WORK COMPUTER browser: download_test (first trial), read_page (url), download_file (url), fill_form (url + fields [{label,value}] + optional submit_label; submitting waits for the manager approval), fasah_declarations (which: import/export — read-only list as CSV). Allowed sites only; never passwords/OTP.',
+     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
+    {'name': 'runner_deny', 'description': 'Manager refuses a work-computer approval request («ارفض الطلب 4»).',
+     'input_schema': {'type': 'object', 'properties': {'approval': {'type': 'string'}}, 'required': ['approval']}},
     {'name': 'runner_status', 'description': 'Steps, result and files of a work-computer task (latest if no id).',
      'input_schema': {'type': 'object', 'properties': {'task': {'type': 'string'}}}},
     {'name': 'runner_stop', 'description': 'Stop a work-computer task now («أوقف المهمة 3»).',
@@ -359,17 +361,32 @@ def tool_party_statement(c, a):
 
 def tool_runner_task(c, a):
     from app import agent_runner
-    return agent_runner.create_task(a.get('kind'), {'url': a.get('url'), 'which': a.get('which')}, _member().get('name') or '')[1]
+    if not _member().get('manager'):
+        return 'مهام جهاز العمل للمدير فقط.'
+    return agent_runner.create_task(a.get('kind'), {'url': a.get('url'), 'which': a.get('which'), 'fields': a.get('fields'),
+                                                    'submit_label': a.get('submit_label')}, _member().get('name') or '')[1]
+
+
+def tool_runner_deny(c, a):
+    from app import agent_runner
+    if not _member().get('manager'):
+        return 'للمدير فقط.'
+    m = re.search(r'\d+', str(a.get('approval') or ''))
+    return agent_runner.decide(int(m.group(0)), False, _member().get('name') or 'المدير') if m else 'اذكر رقم الطلب.'
 
 
 def tool_runner_status(c, a):
     from app import agent_runner
+    if not _member().get('manager'):
+        return 'تفاصيل مهام جهاز العمل للمدير فقط.'
     m = re.search(r'\d+', str(a.get('task') or ''))
     return agent_runner.task_text(int(m.group(0)) if m else None)
 
 
 def tool_runner_stop(c, a):
     from app import agent_runner
+    if not _member():
+        return 'غير مخول.'
     m = re.search(r'\d+', str(a.get('task') or ''))
     return agent_runner.stop_task(int(m.group(0))) if m else 'اذكر رقم المهمة.'
 
@@ -491,6 +508,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'negotiate_owner':
         from app import owner_negotiation
         return owner_negotiation.start(action, member.get('name') or '')
+    if action.get('tool') == 'runner_approve':
+        from app import agent_runner
+        return agent_runner.decide(action['approval_id'], True, member.get('name') or 'المدير')
     if action.get('tool') == 'publish_video':
         from app import video_publish
         return video_publish.publish(action['video_id'], member.get('name') or '')

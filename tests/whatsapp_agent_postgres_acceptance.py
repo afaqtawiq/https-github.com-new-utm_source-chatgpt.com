@@ -890,16 +890,17 @@ def verify_budget_notices(factory):
         pass
     assert store.get_settings(account,db_factory=factory)['mode']=='owner_pilot'
 
-    # The existing fully accepted routine fixture retains its 50-call cap; this
-    # owner-pilot-only notice must never be introduced into routine handling.
+    # The fully accepted routine fixture keeps its daily cap (owner raised it to 400 for all-customer
+    # replies, Nov 2026); this owner-pilot-only notice must never be introduced into routine handling.
     account = 'pdf-root-history'
     assert store.get_settings(account,db_factory=factory)['mode']=='routine'
-    exhaust(account,limit=50)
+    cap = store.DAILY_MODEL_LIMITS['routine']
+    exhaust(account,limit=cap)
     routine = incoming(account,'routine-cap-reached')
     assert not reserve(routine)
     assert row(routine)['status']=='blocked' and row(routine)['model_started_at'] is None
     assert not notices(account)
-    assert quota_count(account)==50
+    assert quota_count(account)==cap
 
 
 def verify_recent_attachment_outcome(factory):
