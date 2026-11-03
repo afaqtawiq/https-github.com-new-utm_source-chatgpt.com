@@ -230,3 +230,7 @@ from app.transport_desk import init as init_transport_desk, register_worker as r
 init_transport_desk()
 register_transport_desk(app)
 app.include_router(transport_desk_router)
+from app.container_returns import router as container_returns_router, register_worker as register_container_returns, init as init_container_returns
+init_container_returns()
+register_container_returns(app)
+app.include_router(container_returns_router)
