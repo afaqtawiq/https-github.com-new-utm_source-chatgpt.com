@@ -226,5 +226,6 @@ from app.load_broadcast import init as init_load_broadcast
 init_load_broadcast()
 from app.owner_negotiation import init as init_owner_negotiation
 init_owner_negotiation()
-from app.transport_desk import init as init_transport_desk
+from app.transport_desk import init as init_transport_desk, register_worker as register_transport_desk
 init_transport_desk()
+register_transport_desk(app)

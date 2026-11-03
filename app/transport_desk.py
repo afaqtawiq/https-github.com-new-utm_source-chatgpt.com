@@ -475,3 +475,45 @@ def templates_text():
         rows.append('قالب استفسار صاحب الحمولة v4 ' + ('مطابق لنص الوكيل ✅' if same else
                     '⚠️ نصه في Meta يختلف عن نص الوكيل (' + str(len(parts)) + ' أجزاء)'))
     return 'قوالب واتساب في Meta:\n' + ('\n'.join(rows) if rows else 'لا توجد قوالب.')
+
+
+# ---------- background repair of mis-read captures ----------
+
+def repair_pending():
+    """Loads captured in the last day whose route was not read: repair, then re-send the manager a ready offer."""
+    init()
+    sent = []
+    with db() as c:
+        rows = c.execute("""SELECT id FROM naqliat_loads WHERE captured_at>NOW()-INTERVAL '24 hours'
+            AND (COALESCE(TRIM(origin),'') IN ('','غير محدد') OR COALESCE(TRIM(destination),'') IN ('','غير محدد'))
+            AND COALESCE(status,'new')='new' ORDER BY id DESC LIMIT 5""").fetchall()
+        chat = manager_chat(c)
+        for row in rows:
+            load = repair(c, load_row(c, row['id']))
+            if load['origin'] in UNKNOWN or load['destination'] in UNKNOWN:
+                c.execute("UPDATE naqliat_loads SET status='needs_review' WHERE id=%s", (row['id'],))
+                continue
+            text = (offer_negotiation(c, chat[0], chat[1], row['id'], minutes=120) if chat
+                    else describe(load) + f"\n\nللتفاوض مع صاحب الحمولة اكتب للوكيل: فاوض NQ-{row['id']}")
+            sent.append('✅ قرأت مسار الحمولة الملتقطة من نقليات\n' + text)
+    return sent
+
+
+def register_worker(app):
+    async def loop():
+        from app.owner_briefing import deliver
+        from starlette.concurrency import run_in_threadpool
+        await asyncio.sleep(90)
+        while True:
+            try:
+                for text in await run_in_threadpool(repair_pending):
+                    await deliver(text)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print('TRANSPORT_REPAIR_WORKER', type(exc).__name__, str(exc)[:160], flush=True)
+            await asyncio.sleep(300)
+
+    @app.on_event('startup')
+    async def start():
+        app.state.transport_repair_worker = asyncio.create_task(loop())
