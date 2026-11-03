@@ -522,3 +522,65 @@ def register_worker(app):
     @app.on_event('startup')
     async def start():
         app.state.transport_repair_worker = asyncio.create_task(loop())
+
+
+# ---------- /transport-desk page: everything in one place ----------
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
+
+router = APIRouter()
+
+STATUS_AR = {'open': 'جارٍ التفاوض', 'complete': 'اكتملت التفاصيل', 'confirmed': 'أكدها صاحب الحمولة — بانتظار اعتمادك',
+             'approved': 'أُرسلت للسائقين', 'assigned': 'أُسندت لسائق', 'open_failed': 'فشل فتح المحادثة',
+             'new': 'جديدة', 'contacted': 'تم التواصل', 'needs_review': 'تحتاج مراجعة (لم يُقرأ المسار)'}
+
+
+def page_data():
+    init()
+    with db() as c:
+        loads = c.execute("""SELECT id,origin,destination,owner_phone,weight_tons,status,captured_at,capture_method
+            FROM naqliat_loads ORDER BY id DESC LIMIT 25""").fetchall()
+        negotiations = c.execute('SELECT * FROM owner_negotiations ORDER BY id DESC LIMIT 25').fetchall()
+        broadcasts = c.execute('''SELECT b.*,
+            (SELECT COUNT(*) FROM load_broadcast_recipients r WHERE r.broadcast_id=b.id AND r.status IN ('sent','accepted','assigned')) sent_n,
+            (SELECT COUNT(*) FROM load_broadcast_recipients r WHERE r.broadcast_id=b.id AND r.status IN ('accepted','assigned')) accepted_n
+            FROM load_broadcasts b ORDER BY id DESC LIMIT 25''').fetchall()
+    return loads, negotiations, broadcasts
+
+
+@router.get('/transport-desk', response_class=HTMLResponse)
+def transport_page(request: Request):
+    import html
+    from app.naqliat_connector import _page, _session
+    _session(request)
+    e = lambda v: html.escape(str(v if v is not None else ''))
+    loads, negotiations, broadcasts = page_data()
+
+    def table(head, rows):
+        return ('<div class="scroll"><table><tr>' + ''.join('<th>' + h + '</th>' for h in head) + '</tr>'
+                + ''.join('<tr>' + ''.join('<td>' + c + '</td>' for c in r) + '</tr>' for r in rows)
+                + '</table></div>') if rows else '<p class="muted">لا يوجد.</p>'
+    body = ('<div class="nav"><a href="/dashboard">الرئيسية</a><a href="/drivers">السائقون</a><a href="/naqliat">نقليات</a></div>'
+            '<h1>مكتب النقل</h1><p class="muted">من الحمولة إلى ربط السائق بصاحبها. الأوامر من واتساب: لقطة الحمولة ← «نفذ» ← '
+            '«اعتمد الحمولة N عمولة X» ← «اسند AFT-n للسائق رقم».</p>')
+    body += '<div class="card"><h2>الحمولات الملتقطة</h2>' + table(
+        ['الرقم', 'المسار', 'صاحب الحمولة', 'الوزن', 'الحالة', 'الوقت'],
+        [['NQ-' + e(l['id']), e(l['origin']) + ' ← ' + e(l['destination']), e(l['owner_phone']), e(l['weight_tons']),
+          e(STATUS_AR.get(l['status'], l['status'])), e(str(l['captured_at'])[:16])] for l in loads]) + '</div>'
+
+    def fields(n):
+        try:
+            f = {k: v for k, v in json.loads(n['fields'] or '{}').items() if not k.startswith('_')}
+        except ValueError:
+            f = {}
+        return '<br>'.join(e(k) + ': ' + e(v) for k, v in f.items())
+    body += '<div class="card"><h2>التفاوض مع أصحاب الحمولات</h2>' + table(
+        ['الملف', 'صاحب الحمولة', 'التفاصيل', 'الحالة', 'العمولة'],
+        [[e(n['id']), '+' + e(n['phone']), fields(n), e(STATUS_AR.get(n['status'], n['status'])), e(n.get('commission'))]
+         for n in negotiations]) + '</div>'
+    body += '<div class="card"><h2>الإرسال للسائقين</h2>' + table(
+        ['الحمولة', 'المسار', 'سعر السائق', 'أُرسلت', 'وافق', 'مسندة إلى'],
+        [['AFT-' + e(b['id']), e(b['origin']) + ' ← ' + e(b['destination']), e(b['driver_price']), e(b['sent_n']),
+          e(b['accepted_n']), ('+' + e(b['assigned_phone'])) if b.get('assigned_phone') else '—'] for b in broadcasts]) + '</div>'
+    return HTMLResponse(_page('مكتب النقل', body))
