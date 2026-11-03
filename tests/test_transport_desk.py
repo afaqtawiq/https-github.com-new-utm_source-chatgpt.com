@@ -40,3 +40,16 @@ def test_link_messages_share_both_contacts():
 def test_driver_accept_ignores_unrelated_text():
     assert td.driver_accept('966551234567', 'السلام عليكم') is None
     assert td.driver_accept('966551234567', 'AFT-7') is None  # no acceptance word
+
+
+def test_repair_skips_known_route():
+    load = {'id': 1, 'origin': 'جدة', 'destination': 'الخرج'}
+    assert td.repair(None, load) is load
+
+
+def test_unknown_route_never_starts_owner_chat():
+    with patch.dict(sys.modules, {'app.storage': _storage}):
+        spec = importlib.util.spec_from_file_location('_on', pathlib.Path(__file__).resolve().parents[1] / 'app' / 'owner_negotiation.py')
+        on = importlib.util.module_from_spec(spec); spec.loader.exec_module(on)
+    on.init = Mock()
+    assert 'غير معروف' in on.start({'phone': '0562199487', 'origin': 'غير محدد', 'destination': 'غير محدد'}, 'x')
