@@ -109,15 +109,37 @@ async def compose(question):
     return policy.render(policy.classify_local(question) or '')
 
 
+def skipped():
+    # Posts whose comments the provider keeps refusing (deleted = 404, not readable = 401/403) are not retried.
+    with db() as c:
+        c.execute('''CREATE TABLE IF NOT EXISTS afaq_comment_read_failures(platform TEXT NOT NULL, post_id TEXT NOT NULL,
+            status INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(platform, post_id))''')
+        rows = c.execute('''SELECT platform,post_id FROM afaq_comment_read_failures WHERE failures>=3
+            AND (status=404 OR updated_at>now()-interval '7 days')''').fetchall()
+    return {(r['platform'], r['post_id']) for r in rows}
+
+
+def read_failed(platform, pid, status):
+    with db() as c:
+        c.execute('''INSERT INTO afaq_comment_read_failures(platform,post_id,status,updated_at) VALUES(%s,%s,%s,now())
+            ON CONFLICT(platform,post_id) DO UPDATE SET failures=afaq_comment_read_failures.failures+1,status=EXCLUDED.status,updated_at=now()''',
+                  (platform, pid, status))
+
+
 async def poll_once():
     from app.social_publishing import connection
     key, _ = await run_in_threadpool(connection)
     stats = {'checked': 0, 'sent': 0, 'held': 0}
+    skip = await run_in_threadpool(skipped)
     async with httpx.AsyncClient(timeout=20, follow_redirects=False, headers={'Authorization': 'Bearer ' + key}) as c:
         for platform, account, pid in await run_in_threadpool(targets):
+            if (platform, pid) in skip:
+                continue
             r = await c.get(BASE + '/inbox/comments/' + quote(pid, safe=''), params={'accountId': account, 'limit': 100})
             if not r.is_success:
                 print('AUTO_COMMENTS_READ', platform, pid, r.status_code, flush=True)
+                if r.status_code in (401, 403, 404):
+                    await run_in_threadpool(read_failed, platform, pid, r.status_code)
                 continue
             for cm in (r.json() or {}).get('comments') or []:
                 if not isinstance(cm, dict) or not cm.get('id'):
