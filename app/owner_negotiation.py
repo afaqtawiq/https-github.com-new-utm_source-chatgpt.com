@@ -88,6 +88,8 @@ def start(action, actor):
     import threading
     init()
     phone = digits(action.get('phone'))
+    if str(action.get('origin') or '').strip() in ('', 'غير محدد') or str(action.get('destination') or '').strip() in ('', 'غير محدد'):
+        return 'مسار الحمولة غير معروف (من/إلى)؛ لم أرسل شيئًا لصاحب الحمولة. أرسل لقطة الحمولة أو اكتب المسار.'
     fields = {'origin': action.get('origin') or '', 'destination': action.get('destination') or ''}
     load_id = action.get('load_id')
     with db() as c:
