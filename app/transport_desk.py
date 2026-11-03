@@ -38,6 +38,7 @@ def init():
         c.execute('''CREATE TABLE IF NOT EXISTS transport_intake(
             id BIGSERIAL PRIMARY KEY, sender TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
             used BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL)''')
+        c.execute('ALTER TABLE naqliat_loads ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ')
     _READY = True
 
 
@@ -81,7 +82,7 @@ def manager_chat(c):
     if not owner:
         return None
     row = c.execute('''SELECT sender,conversation_id FROM whatsapp_admin_audit WHERE right(regexp_replace(sender,'\\D','','g'),9)=%s
-        ORDER BY id DESC LIMIT 1''', (owner[-9:],)).fetchone()
+        ORDER BY created_at DESC NULLS LAST LIMIT 1''', (owner[-9:],)).fetchone()
     return (row['sender'], row['conversation_id']) if row else None
 
 
@@ -205,6 +206,10 @@ def connector_notice(load_id):
     """A load captured by the Android connector: send the manager the summary + ready code."""
     init()
     with db() as c:
+        claimed = c.execute('UPDATE naqliat_loads SET notified_at=%s WHERE id=%s AND notified_at IS NULL RETURNING id',
+                            (utcnow(), int(load_id))).fetchone()
+        if not claimed:
+            return None  # the manager was already told about this load
         chat = manager_chat(c)
         load = load_row(c, load_id)
         if not load:
