@@ -67,6 +67,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
+    {'name': 'runner_task', 'description': 'Create a task for the WORK COMPUTER (browser on the office PC): download_test (first trial), read_page (url), download_file (url), fasah_declarations (which: import/export — read the FASAH list, save CSV). Read-only; allowed sites only.',
+     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fasah_declarations']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}}, 'required': ['kind']}},
+    {'name': 'runner_status', 'description': 'Steps, result and files of a work-computer task (latest if no id).',
+     'input_schema': {'type': 'object', 'properties': {'task': {'type': 'string'}}}},
+    {'name': 'runner_stop', 'description': 'Stop a work-computer task now («أوقف المهمة 3»).',
+     'input_schema': {'type': 'object', 'properties': {'task': {'type': 'string'}}, 'required': ['task']}},
     {'name': 'whatsapp_templates', 'description': 'Approval status in Meta of the WhatsApp templates (owner inquiry, driver offer, marketing). e.g. «حالة القوالب».',
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'approve_owner_load', 'description': 'Manager approves a collected load file and sets OUR commission; the load is then offered to all drivers at owner price minus commission. e.g. «اعتمد الحمولة 4 عمولة 300».',
@@ -349,6 +355,23 @@ def tool_party_statement(c, a):
     if not m:
         return 'اذكر الشهر، مثل 2026-10.'
     return statement_import.statement_text(a.get('party') or '', f'{m.group(1)}-{int(m.group(2)):02d}')
+
+
+def tool_runner_task(c, a):
+    from app import agent_runner
+    return agent_runner.create_task(a.get('kind'), {'url': a.get('url'), 'which': a.get('which')}, _member().get('name') or '')[1]
+
+
+def tool_runner_status(c, a):
+    from app import agent_runner
+    m = re.search(r'\d+', str(a.get('task') or ''))
+    return agent_runner.task_text(int(m.group(0)) if m else None)
+
+
+def tool_runner_stop(c, a):
+    from app import agent_runner
+    m = re.search(r'\d+', str(a.get('task') or ''))
+    return agent_runner.stop_task(int(m.group(0))) if m else 'اذكر رقم المهمة.'
 
 
 def tool_whatsapp_templates(c, a):

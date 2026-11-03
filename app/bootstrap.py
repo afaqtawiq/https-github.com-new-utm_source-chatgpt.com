@@ -237,3 +237,6 @@ app.include_router(container_returns_router)
 from app.video_publish import router as video_publish_router, init as init_video_publish
 init_video_publish()
 app.include_router(video_publish_router)
+from app.agent_runner import router as agent_runner_router, init as init_agent_runner
+init_agent_runner()
+app.include_router(agent_runner_router)
