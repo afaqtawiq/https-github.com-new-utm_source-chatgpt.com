@@ -391,6 +391,14 @@ def templates_text():
     except Exception as exc:
         return 'تعذر قراءة القوالب الآن: ' + str(exc)[:120]
     labels = {'APPROVED': '✅ معتمد', 'PENDING': '⏳ قيد المراجعة', 'REJECTED': '❌ مرفوض'}
+    from app.transport_owner import OWNER_INQUIRY_TEMPLATE, inquiry
     rows = [f"• {t.get('name')}: {labels.get(t.get('status'), t.get('status'))}" for t in items
             if str(t.get('name', '')).startswith(('afaaq_transport_', 'afaaq_marketing_'))]
+    v4 = next((t for t in items if t.get('name') == OWNER_INQUIRY_TEMPLATE), None)
+    if v4:
+        parts = v4.get('components') or []
+        body = ' '.join(str((parts[0] if parts else {}).get('text') or '').split())
+        same = len(parts) == 1 and body == ' '.join(inquiry('{{1}}', '{{2}}').split())
+        rows.append('قالب استفسار صاحب الحمولة v4 ' + ('مطابق لنص الوكيل ✅' if same else
+                    '⚠️ نصه في Meta يختلف عن نص الوكيل (' + str(len(parts)) + ' أجزاء)'))
     return 'قوالب واتساب في Meta:\n' + ('\n'.join(rows) if rows else 'لا توجد قوالب.')
