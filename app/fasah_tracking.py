@@ -105,7 +105,11 @@ def customer_text(number, kind, stage):
     }.get(stage)
     if not body:
         return None
-    return 'عميلنا العزيز،\n' + body + '\nآفاق طويق للتخليص الجمركي — 0507665873'
+    review = ''
+    if stage == 'released':
+        from app.reviews import line
+        review = ('\n' + line()) if line() else ''
+    return 'عميلنا العزيز،\n' + body + review + '\nآفاق طويق للتخليص الجمركي — 0507665873'
 
 
 # ---------- reading results ----------
