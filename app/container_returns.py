@@ -156,7 +156,15 @@ def update(args, actor='', proof=None):
             return 'نوع التحديث غير معروف.'
         event(c, row['id'], kind, proof or note, actor)
         row = c.execute('SELECT * FROM container_returns WHERE id=%s', (row['id'],)).fetchone()
-    return card(row)
+        extra = ''
+        if kind == 'returned' and row.get('customer_phone') and not row.get('is_test'):
+            from app import reviews, transport_desk
+            text = reviews.after_delivery_text(row.get('customer') or '')
+            chat = transport_desk.manager_chat(c) if text else None
+            if chat:
+                token = transport_desk.pending(c, chat[0], chat[1], {'tool': 'send_whatsapp', 'to': '+' + row['customer_phone'], 'text': text}, 24 * 60)
+                extra = f'\n⭐ طلب تقييم قوقل جاهز للعميل. للإرسال اكتب: نفذ {token}'
+    return card(row) + extra
 
 
 def status_text(filter_text=''):
