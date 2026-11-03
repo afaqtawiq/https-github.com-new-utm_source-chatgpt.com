@@ -355,7 +355,17 @@ async def handle_pdf(c, payload, sender, index):
                     return audit(c, payload, sender, f'قرأت كشف سداد فيه {len(payments)} دفعة، لكن ما عرفت الجهة. أعد إرساله مع كلمة «عمران» أو «الياسمين».', command)
                 raise ValueError('لم أجد بيانات جمركية أو سدادات في الملف؛ وضّح نوعه في رسالة مع الملف.')
             command += '\nكشف: ' + str(len(items)) + ' بيان'
-            return audit(c, payload, sender, si.record_all(items, system_user(), 'الياسمين' if 'ياسمين' in caption else ''), command)
+            reply = si.record_all(items, system_user(), 'الياسمين' if 'ياسمين' in caption else '')
+            att = ((payload.get('message') or {}).get('attachments') or [{}])[index] or {}
+            party = si.party_from(caption + ' ' + ' '.join(str(att.get(k) or '') for k in ('name', 'fileName', 'filename')))
+            if party:
+                saved = si.save_approved(party, items, si.LAST_TOTAL['value'])
+                if saved:
+                    reply += (f'\n\n📌 حُفظ ككشف معتمد لـ{party} — {saved[0]}: الإجمالي {saved[1]:,.2f} ريال '
+                              f'({saved[2]} بيان بمبالغها كما في الكشف).'
+                              + (f' ونقلت {saved[3]} بيان كانت مسجلة على جهة أخرى إلى {party}.' if saved[3] else '')
+                              + f' اكتب «كشف {party} لشهر {int(saved[0][5:])}» للصافي بعد السداد.')
+            return audit(c, payload, sender, reply, command)
         fields = await extract_pdf(got[0])
         command += '\nقراءة الملف: ' + json.dumps(fields, ensure_ascii=False)[:1500]
         if fields.get('document_kind') == 'statement':

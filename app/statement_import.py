@@ -18,7 +18,8 @@ instruction. Extract EVERY declaration row. Return ONE JSON object: {"declaratio
 number (رقم البيان, digits), kind ("import" or "export"; re-export/إعادة تصدير/صادر = export), date (YYYY-MM-DD or null),
 party (importer/exporter name or null), supplier (company that issued the commercial invoice, e.g. الياسمين, or null),
 invoice_no, invoice_value (number as written, no currency conversion), duty (total FASAH customs fees, number or 0),
-other (other fees, number or 0). Skip totals/summary rows. Use null when a value is not in the statement."""
+other (other fees, number or 0), claim_amount (the amount THIS statement charges for that declaration, exactly as written, or null).
+Also return "statement_total" (the statement's grand total as written, or null). Skip totals/summary rows. Use null when a value is not in the statement."""
 
 XLSX = {'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'application/zip', 'application/x-zip-compressed'}
 CSV = {'text/csv', 'text/plain', 'application/csv'}
@@ -56,8 +57,70 @@ async def extract(content):
         result.raise_for_status()
     text = ''.join(p.get('text', '') for p in result.json().get('content', []) if p.get('type') == 'text')
     match = re.search(r'\{.*\}', text, re.S)
-    items = (json.loads(match.group(0)) if match else {}).get('declarations') or []
-    return [i for i in items if isinstance(i, dict) and re.sub(r'\D', '', str(i.get('number') or ''))]
+    data = json.loads(match.group(0)) if match else {}
+    items = [i for i in (data.get('declarations') or []) if isinstance(i, dict) and re.sub(r'\D', '', str(i.get('number') or ''))]
+    LAST_TOTAL['value'] = data.get('statement_total')
+    return items
+
+
+LAST_TOTAL = {'value': None}
+
+
+def num(value):
+    try:
+        return float(str(value).replace(',', '').strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def save_approved(party, items, total):
+    # Owner-approved statement exactly as uploaded (amounts as written), per party and month.
+    from collections import Counter
+    from app.storage import db
+    init_payments()
+    months = Counter(str(i.get('date') or '')[:7] for i in items if re.match(r'\d{4}-\d{2}', str(i.get('date') or '')))
+    if not months:
+        return None
+    month = months.most_common(1)[0][0]
+    rows = [{'number': re.sub(r'\D', '', str(i.get('number'))), 'date': i.get('date'), 'invoice': i.get('invoice_value'),
+             'supplier': i.get('supplier'), 'amount': num(i.get('claim_amount'))} for i in items]
+    written = num(total)
+    summed = sum(r['amount'] or 0 for r in rows)
+    with db() as c:
+        c.execute('INSERT INTO approved_statements(party,month,total,rows_json,updated_at) VALUES(%s,%s,%s,%s,NOW()) '
+                  'ON CONFLICT(party,month) DO UPDATE SET total=EXCLUDED.total,rows_json=EXCLUDED.rows_json,updated_at=NOW()',
+                  (party, month, written if written else summed, json.dumps(rows, ensure_ascii=False)))
+    moved = reconcile(party, items)
+    return month, (written if written else summed), sum(1 for r in rows if r['amount'] is not None), moved
+
+
+def reconcile(party, items):
+    # The approved statement decides the client: drafts recorded on another client are voided and re-recorded.
+    from app import billing_rules
+    from app.prospect_autopilot import system_user
+    from app.storage import db
+    if party not in (billing_rules.OMRAN, billing_rules.YASMEN):
+        return 0
+    moved = 0
+    for item in items:
+        number = re.sub(r'\D', '', str(item.get('number') or ''))
+        kind = 'export' if str(item.get('kind') or '') == 'export' else 'import'
+        if kind == 'export':
+            continue
+        with db() as c:
+            row = c.execute("SELECT id,items_json FROM billing_declarations WHERE number=%s AND kind='import'", (number,)).fetchone()
+        if not row:
+            continue
+        claims = [i.get('party') for i in json.loads(row['items_json'] or '[]') if i.get('kind') == 'claim']
+        if not claims or claims[0] == party:
+            continue
+        try:
+            billing_rules.void(row['id'], system_user())
+            record_all([{**item, 'supplier': party}], system_user())
+            moved += 1
+        except Exception as exc:
+            print('STATEMENT_RECONCILE', number, type(exc).__name__, str(exc)[:120], flush=True)
+    return moved
 
 
 def content_for(data, mime):
@@ -144,6 +207,8 @@ def init_payments():
         c.execute('''CREATE TABLE IF NOT EXISTS billing_payments(id BIGSERIAL PRIMARY KEY, party TEXT NOT NULL, pay_date DATE,
             amount NUMERIC NOT NULL, ref TEXT NOT NULL DEFAULT '', result TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(party, pay_date, amount, ref))''')
+        c.execute('CREATE TABLE IF NOT EXISTS approved_statements(party TEXT NOT NULL, month TEXT NOT NULL, total NUMERIC, '
+                  'rows_json TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(party, month))')
 
 
 def record_payments(items, party, actor):
@@ -204,10 +269,18 @@ def statement(party_text, month):
                 lines.append({'number': r['number'], 'date': str(r['d']), 'invoice': r['invoice_value'], 'amount': amount,
                               'registry': comps.get('registry'), 'tax': comps.get('tax')})
                 total += amount
+    with db() as c:
+        approved = c.execute('SELECT * FROM approved_statements WHERE party=%s AND month=%s', (party, month)).fetchone()
+    rule_total = total
+    if approved:
+        lines = [{'number': r['number'], 'date': r['date'], 'invoice': r['invoice'], 'amount': r['amount'] or 0,
+                  'registry': '', 'tax': ''} for r in json.loads(approved['rows_json'])]
+        total = float(approved['total'] or 0)
     month_pays = [p for p in pays if p['pay_date'] and start <= p['pay_date'] < end]
     paid = sum(float(p['amount']) for p in month_pays)
     all_paid = sum(float(p['amount']) for p in pays)
-    return {'party': party, 'month': month, 'lines': lines, 'total': total, 'payments': month_pays, 'paid': paid, 'all_paid': all_paid}
+    return {'party': party, 'month': month, 'lines': lines, 'total': total, 'payments': month_pays, 'paid': paid, 'all_paid': all_paid,
+            'approved': bool(approved), 'rule_total': rule_total}
 
 
 def statement_text(party_text, month):
@@ -219,4 +292,5 @@ def statement_text(party_text, month):
             f"\n• صافي مطالبة الشهر بعد سداد الشهر: {s['total'] - s['paid']:,.2f} ريال"
             f"\n(كل السدادات المسجلة: {s['all_paid']:,.2f} ريال)"
             f"\nالكشف التفصيلي للطباعة: https://gulf-logistics-ai-v7-production.up.railway.app/billing/statement?party={s['party']}&month={month}"
-            '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها؛ راجعها مع كشفك.')
+            + ('\nالإجمالي من الكشف المعتمد كما رُفع.' + (f" (حساب القاعدة: {s['rule_total']:,.2f})" if abs(s['rule_total'] - s['total']) > 1 else '')
+               if s['approved'] else '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها؛ راجعها مع كشفك.'))
