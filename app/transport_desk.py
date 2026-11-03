@@ -282,6 +282,11 @@ def connector_notice(load_id):
         load = load_row(c, load_id)
         if not load:
             return None
+        load = repair(c, load)
+        if load['origin'] in UNKNOWN or load['destination'] in UNKNOWN:
+            # Unreadable screen capture (often not a load screen): stay quiet, keep it for review.
+            c.execute("UPDATE naqliat_loads SET status='needs_review' WHERE id=%s", (load['id'],))
+            return None
         if chat:
             return offer_negotiation(c, chat[0], chat[1], load_id, minutes=120)
         return describe(load) + f'\n\nللتفاوض مع صاحب الحمولة اكتب للوكيل: فاوض NQ-{load_id}'
