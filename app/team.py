@@ -40,7 +40,9 @@ def team():
     except ValueError:
         members = []
     from app.employees import members as registered
-    members = (members if isinstance(members, list) else []) + registered()
+    # Owner-confirmed company line (on the official posters): treated as a team member, never a manager.
+    company = [{'phone': '+966530130435', 'name': 'آفاق طويق', 'short': 'فريق آفاق', 'role': 'رقم الشركة الثاني'}]
+    members = (members if isinstance(members, list) else []) + registered() + company
     out = {}
     for m in members:
         number = phone(m.get('phone')) if isinstance(m, dict) else ''
