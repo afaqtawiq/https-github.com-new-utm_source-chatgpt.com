@@ -245,3 +245,5 @@ init_fasah_tracking()
 register_fasah_tracking(app)
 from app.prospect_replies import register_worker as register_prospect_replies
 register_prospect_replies(app)
+from app.customer_care import register_worker as register_customer_care
+register_customer_care(app)

@@ -75,6 +75,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}}, 'required': ['name', 'phone']}},
     {'name': 'prospect_replies', 'description': 'Which contacted prospect companies replied to the agent outreach and how (interested, asked price, not interested, stop), with quotes prepared. Optional days (default 7). e.g. «مين رد من العملاء المحتملين» «ردود حملة التعريف».',
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'string'}}}},
+    {'name': 'customer_care', 'description': 'Existing customers programme: transport offer to customers we clear for, and win-back messages to customers inactive 60+ days. action=prepare prepares a batch now (sent only after «نفذ»); action=status shows results. e.g. «جهز رسائل العملاء» «نتائج رسائل العملاء الحاليين».',
+     'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['prepare', 'status']}}, 'required': ['action']}},
     {'name': 'runner_deny', 'description': 'Manager refuses a work-computer approval request («ارفض الطلب 4»).',
      'input_schema': {'type': 'object', 'properties': {'approval': {'type': 'string'}}, 'required': ['approval']}},
     {'name': 'runner_status', 'description': 'Steps, result and files of a work-computer task (latest if no id).',
@@ -375,6 +377,15 @@ def tool_prospect_replies(c, a):
     return prospect_replies.status_text(max(1, min(days, 60)))
 
 
+def tool_customer_care(c, a):
+    from app import customer_care
+    if a.get('action') == 'prepare':
+        if not _member().get('manager'):
+            return 'تجهيز رسائل العملاء للمدير فقط.'
+        return customer_care.prepare() or 'لا يوجد عملاء مستحقون للرسائل الآن (الكل تواصلنا معه مؤخرًا أو بدون رقم).'
+    return customer_care.status_text()
+
+
 def tool_party_statement(c, a):
     from app import statement_import
     m = re.search(r'(\d{4})-(\d{1,2})', str(a.get('month') or ''))
@@ -530,6 +541,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'send_whatsapp':
         from app.manager_actions import send_message
         return send_message(c, {'to': action['to'], 'text': action['text']})
+    if action.get('tool') == 'customer_care_send':
+        from app import customer_care
+        return customer_care.start_send(action['batch'])
     if action.get('tool') == 'negotiate_owner':
         from app import owner_negotiation
         return owner_negotiation.start(action, member.get('name') or '')
