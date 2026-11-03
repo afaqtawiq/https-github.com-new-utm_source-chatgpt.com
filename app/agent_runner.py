@@ -481,3 +481,19 @@ def screenshot(sid: int, request: Request):
     if not s or not s['screenshot']:
         raise HTTPException(404)
     return Response(bytes(s['screenshot']), media_type='image/png', headers={'Cache-Control': 'no-store'})
+
+
+CLIENT_FILES = {'afaq_runner.py': 'text/x-python; charset=utf-8', 'requirements.txt': 'text/plain; charset=utf-8',
+                'install.ps1': 'text/plain; charset=utf-8'}
+
+
+@router.get('/agent-runner/client/{name}')
+def client_file(name: str):
+    """The runner program itself (public code, no secrets)."""
+    from pathlib import Path
+    if name not in CLIENT_FILES:
+        raise HTTPException(404)
+    path = Path(__file__).resolve().parents[1] / 'desktop-runner' / name
+    if not path.exists():
+        raise HTTPException(404)
+    return Response(path.read_bytes(), media_type=CLIENT_FILES[name], headers={'Cache-Control': 'no-store'})
