@@ -309,6 +309,57 @@ async def transcribe(payload, index):
         return text
 
 
+PENDING_LABELS = {
+    'customer_care_send': ('دفعة رسائل العملاء الحاليين', ('العملاء', 'استرجاع', 'دفعه', 'دفعة', 'الحاليين')),
+    'send_whatsapp': ('إرسال رسالة واتساب', ('رساله', 'رسالة', 'ارسل', 'واتساب', 'العرض', 'تقييم', 'تذكير')),
+    'send_email': ('إرسال بريد', ('بريد', 'ايميل', 'إيميل')),
+    'record_billing': ('تسجيل في الحسابات', ('تسجيل', 'سجل', 'الحسابات', 'بيان', 'فوتره')),
+    'publish_video': ('نشر فيديو', ('فيديو', 'نشر', 'انشر')),
+    'negotiate_owner': ('التفاوض مع صاحب الحمولة', ('فاوض', 'تفاوض', 'الحموله', 'الحمولة')),
+    'assign_driver': ('إسناد سائق', ('اسند', 'سائق', 'السائق')),
+    'broadcast_load': ('إرسال الحمولة للسائقين', ('السائقين', 'حموله', 'حمولة')),
+    'runner_approve': ('موافقة جهاز العمل', ('جهاز', 'موافقه', 'موافقة')),
+}
+
+
+def pending_without_code(c, typed, sender, conversation):
+    """«نفذ» without the code: run the only waiting action of this chat, or the one the words name.
+    Returns (row, note). Nothing runs when it is ambiguous."""
+    import json as _json
+    m = re.fullmatch(r'(?:نفذ|نفّذ|اعتمد|موافق|تمام نفذ)(?:\s+(.*))?', typed)
+    if not m:
+        return None, None
+    words = (m.group(1) or '').strip()
+    rows = c.execute('''SELECT token, command FROM whatsapp_voice_pending WHERE sender=%s AND conversation_id=%s
+        AND NOT consumed AND expires_at>NOW() AND command LIKE '__agent_action__:%%' ORDER BY expires_at DESC LIMIT 20''',
+                     (sender, conversation)).fetchall()
+    items = []
+    for r in rows:
+        try:
+            tool = _json.loads(r['command'].split(':', 1)[1]).get('tool')
+        except (ValueError, AttributeError, IndexError):
+            tool = None
+        items.append((r, tool))
+    if words:
+        picked = [it for it in items if it[1] in PENDING_LABELS and any(k in words for k in PENDING_LABELS[it[1]][1])]
+        if not picked:
+            return None, None  # an ordinary command that starts with «نفذ»
+        if len({it[1] for it in picked}) > 1 or (len(picked) > 1 and picked[0][1] != 'customer_care_send'):
+            items = picked
+        else:
+            items = picked[:1]
+    elif not items:
+        return None, 'لا يوجد أمر ينتظر التأكيد الآن (الرموز تنتهي مدتها). اطلب تجهيزه من جديد.'
+    if len(items) == 1:
+        row = c.execute('''UPDATE whatsapp_voice_pending SET consumed=TRUE WHERE token=%s AND NOT consumed AND expires_at>NOW()
+            RETURNING command''', (items[0][0]['token'],)).fetchone()
+        return row, None
+    lines = ['عندك أكثر من أمر ينتظر التأكيد؛ اكتب «نفذ» مع الرمز:']
+    for r, tool in items[:8]:
+        lines.append(f"• {PENDING_LABELS.get(tool, (tool or 'أمر', ()))[0]}: نفذ {r['token']}")
+    return None, '\n'.join(lines)
+
+
 async def admin_reply(c, payload, sender):
     # Recheck at the privilege boundary, even if called independently in the future.
     if not sender or owner_sender(payload) != sender:
@@ -336,7 +387,12 @@ async def admin_reply(c, payload, sender):
             row = c.execute('''UPDATE whatsapp_voice_pending SET consumed=TRUE
                 WHERE token=%s AND sender=%s AND conversation_id=%s AND NOT consumed AND expires_at>NOW()
                 RETURNING command''', (confirmation[2].upper(), sender, conversation)).fetchone()
-        if row:
+        bare_note = None
+        if not confirmation:
+            row, bare_note = pending_without_code(c, typed, sender, conversation)
+        if bare_note:
+            reply = bare_note
+        elif row:
             reply = run_command(c, row['command'], event_id)
         elif confirmation and confirmation[1]:
             reply = 'رمز التأكيد غير صالح أو استُخدم أو انتهت مدته؛ لم أنفذ الأمر.'

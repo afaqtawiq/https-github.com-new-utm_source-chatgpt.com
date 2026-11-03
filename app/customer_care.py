@@ -218,19 +218,30 @@ def prepare(now=None, limit=BATCH_CAP):
     from app import transport_desk
     init()
     now = now or utcnow()
-    items = candidates(now, limit)
+    with db() as c:
+        open_batch = c.execute('''SELECT id FROM customer_care_batches WHERE status='prepared' AND created_at > %s - INTERVAL '24 hours'
+            ORDER BY id DESC LIMIT 1''', (now,)).fetchone()
+        reused = c.execute("SELECT phone,name,segment,offer FROM customer_care_messages WHERE batch_id=%s AND status='prepared' ORDER BY id",
+                           (open_batch['id'],)).fetchall() if open_batch else []
+    items = [dict(r) for r in reused] if reused else candidates(now, limit)
     if not items:
         return None
     with db() as c:
         chat = transport_desk.manager_chat(c)
         if not chat:
             return None
-        bid = c.execute('INSERT INTO customer_care_batches(created_at) VALUES(%s) RETURNING id', (now,)).fetchone()['id']
-        for p in items:
-            text = body(name_for(p), p['offer'])
-            c.execute('''INSERT INTO customer_care_messages(batch_id,phone,name,segment,offer,text,created_at)
-                VALUES(%s,%s,%s,%s,%s,%s,%s)''', (bid, p['phone'], name_for(p), p['segment'], p['offer'], text, now))
-        token = transport_desk.pending(c, chat[0], chat[1], {'tool': 'customer_care_send', 'batch': bid}, 24 * 60)
+        if reused:
+            bid = open_batch['id']
+            token = transport_desk.pending(c, chat[0], chat[1], {'tool': 'customer_care_send', 'batch': bid}, 24 * 60)
+        else:
+            bid = c.execute('INSERT INTO customer_care_batches(created_at) VALUES(%s) RETURNING id', (now,)).fetchone()['id']
+    if not reused:
+        with db() as c:
+            for p in items:
+                text = body(name_for(p), p['offer'])
+                c.execute('''INSERT INTO customer_care_messages(batch_id,phone,name,segment,offer,text,created_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s)''', (bid, p['phone'], name_for(p), p['segment'], p['offer'], text, now))
+            token = transport_desk.pending(c, chat[0], chat[1], {'tool': 'customer_care_send', 'batch': bid}, 24 * 60)
     counts = {s: sum(1 for p in items if p['segment'] == s) for s in SEGMENTS}
     lines = [f'🤝 رسائل العملاء الحاليين لليوم (دفعة #{bid}) — {len(items)} عميل:',
              f"• {SEGMENTS['cross_sell']}: {counts['cross_sell']}", f"• {SEGMENTS['win_back']}: {counts['win_back']}", '']
@@ -238,7 +249,7 @@ def prepare(now=None, limit=BATCH_CAP):
         lines.append(f"• {name_for(p)} (+{p['phone']}) — {SEGMENTS[p['segment']]}")
     sample = next((p for p in items if p['segment'] == 'cross_sell'), items[0])
     lines += ['', 'نموذج الرسالة:', body(name_for(sample), sample['offer']), '',
-              f'للإرسال لكل القائمة اكتب: نفذ {token}', 'وإذا ما تبي ترسل اليوم تجاهل الرمز.']
+              f'للإرسال لكل القائمة اكتب: نفذ {token}  (أو «نفذ» فقط إذا ما عندك أمر آخر ينتظر)', 'وإذا ما تبي ترسل اليوم تجاهل الرمز.']
     return '\n'.join(lines)
 
 
@@ -247,7 +258,8 @@ async def send_batch(bid):
     init()
     status = await ensure_template()
     if status != 'APPROVED':
-        return f'⏳ قالب رسائل العملاء ({TEMPLATE}) حالته في ميتا: {status}. لم تُرسل الدفعة #{bid}؛ أرسلها بعد الاعتماد.'
+        return (f'⏳ قالب رسائل العملاء ما زال بانتظار موافقة ميتا (الحالة: {status})، فلم تُرسل الدفعة #{bid} وهي محفوظة كما هي.'
+                '\nبعد الموافقة اكتب: جهز رسائل العملاء — وأعطيك رمزًا جديدًا لنفس الدفعة.')
     with db() as c:
         claimed = c.execute("UPDATE customer_care_batches SET status='sending' WHERE id=%s AND status='prepared' RETURNING id", (bid,)).fetchone()
         rows = c.execute("SELECT * FROM customer_care_messages WHERE batch_id=%s AND status='prepared' ORDER BY id", (bid,)).fetchall() if claimed else []

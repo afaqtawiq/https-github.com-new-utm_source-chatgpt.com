@@ -95,6 +95,23 @@ def run():
     assert any('أوقفت عنه' in x for x in out)
     with db() as c:
         assert c.execute("SELECT 1 FROM marketing_suppressions WHERE recipient='+966500000403'").fetchone()
+    # «نفذ» without a code: runs the only waiting action; with two waiting, asks; words pick the right one.
+    from app import whatsapp_admin as wa_admin, transport_desk
+    with db() as c:
+        c.execute('ALTER TABLE whatsapp_voice_pending ADD COLUMN IF NOT EXISTS consumed BOOLEAN NOT NULL DEFAULT FALSE')
+        c.execute('UPDATE whatsapp_voice_pending SET consumed=TRUE')
+        t1 = transport_desk.pending(c, 'mgr', 'conv', {'tool': 'customer_care_send', 'batch': 77}, 60)
+        row, note = wa_admin.pending_without_code(c, 'نفذ', 'mgr', 'conv')
+        assert note is None and '"batch": 77' in row['command']
+        assert wa_admin.pending_without_code(c, 'نفذ', 'mgr', 'conv')[1].startswith('لا يوجد أمر')
+        t2 = transport_desk.pending(c, 'mgr', 'conv', {'tool': 'customer_care_send', 'batch': 78}, 60)
+        t3 = transport_desk.pending(c, 'mgr', 'conv', {'tool': 'send_whatsapp', 'to': '+966500000401', 'text': 'x'}, 60)
+        row, note = wa_admin.pending_without_code(c, 'نفذ', 'mgr', 'conv')
+        assert row is None and t2 in note and t3 in note
+        row, note = wa_admin.pending_without_code(c, 'نفذ استرجاع 20 عميل متوقف', 'mgr', 'conv')
+        assert note is None and '"batch": 78' in row['command']
+        assert wa_admin.pending_without_code(c, 'نفذ دورة البحث', 'mgr', 'conv') == (None, None)
+        assert wa_admin.pending_without_code(c, 'كم على الياسمين', 'mgr', 'conv') == (None, None)
     st = cc.status_text()
     assert 'عرض النقل لعملاء التخليص: أُرسلت 1 — ردود 1 — مهتمون 1' in st, st
 
