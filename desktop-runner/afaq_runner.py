@@ -141,6 +141,7 @@ class Task:
         self.dir = DOWNLOADS / f'task-{self.id}'
         self.dir.mkdir(parents=True, exist_ok=True)
         self.stopped = threading.Event()
+        self.keep = set()
         self.blocked = []
         self.last_poll = 0
 
@@ -260,6 +261,8 @@ class Task:
             return getattr(self, 'do_' + self.kind)()
         finally:
             for p in list(self.context.pages)[1:]:
+                if p in self.keep:
+                    continue
                 try:
                     p.close()
                 except Exception:
@@ -333,7 +336,13 @@ class Task:
     def do_fasah_declarations(self):
         which = self.params.get('which', 'import')
         label = 'بيان التصدير' if which == 'export' else 'بيان الاستيراد'
-        page = self.open(FASAH)
+        # Reuse an open FASAH window: closing it can end the FASAH session.
+        page = next((p for p in self.context.pages if 'fasah.zatca.gov.sa' in p.url and not p.is_closed()), None)
+        if page is None:
+            page = self.open(FASAH)
+        else:
+            page.bring_to_front()
+        self.keep.add(page)
         asked = False
         end = time.time() + 6 * 60  # time for you to sign in yourself in this window
         while time.time() < end:
@@ -348,8 +357,27 @@ class Task:
         else:
             raise ValueError('لم يكتمل تسجيل الدخول في فسح خلال 6 دقائق')
         self.step('فسح مفتوح بعد تسجيل الدخول', page=page)
-        page.get_by_text(label, exact=True).first.click()
-        self.wait(page, 6)
+        opened = False
+        for attempt in (lambda: page.get_by_role('link', name=label, exact=True).first,
+                        lambda: page.locator('a', has_text=label).first,
+                        lambda: page.get_by_text('البيان الجمركي و الفسح').first,
+                        lambda: page.get_by_role('link', name=label, exact=True).first,
+                        lambda: page.get_by_text(label, exact=True).last):
+            try:
+                target = attempt()
+                if target.count():
+                    target.click(timeout=8000, force=True)
+                    self.wait(page, 4)
+                    if page.get_by_text('رقم البيان').count() and page.get_by_text('إنشاء بيان جديد').count():
+                        opened = True
+                        break
+            except Stop:
+                raise
+            except Exception:
+                continue
+        if not opened:
+            raise ValueError('لم أجد قائمة «' + label + '» في فسح بعد الدخول')
+        self.wait(page, 3)
         self.step('فتحت قائمة ' + label, page=page)
         text = page.locator('main').inner_text()
         parts = re.split(r'\n(?=\d{14}\b)', text)
