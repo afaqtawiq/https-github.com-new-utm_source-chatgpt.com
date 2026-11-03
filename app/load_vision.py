@@ -342,9 +342,18 @@ async def handle_pdf(c, payload, sender, index):
         if not got[0].startswith(b'%PDF'):
             # Excel / CSV statement (كشف) of several declarations.
             from app.prospect_autopilot import system_user
-            items = await si.extract(si.content_for(got[0], got[1]))
+            content = si.content_for(got[0], got[1])
+            items = await si.extract(content)
             if not items:
-                raise ValueError('لم أجد بيانات جمركية في الملف؛ تأكد أنه كشف البيانات.')
+                att = ((payload.get('message') or {}).get('attachments') or [{}])[index] or {}
+                name = ' '.join(str(att.get(k) or '') for k in ('name', 'fileName', 'filename', 'caption'))
+                party = si.party_from(caption + ' ' + name)
+                payments = await si.extract_payments(content)
+                if payments and party:
+                    return audit(c, payload, sender, si.record_payments(payments, party, system_user()), command + '\nسداد')
+                if payments:
+                    return audit(c, payload, sender, f'قرأت كشف سداد فيه {len(payments)} دفعة، لكن ما عرفت الجهة. أعد إرساله مع كلمة «عمران» أو «الياسمين».', command)
+                raise ValueError('لم أجد بيانات جمركية أو سدادات في الملف؛ وضّح نوعه في رسالة مع الملف.')
             command += '\nكشف: ' + str(len(items)) + ' بيان'
             return audit(c, payload, sender, si.record_all(items, system_user(), 'الياسمين' if 'ياسمين' in caption else ''), command)
         fields = await extract_pdf(got[0])

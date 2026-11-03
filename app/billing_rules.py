@@ -271,3 +271,27 @@ async def void_route(row_id: int, request: Request):
     except Exception as exc:
         raise HTTPException(409, str(getattr(exc, 'detail', exc))[:200]) from None
     return RedirectResponse('/billing', 303)
+
+
+@router.get('/billing/statement', response_class=HTMLResponse)
+def statement_page(request: Request, party: str = '', month: str = ''):
+    import html as _h
+    admin_session(request)
+    from app import statement_import
+    if not re.fullmatch(r'\d{4}-\d{2}', month or ''):
+        return HTMLResponse('اذكر الشهر بصيغة 2026-10', status_code=400)
+    s = statement_import.statement(party, month)
+    e = lambda v: _h.escape(str(v if v is not None else ''))
+    rows = ''.join(f"<tr><td>{i + 1}</td><td>{e(l['number'])}</td><td>{e(l['date'])}</td><td>{e(l['invoice'])}</td>"
+                   f"<td>{e(l['registry'])}</td><td>{e(l['tax'])}</td><td>{l['amount']:,.2f}</td></tr>" for i, l in enumerate(s['lines']))
+    pays = ''.join(f"<tr><td>{e(p['pay_date'])}</td><td>{float(p['amount']):,.2f}</td><td>{e(p['ref'])}</td></tr>" for p in s['payments'])
+    body = (f"<h1>كشف حساب {e(s['party'])} — {e(month)}</h1><p>مؤسسة آفاق طويق للتخليص الجمركي — ترخيص 2513</p>"
+            '<table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr><th>#</th><th>رقم البيان</th><th>التاريخ</th>'
+            '<th>قيمة الفاتورة</th><th>السجل التجاري</th><th>الضريبة 15%</th><th>المطالبة</th></tr>' + rows +
+            f"<tr><th colspan=6>الإجمالي</th><th>{s['total']:,.2f}</th></tr></table>"
+            '<h2>السداد خلال الشهر</h2><table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr><th>التاريخ</th><th>المبلغ</th><th>المرجع</th></tr>'
+            + pays + f"<tr><th>الإجمالي</th><th>{s['paid']:,.2f}</th><th></th></tr></table>"
+            f"<h2>الصافي المستحق عن الشهر: {s['total'] - s['paid']:,.2f} ريال</h2>"
+            '<p style="color:#777">من القيود المسجلة قبل الترحيل.</p>')
+    return HTMLResponse('<!doctype html><html lang=ar dir=rtl><meta charset=utf-8><title>كشف حساب</title>'
+                        '<body style="font-family:Arial;padding:24px">' + body + '</body></html>')
