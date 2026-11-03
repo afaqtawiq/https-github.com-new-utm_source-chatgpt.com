@@ -25,7 +25,8 @@ $req = Join-Path $Dir 'requirements.txt'
 & cmd /c "$py -m pip install --user -q -r `"$req`""
 & cmd /c "$py -m playwright install chromium"
 $launcher = Join-Path $Dir 'start.cmd'
-"@echo off`r`ncd /d `"$Dir`"`r`n$py afaq_runner.py`r`npause" | Set-Content -Encoding ascii $launcher
+$update = "powershell -NoProfile -Command `"try { Invoke-WebRequest -UseBasicParsing '$Base/afaq_runner.py' -OutFile afaq_runner.py.new; Move-Item -Force afaq_runner.py.new afaq_runner.py } catch {}`""
+"@echo off`r`nchcp 65001 >nul`r`ncd /d `"$Dir`"`r`n$update`r`n$py afaq_runner.py`r`npause" | Set-Content -Encoding ascii $launcher
 $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'جهاز آفاق طويق.lnk'
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $s.TargetPath = $launcher; $s.WorkingDirectory = $Dir; $s.Save()
 Write-Host 'تم التثبيت. افتح اختصار «جهاز آفاق طويق» على سطح المكتب والصق رمز الجهاز عند الطلب.' -ForegroundColor Green
