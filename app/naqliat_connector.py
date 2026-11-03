@@ -240,7 +240,7 @@ def ingest_naqliat_load(payload: NaqliatLoad, request: Request, background_tasks
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(401, "Connector authorization failed")
     saved = _save(payload)
-    if saved and saved[1]:
+    if saved:
         # Owner request (Nov 2026): a captured load goes to the manager with a ready confirmation code;
         # the owner is contacted only after «نفذ CODE».
         from app.transport_desk import notify_capture
@@ -264,7 +264,7 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: 
         description=raw[:3000], owner_phone=owner_phone, raw_text=raw,
         capture_method="android_ocr")
     saved = _save(item)
-    if saved and saved[1]:
+    if saved:
         from app.transport_desk import notify_capture
         background_tasks.add_task(notify_capture, saved[0])
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
