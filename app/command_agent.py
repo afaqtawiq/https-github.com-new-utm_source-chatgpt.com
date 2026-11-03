@@ -51,10 +51,16 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name']}},
     {'name': 'record_payment', 'description': 'Record money RECEIVED from a customer as a finance draft receipt (owner posts it later). e.g. «استلمنا 50000 من الياسمين حوالة 123». date YYYY-MM-DD optional; ref = transfer/cheque reference.',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'amount': {'type': 'string'}, 'date': {'type': 'string'}, 'ref': {'type': 'string'}}, 'required': ['name', 'amount']}},
-    {'name': 'broadcast_load', 'description': 'Offer a freight load to ALL registered drivers on WhatsApp (or only Saudi/UAE numbers). Use when staff send a load to be distributed to drivers. driver_price = the price offered to the driver (if only the owner/agreed price is given, the driver price is that minus 150 SAR commission). Needs the manager confirmation code before sending.',
+    {'name': 'broadcast_load', 'description': 'Offer a freight load to ALL registered drivers on WhatsApp (or only Saudi/UAE numbers). Use when staff send a load to be distributed to drivers. driver_price = the price offered to the driver. If only the owner price is given, ask the manager for this load's commission (never assume a fixed commission). Needs the manager confirmation code before sending.',
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'weight': {'type': 'string', 'description': 'tons'}, 'driver_price': {'type': 'string'}, 'unloading': {'type': 'string'}, 'payment': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']}}, 'required': ['origin', 'destination', 'weight', 'driver_price']}},
-    {'name': 'negotiate_owner', 'description': 'Start a natural WhatsApp conversation with a load owner (by phone) to collect the load details and price. origin/destination = the route if known. Needs the manager confirmation code before the first message.',
-     'input_schema': {'type': 'object', 'properties': {'phone': {'type': 'string'}, 'origin': {'type': 'string'}, 'destination': {'type': 'string'}}, 'required': ['phone', 'origin', 'destination']}},
+    {'name': 'negotiate_owner', 'description': 'Start a natural WhatsApp conversation with a load owner (by phone) to collect the load details and price. origin/destination = the route if known. load_ref = a captured Naqliat load (e.g. «فاوض NQ-12») — then phone/route come from it. Needs the manager confirmation code before the first message.',
+     'input_schema': {'type': 'object', 'properties': {'phone': {'type': 'string'}, 'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'load_ref': {'type': 'string'}}}},
+    {'name': 'assign_driver', 'description': 'Manager assigns a broadcast load to a driver who accepted it and links driver and load owner (each gets the other\'s contact). e.g. «اسند AFT-7 للسائق 0551234567»; without a phone the first driver who accepted. Needs the confirmation code.',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'driver_phone': {'type': 'string'}}, 'required': ['ref']}},
+    {'name': 'load_acceptances', 'description': 'Which drivers accepted a broadcast load (e.g. «مين وافق على AFT-7»).',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}, 'required': ['ref']}},
+    {'name': 'whatsapp_templates', 'description': 'Approval status in Meta of the WhatsApp templates (owner inquiry, driver offer, marketing). e.g. «حالة القوالب».',
+     'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'approve_owner_load', 'description': 'Manager approves a collected load file and sets OUR commission; the load is then offered to all drivers at owner price minus commission. e.g. «اعتمد الحمولة 4 عمولة 300».',
      'input_schema': {'type': 'object', 'properties': {'file': {'type': 'string'}, 'commission': {'type': 'string'}}, 'required': ['file', 'commission']}},
     {'name': 'owner_load_status', 'description': 'Show what was collected so far from a load owner (file number).',
@@ -257,6 +263,14 @@ def tool_broadcast_load(c, a):
 
 def tool_negotiate_owner(c, a):
     from app import owner_negotiation
+    ref = re.search(r'NQ\s*-?\s*(\d+)', str(a.get('load_ref') or ''), re.I)
+    if ref:
+        from app import transport_desk
+        transport_desk.init()
+        chat = CHAT.get()
+        if not chat:
+            return 'تعذر تجهيز التأكيد في هذه المحادثة.'
+        return transport_desk.offer_negotiation(c, chat[0], chat[1], int(ref.group(1)))
     phone = owner_negotiation.digits(a.get('phone'))
     if len(phone) < 11:
         return 'رقم صاحب الحمولة غير واضح.'
@@ -282,6 +296,33 @@ def tool_owner_load_status(c, a):
     if not row:
         return 'لا يوجد ملف بهذا الرقم.'
     return f"ملف {row['id']} — الحالة: {row['status']}\n" + (owner_negotiation.summary(_json.loads(row['fields'] or '{}')) or 'لا تفاصيل بعد.')
+
+
+def tool_assign_driver(c, a):
+    from app import transport_desk
+    if not _member().get('manager'):
+        return 'إسناد الحمولة للسائق للمدير فقط.'
+    chat = CHAT.get()
+    if not chat:
+        return 'تعذر تجهيز التأكيد في هذه المحادثة.'
+    return transport_desk.prepare_assign(c, chat[0], chat[1], a.get('ref'), a.get('driver_phone') or '')
+
+
+def tool_load_acceptances(c, a):
+    from app import transport_desk
+    transport_desk.init()
+    m = re.search(r'(\d+)', str(a.get('ref') or ''))
+    if not m:
+        return 'اذكر رقم الحمولة مثل AFT-7.'
+    rows = transport_desk.accepted_list(c, int(m.group(1)))
+    if not rows:
+        return f'لم يوافق أي سائق على AFT-{m.group(1)} بعد.'
+    return f'الموافقون على AFT-{m.group(1)}:\n' + '\n'.join(f"• {r.get('driver_name') or 'سائق'} +{r['phone']}" + (f" — {r['vehicle_type']}" if r.get('vehicle_type') else '') for r in rows)
+
+
+def tool_whatsapp_templates(c, a):
+    from app import transport_desk
+    return transport_desk.templates_text()
 
 
 def tool_broadcast_status(c, a):
@@ -396,6 +437,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'negotiate_owner':
         from app import owner_negotiation
         return owner_negotiation.start(action, member.get('name') or '')
+    if action.get('tool') == 'assign_driver':
+        from app import transport_desk
+        return transport_desk.assign(action)
     if action.get('tool') == 'broadcast_load':
         from app import load_broadcast
         return load_broadcast.start(action, member.get('name') or '')

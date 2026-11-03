@@ -39,6 +39,7 @@ owner_phone: that load owner's visible phone or null (not a tariff sheet company
 weight_tons, vehicle_type, price_sar, payment, loading_date, goods, distance_km:
 visible single-load values or null
 notes: short visible detail
+phones_visible: list of every phone number visible anywhere in the image (e.g. a WhatsApp chat header), [] if none
 confidence: finite number from 0 to 1 for document classification and single-load facts"""
 
 
@@ -189,6 +190,24 @@ def verified_single_load(fields):
             and len(_text(fields.get('origin'))) >= 2 and len(_text(fields.get('destination'))) >= 2)
 
 
+def phone_screenshot_reply(c, payload, sender, fields):
+    """A non-load screenshot that shows the owner's number (e.g. his WhatsApp chat)."""
+    if fields.get('document_kind') not in ('other', 'unclear', 'load_listing', None):
+        return None
+    from app import transport_desk
+    transport_desk.init()
+    found = []
+    for value in list(fields.get('phones_visible') or []) + [fields.get('owner_phone')]:
+        for number in transport_desk.phones_in(value):
+            if number not in found:
+                found.append(number)
+    if len(found) != 1:
+        return None
+    conversation = (payload.get('conversation') or {}).get('id')
+    attached = transport_desk.attach_phone(c, sender, conversation, found[0])
+    return attached or (f'حفظت رقم صاحب الحمولة +{found[0]} ✅ أرسل لقطة تفاصيل الحمولة من نقليات وأربطها به.')
+
+
 async def handle_image(c, payload, sender, index):
     from app.staff_intake import audit, explicit_load
     command = '[صورة: غير محددة]'
@@ -208,15 +227,22 @@ async def handle_image(c, payload, sender, index):
         elif kind == 'rate_table':
             reply = 'وصلني جدول أسعار النقل كمرجع داخلي لآفاق طويق. سأتعامل مع كل سعر حسب مساره؛ لم أُحدّث قائمة الأسعار المعتمدة في البرنامج.'
         elif not verified_single_load(fields):
-            reply = ('وصلني المستند للمراجعة. ' + description + '\n' if description else 'نوع الصورة غير واضح بما يكفي. ')
-            reply += 'ما المطلوب من المستند؟ لم أسجل شحنة من هذه الصورة.'
-        elif not explicit_load(str((payload.get('message') or {}).get('text') or '')):
-            reply = 'تبدو الصورة تفاصيل حمولة واحدة. هل تريد تسجيلها؟ أعد إرسالها مع عبارة «سجل هذه الحمولة» للتسجيل للمراجعة.'
+            reply = phone_screenshot_reply(c, payload, sender, fields)
+            if reply is None:
+                reply = ('وصلني المستند للمراجعة. ' + description + '\n' if description else 'نوع الصورة غير واضح بما يكفي. ')
+                reply += 'ما المطلوب من المستند؟ لم أسجل شحنة من هذه الصورة.'
         else:
+            # Owner request (Nov 2026): a load screenshot from the manager is registered directly and a ready
+            # confirmation code is offered; contacting the owner still needs «نفذ CODE».
+            from app import transport_desk
+            transport_desk.init()
+            if not _text(fields.get('owner_phone')):
+                found = transport_desk.phones_in(caption) or [transport_desk.waiting_phone(c, sender)]
+                if found and found[0]:
+                    fields['owner_phone'] = '+' + found[0]
             saved = save_load(fields)
-            reply = (summary(fields, saved) if saved else
+            reply = (transport_desk.offer_negotiation(c, sender, (payload.get('conversation') or {}).get('id'), saved[0]) if saved else
                      'لم أتمكن من قراءة مدينة التحميل والتنزيل من الصورة. أرسل لقطة أوضح لشاشة تفاصيل الحمولة.')
-            # Registration is not permission to contact the owner or drivers.
     except ValueError as error:
         reply = str(error)
     except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError):
@@ -333,6 +359,19 @@ async def admin_reply(c, payload, sender):
     if pdf is not None and admin.audio_index(message) is None:
         admin.ensure_admin(c)
         return await handle_pdf(c, payload, sender, pdf)
+    if not message.get('attachments'):
+        try:
+            from app import transport_desk
+            number = transport_desk.phone_message(message.get('text'))
+            if number:
+                transport_desk.init()
+                if transport_desk.waiting_load(c, sender):
+                    reply = transport_desk.attach_phone(c, sender, (payload.get('conversation') or {}).get('id'), number)
+                    if reply:
+                        from app.staff_intake import audit
+                        return audit(c, payload, sender, reply, message.get('text'))
+        except Exception as exc:
+            print('TRANSPORT_PHONE_ATTACH', type(exc).__name__, str(exc)[:120], flush=True)
     return await _original_admin_reply(c, payload, sender)
 
 

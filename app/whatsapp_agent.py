@@ -236,6 +236,28 @@ async def processing(job):
     if job['account_id'] != z.account_id() or not enabled(settings,job['sender']):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
+    if not data.get('attachments') and data.get('question_allowed') and data.get('question') and 'AFT' in str(data['question']).upper():
+        def driver_accept():
+            try:
+                from app import transport_desk
+                return transport_desk.driver_accept(job['sender'], data['question'])
+            except Exception as exc:
+                print('TRANSPORT_DRIVER_ACCEPT', type(exc).__name__, str(exc)[:160], flush=True)
+                return None
+        accepted = await run_in_threadpool(driver_accept)
+        if accepted:
+            if not await run_in_threadpool(store.reserve_model, jid, lease):
+                return
+            await run_in_threadpool(store.save_model, jid, lease, reply_text=accepted[0],
+                                    diagnostics={'model_success': True, 'model_attempted': False, 'model_reason': 'driver_acceptance'})
+            await run_in_threadpool(store.prepare_reply, jid, lease)
+            if accepted[1]:
+                try:
+                    from app.owner_briefing import deliver
+                    await deliver(accepted[1])
+                except Exception as exc:
+                    print('TRANSPORT_MANAGER_NOTICE', type(exc).__name__, flush=True)
+            return
     if not data.get('attachments') and data.get('question_allowed') and data.get('question'):
         def negotiation_open(sender):
             try:
