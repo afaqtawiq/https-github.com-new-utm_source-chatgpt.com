@@ -240,9 +240,11 @@ def ingest_naqliat_load(payload: NaqliatLoad, request: Request, background_tasks
     if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(401, "Connector authorization failed")
     saved = _save(payload)
-    if saved:
-        from app.freight_workflow import contact_owner
-        background_tasks.add_task(contact_owner, saved[2], approved=True)
+    if saved and saved[1]:
+        # Owner request (Nov 2026): a captured load goes to the manager with a ready confirmation code;
+        # the owner is contacted only after «نفذ CODE».
+        from app.transport_desk import notify_capture
+        background_tasks.add_task(notify_capture, saved[0])
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None}
 
@@ -262,9 +264,9 @@ def ingest_naqliat_ocr(payload: NaqliatOcr, request: Request, background_tasks: 
         description=raw[:3000], owner_phone=owner_phone, raw_text=raw,
         capture_method="android_ocr")
     saved = _save(item)
-    if saved:
-        from app.freight_workflow import contact_owner
-        background_tasks.add_task(contact_owner, saved[2], approved=True)
+    if saved and saved[1]:
+        from app.transport_desk import notify_capture
+        background_tasks.add_task(notify_capture, saved[0])
     return {"ok": True, "created": bool(saved and saved[1]), "id": saved[0] if saved else None,
             "promoted": saved is not None,
             "origin": item.origin, "destination": item.destination, "owner_phone": _clean_phone(item.owner_phone),

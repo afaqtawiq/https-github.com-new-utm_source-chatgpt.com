@@ -23,6 +23,9 @@ def init():
         c.execute('''CREATE TABLE IF NOT EXISTS load_broadcast_recipients(
             broadcast_id BIGINT NOT NULL REFERENCES load_broadcasts(id), driver_id BIGINT, phone TEXT NOT NULL,
             status TEXT NOT NULL, error TEXT, sent_at TIMESTAMPTZ, PRIMARY KEY(broadcast_id, phone))''')
+        c.execute('ALTER TABLE load_broadcasts ADD COLUMN IF NOT EXISTS negotiation_id BIGINT')
+        c.execute('ALTER TABLE load_broadcasts ADD COLUMN IF NOT EXISTS assigned_phone TEXT')
+        c.execute('ALTER TABLE load_broadcast_recipients ADD COLUMN IF NOT EXISTS replied_at TIMESTAMPTZ')
 
 
 def clean(value, limit=80):
@@ -122,10 +125,11 @@ def start(action, actor_name=''):
     if not targets:
         return 'لا يوجد سائقون مسجلون لهذه الفئة؛ لم يُرسل شيء.'
     with db() as c:
-        bid = c.execute('''INSERT INTO load_broadcasts(origin,destination,weight,driver_price,unloading,payment,audience,message,status,created_by,created_at)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,'','sending',%s,%s) RETURNING id''',
+        nid = action.get('negotiation_id')
+        bid = c.execute('''INSERT INTO load_broadcasts(origin,destination,weight,driver_price,unloading,payment,audience,message,status,created_by,created_at,negotiation_id)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,'','sending',%s,%s,%s) RETURNING id''',
             (load['origin'], load['destination'], load['weight'], load['driver_price'], load['unloading'], load['payment'],
-             load['audience'], actor_name, utcnow())).fetchone()['id']
+             load['audience'], actor_name, utcnow(), int(nid) if nid else None)).fetchone()['id']
         ref = 'AFT-' + str(bid)
         text = message(ref, load)
         c.execute('UPDATE load_broadcasts SET message=%s WHERE id=%s', (text, bid))
@@ -139,7 +143,7 @@ def start(action, actor_name=''):
                       (bid, d['id'], phone))
     threading.Thread(target=lambda: asyncio.run(send_all(bid)), daemon=True).start()
     return (f'✅ بدأ إرسال الحمولة {ref} إلى {len(seen)} سائق ({load["origin"]} → {load["destination"]}، سعر السائق {load["driver_price"]} ريال). '
-            f'السائق يرد بـ «موافق {ref}». اسأل «حالة الإرسال {ref}» لمعرفة النتيجة.')
+            f'السائق يرد بـ «موافق {ref}» وأبلغك فورًا بكل موافقة لتختار السائق. اسأل «حالة الإرسال {ref}» لمعرفة النتيجة.')
 
 
 def status_text(ref):
@@ -150,6 +154,8 @@ def status_text(ref):
         if not row:
             return 'لا يوجد إرسال حمولات مسجل.'
         counts = c.execute('''SELECT COUNT(*) FILTER (WHERE status='sent') s, COUNT(*) FILTER (WHERE status IN ('failed','uncertain')) f,
-            COUNT(*) FILTER (WHERE status IN ('pending','sending')) p FROM load_broadcast_recipients WHERE broadcast_id=%s''', (row['id'],)).fetchone()
+            COUNT(*) FILTER (WHERE status IN ('pending','sending')) p,
+            COUNT(*) FILTER (WHERE status IN ('accepted','assigned')) a FROM load_broadcast_recipients WHERE broadcast_id=%s''', (row['id'],)).fetchone()
     return (f"الحمولة AFT-{row['id']} ({row['origin']} → {row['destination']}): أُرسلت {counts['s']}، "
-            f"تعذر {counts['f']}، متبقي {counts['p']}.")
+            f"تعذر {counts['f']}، متبقي {counts['p']}، وافق {counts['a']}."
+            + (f" — مسندة للسائق +{row['assigned_phone']}" if row.get('assigned_phone') else ''))
