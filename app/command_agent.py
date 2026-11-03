@@ -67,8 +67,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
-    {'name': 'runner_task', 'description': 'Manager only. Create a task for the WORK COMPUTER browser: download_test (first trial), read_page (url), download_file (url), fill_form (url + fields [{label,value}] + optional submit_label; submitting waits for the manager approval), fasah_declarations (which: import/export — read-only list as CSV). Allowed sites only; never passwords/OTP.',
-     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
+    {'name': 'runner_task', 'description': 'Manager only. Create a task for the WORK COMPUTER browser: download_test (first trial), read_page (url), download_file (url), fill_form (url + fields [{label,value}] + optional submit_label; submitting waits for the manager approval), fasah_declarations (which import/export, party = importer/exporter name filter e.g. «سلة», since YYYY-MM-DD, pages 1-20 — read-only list; new unbilled سلة الرحائب declarations are then prepared for billing with a confirmation code), fasah_details (number — read one declaration invoice and fees). Allowed sites only; never passwords/OTP.',
+     'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'party': {'type': 'string'}, 'since': {'type': 'string'}, 'pages': {'type': 'string'}, 'number': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
     {'name': 'runner_deny', 'description': 'Manager refuses a work-computer approval request («ارفض الطلب 4»).',
      'input_schema': {'type': 'object', 'properties': {'approval': {'type': 'string'}}, 'required': ['approval']}},
     {'name': 'runner_status', 'description': 'Steps, result and files of a work-computer task (latest if no id).',
@@ -364,7 +364,8 @@ def tool_runner_task(c, a):
     if not _member().get('manager'):
         return 'مهام جهاز العمل للمدير فقط.'
     return agent_runner.create_task(a.get('kind'), {'url': a.get('url'), 'which': a.get('which'), 'fields': a.get('fields'),
-                                                    'submit_label': a.get('submit_label')}, _member().get('name') or '')[1]
+                                                    'submit_label': a.get('submit_label'), 'party': a.get('party'), 'since': a.get('since'),
+                                                    'pages': a.get('pages'), 'number': a.get('number')}, _member().get('name') or '')[1]
 
 
 def tool_runner_deny(c, a):
@@ -508,6 +509,27 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'negotiate_owner':
         from app import owner_negotiation
         return owner_negotiation.start(action, member.get('name') or '')
+    if action.get('tool') == 'record_billing':
+        import datetime as _dt
+        from app import billing_rules
+        from app.prospect_autopilot import system_user
+        out = []
+        for d in action.get('items') or []:
+            d = dict(d)
+            if d.get('date') and isinstance(d['date'], str):
+                for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
+                    try:
+                        d['date'] = _dt.datetime.strptime(d['date'], fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    d['date'] = None
+            try:
+                out.append('• ' + billing_rules.record(d, system_user())[2].split('\n')[0] + (' — ' + str(d.get('number')) if d.get('number') else ''))
+            except Exception as exc:
+                out.append('• ' + str(d.get('number')) + ': ' + str(exc)[:100])
+        return '✅ ' + str(action.get('label') or 'التسجيل') + '\n' + '\n'.join(out) + '\nالقيود مسودات في صفحة المالية بانتظار ترحيلك.'
     if action.get('tool') == 'runner_approve':
         from app import agent_runner
         return agent_runner.decide(action['approval_id'], True, member.get('name') or 'المدير')

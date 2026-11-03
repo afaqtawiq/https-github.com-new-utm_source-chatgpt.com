@@ -214,6 +214,22 @@ def run():
         except Exception as exc:
             assert '401' in str(exc)
         print('PASS: rotate invalidates the old token; revoke disables the device.')
+
+        # 9. FASAH list -> only unbilled سلة الرحائب declarations are proposed (nothing recorded without a code).
+        from app import billing_rules
+        billing_rules.init()
+        with db() as c:
+            c.execute("""INSERT INTO billing_declarations(number,kind,party,items_json,status,created_by,created_at)
+                VALUES('206987','export','سلة الرحائب','[]','drafted',NULL,NOW())""")
+        rows = [{'رقم البيان': '206987', 'التاريخ': '02/11/2026', 'التفاصيل': 'جمرك البطحاء بيان إعادة تصدير مؤسسة سلة الرحائب للتجارة مفسوح'},
+                {'رقم البيان': '206826', 'التاريخ': '02/11/2026', 'التفاصيل': 'جمرك البطحاء بيان إعادة تصدير مؤسسة سلة الرحائب للتجارة مفسوح'},
+                {'رقم البيان': '420653', 'التاريخ': '03/11/2026', 'التفاصيل': 'جمرك البطحاء بيان إستيراد مؤسسة سلة الرحائب للتجارة'},
+                {'رقم البيان': '420351', 'التاريخ': '03/11/2026', 'التفاصيل': 'جمرك البطحاء بيان إستيراد شركة أخرى'}]
+        new = agent_runner.unbilled(rows, 'سلة')
+        assert [(n['number'], n['kind']) for n in new] == [('206826', 'export'), ('420653', 'import')], new
+        with db() as c:
+            assert c.execute("SELECT COUNT(*) n FROM billing_declarations").fetchone()['n'] == 1
+        print('PASS: only unbilled سلة الرحائب declarations are proposed; nothing is recorded without confirmation.')
         context.close()
     server.should_exit = True
     site.shutdown()

@@ -333,8 +333,8 @@ class Task:
         self.step('أُرسل النموذج بعد موافقتك', page=page)
         return True
 
-    def do_fasah_declarations(self):
-        which = self.params.get('which', 'import')
+    def fasah_list(self, which):
+        """Open FASAH (reusing the signed-in window) and show the import/export declaration list."""
         label = 'بيان التصدير' if which == 'export' else 'بيان الاستيراد'
         # Reuse an open FASAH window: closing it can end the FASAH session.
         page = next((p for p in self.context.pages if 'fasah.zatca.gov.sa' in p.url and not p.is_closed()), None)
@@ -356,22 +356,18 @@ class Task:
                 break
         else:
             raise ValueError('لم يكتمل تسجيل الدخول في فسح خلال 6 دقائق')
-        self.step('فسح مفتوح بعد تسجيل الدخول', page=page)
-        opened = False
-        # Decline optional cookies (privacy-preserving choice) so the banner does not cover the menu.
         try:
             decline = page.get_by_role('button', name='رفض', exact=True)
             if decline.count() and decline.first.is_visible():
                 decline.first.click(timeout=5000)
         except Exception:
             pass
-        section = 'البيان الجمركي و الفسح'
         for _ in range(8):  # the home page keeps loading for a while after sign-in
             self.poll()
             try:
                 link = page.get_by_role('link', name=label, exact=True)
                 if not (link.count() and link.first.is_visible()):
-                    menu = page.get_by_text(section, exact=True)
+                    menu = page.get_by_text('البيان الجمركي و الفسح', exact=True)
                     if menu.count():
                         menu.first.click(timeout=8000)
                         self.wait(page, 2)
@@ -379,25 +375,83 @@ class Task:
                 if link.count() and link.first.is_visible():
                     link.first.click(timeout=8000)
                     self.wait(page, 5)
-                if page.get_by_text('إنشاء بيان جديد').count() and page.get_by_text('رقم البيان').count():
-                    opened = True
-                    break
+                if self.list_rows(page):
+                    self.step('فتحت قائمة ' + label, page=page)
+                    return page
             except Stop:
                 raise
             except Exception:
                 pass
             self.wait(page, 4)
-        if not opened:
-            raise ValueError('لم أجد قائمة «' + label + '» في فسح بعد الدخول')
-        self.wait(page, 3)
-        self.step('فتحت قائمة ' + label, page=page)
+        raise ValueError('لم أجد قائمة «' + label + '» في فسح بعد الدخول')
+
+    @staticmethod
+    def list_rows(page):
         text = page.locator('main').inner_text()
-        parts = re.split(r'\n(?=\d{14}\b)', text)
         rows = []
-        for part in parts:
+        for part in re.split(r'\n(?=\d{14}\b)', text):
             m = re.match(r'^(\d{14})\s+(?:(\d{3,8})\s+)?(?:(\d{2}/\d{2}/\d{4})\s+)?(.*)$', ' '.join(part.split()))
             if m:
-                rows.append([m.group(1), m.group(2) or '', m.group(3) or '', m.group(4)[:300]])
+                details = re.sub(r'\s*(إظهار التفاصيل|تتبع مراحل البيان).*$', '', m.group(4))
+                rows.append([m.group(1), m.group(2) or '', m.group(3) or '', details[:300]])
+        return rows
+
+    def filter_party(self, page, name, which):
+        """FASAH filter panel: importer/exporter name (read-only filtering)."""
+        page.get_by_text('تصفية', exact=True).first.click(timeout=8000)
+        self.wait(page, 2)
+        box = None
+        for label in (('اسم المصدّر', 'اسم المصدر') if which == 'export' else ('اسم المستورد',)):
+            for loc in (page.get_by_placeholder(label), page.get_by_role('textbox', name=label), page.get_by_label(label)):
+                if loc.count():
+                    box = loc.first
+                    break
+            if box is not None:
+                break
+        if box is None:
+            raise ValueError('لم أجد خانة تصفية اسم المستورد/المصدر')
+        box.fill(name)
+        page.get_by_role('button', name='تطبيق الاختيارات').first.click(timeout=8000)
+        self.wait(page, 5)
+        self.step('صفّيت القائمة على: ' + name, page=page)
+
+    def next_page(self, page, number):
+        before = (self.list_rows(page) or [[None]])[0][0]
+        target = page.locator('ul.pagination, nav, .pagination').get_by_text(str(number), exact=True)
+        if not target.count():
+            target = page.get_by_role('button', name=str(number), exact=True)
+        if not target.count():
+            return False
+        target.last.click(timeout=8000)
+        for _ in range(10):
+            self.wait(page, 1.5)
+            rows = self.list_rows(page)
+            if rows and rows[0][0] != before:
+                return True
+        return False
+
+    def collect(self, page, since=None, pages=3):
+        rows, seen = [], set()
+        for number in range(1, max(1, min(int(pages or 3), 20)) + 1):
+            if number > 1 and not self.next_page(page, number):
+                break
+            fresh = [r for r in self.list_rows(page) if r[0] not in seen]
+            seen.update(r[0] for r in fresh)
+            rows += fresh
+            if since and fresh:
+                dates = [time.strptime(r[2], '%d/%m/%Y') for r in fresh if r[2]]
+                if dates and min(dates) < time.strptime(since, '%Y-%m-%d'):
+                    break
+        if since:
+            rows = [r for r in rows if not r[2] or time.strptime(r[2], '%d/%m/%Y') >= time.strptime(since, '%Y-%m-%d')]
+        return rows
+
+    def do_fasah_declarations(self):
+        which = self.params.get('which', 'import')
+        page = self.fasah_list(which)
+        if self.params.get('party'):
+            self.filter_party(page, self.params['party'], which)
+        rows = self.collect(page, self.params.get('since'), self.params.get('pages', 3))
         path = self.dir / f'fasah-{which}.csv'
         with open(path, 'w', newline='', encoding='utf-8-sig') as f:
             w = csv.writer(f)
@@ -405,6 +459,35 @@ class Task:
             w.writerows(rows)
         self.step(f'قرأت {len(rows)} بيان (قراءة فقط)')
         return self.upload(path, page.url)
+
+    def do_fasah_details(self):
+        """Open ONE declaration's details and save its text (read-only), for billing."""
+        which, number = self.params.get('which', 'import'), str(self.params.get('number') or '')
+        if not re.fullmatch(r'\d{3,8}', number):
+            raise ValueError('رقم البيان غير صالح')
+        page = self.fasah_list(which)
+        if self.params.get('party'):
+            self.filter_party(page, self.params['party'], which)
+        for p in range(1, 11):
+            if p > 1 and not self.next_page(page, p):
+                break
+            row = page.locator('tr', has_text=number)
+            if row.count():
+                row.first.get_by_text('إظهار التفاصيل').first.click(timeout=8000)
+                self.wait(page, 4)
+                tab = page.get_by_text('تفاصيل الطلب', exact=True)
+                if tab.count():
+                    tab.first.click(timeout=8000)
+                    self.wait(page, 4)
+                text = page.locator('body').inner_text()
+                self.step('فتحت تفاصيل البيان ' + number, page=page)
+                close = page.get_by_text('إغلاق', exact=True)
+                if close.count():
+                    close.first.click(timeout=5000)
+                path = self.dir / f'fasah-{number}.txt'
+                path.write_text(text, encoding='utf-8')
+                return self.upload(path, page.url)
+        raise ValueError('لم أجد البيان ' + number + ' في القائمة')
 
 
 def run_one(api, got, context):

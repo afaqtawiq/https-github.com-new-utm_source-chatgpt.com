@@ -28,5 +28,10 @@ def test_create_task_refusals_before_any_storage():
 
 
 def test_only_known_kinds():
-    assert set(ar.KINDS) == {'download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations'}
+    assert set(ar.KINDS) == {'download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details'}
     assert 'application/x-msdownload' not in ar.FILE_TYPES
+
+
+def test_fasah_params_validated_before_storage():
+    assert ar.create_task('fasah_details', {'number': 'abc'})[0] is None
+    assert ar.create_task('fasah_declarations', {'since': '1/10/2026'})[0] is None
