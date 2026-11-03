@@ -73,6 +73,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'fasah_importer_phone', 'description': 'Manager only. Save the WhatsApp number of an importer AS ITS NAME APPEARS IN FASAH, so status-change messages to that customer can be prepared (sent only after «نفذ»). e.g. «رقم المستورد سلة الرحائب 0551234567».',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}}, 'required': ['name', 'phone']}},
+    {'name': 'prospect_replies', 'description': 'Which contacted prospect companies replied to the agent outreach and how (interested, asked price, not interested, stop), with quotes prepared. Optional days (default 7). e.g. «مين رد من العملاء المحتملين» «ردود حملة التعريف».',
+     'input_schema': {'type': 'object', 'properties': {'days': {'type': 'string'}}}},
     {'name': 'runner_deny', 'description': 'Manager refuses a work-computer approval request («ارفض الطلب 4»).',
      'input_schema': {'type': 'object', 'properties': {'approval': {'type': 'string'}}, 'required': ['approval']}},
     {'name': 'runner_status', 'description': 'Steps, result and files of a work-computer task (latest if no id).',
@@ -365,6 +367,12 @@ def tool_fasah_importer_phone(c, a):
         return 'حفظ أرقام العملاء للمتابعة للمدير فقط.'
     from app import fasah_tracking
     return fasah_tracking.save_contact(a.get('name'), a.get('phone'), _member().get('name') or '')
+
+
+def tool_prospect_replies(c, a):
+    from app import prospect_replies
+    days = int(re.sub(r'\D', '', str(a.get('days') or '7')) or 7)
+    return prospect_replies.status_text(max(1, min(days, 60)))
 
 
 def tool_party_statement(c, a):
