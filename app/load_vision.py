@@ -239,6 +239,8 @@ async def handle_image(c, payload, sender, index):
             if reply is None:
                 reply = ('وصلني المستند للمراجعة. ' + description + '\n' if description else 'نوع الصورة غير واضح بما يكفي. ')
                 reply += 'ما المطلوب من المستند؟ لم أسجل شحنة من هذه الصورة.'
+        elif re.search(r'(لا|ما|مو|مش)\s*(ت|ن)?سجل', caption or ''):
+            reply = 'تمام، لم أسجل هذه الحمولة.'
         else:
             # Owner request (Nov 2026): a load screenshot from the manager is registered directly and a ready
             # confirmation code is offered; contacting the owner still needs «نفذ CODE».
@@ -249,7 +251,7 @@ async def handle_image(c, payload, sender, index):
                 if found and found[0]:
                     fields['owner_phone'] = '+' + found[0]
             saved = save_load(fields)
-            reply = (transport_desk.offer_negotiation(c, sender, (payload.get('conversation') or {}).get('id'), saved[0]) if saved else
+            reply = ((('' if saved[1] else 'ℹ️ هذه الحمولة مسجلة سابقًا.\n') + transport_desk.offer_negotiation(c, sender, (payload.get('conversation') or {}).get('id'), saved[0])) if saved else
                      'لم أتمكن من قراءة مدينة التحميل والتنزيل من الصورة. أرسل لقطة أوضح لشاشة تفاصيل الحمولة.')
     except ValueError as error:
         reply = str(error)

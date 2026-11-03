@@ -1,18 +1,21 @@
 """Work-computer runner for the Afaq agent (owner request, Nov 2026).
 
-The agent itself runs on Railway and cannot touch a browser that is signed in to FASAH or a desktop program.
-A small program (desktop-runner/afaq_runner.py) runs on a dedicated work computer, in its OWN Chrome profile where
-the owner signs in himself. It asks this server for approved tasks, executes them, and reports every step
-(text + optional screenshot), the files it downloaded (verified: size, type, opens) and the result.
+A small program (desktop-runner/afaq_runner.py) runs on a dedicated work computer in its OWN browser profile, where
+the owner signs in himself. It claims approved tasks from this server, executes them and reports every step.
 
-Safety:
-- Device tokens are generated here, shown once and stored only as SHA-256; nothing in the code holds a password,
-  OTP or session cookie. The runner never types passwords or OTPs.
-- Only allowlisted domains (RUNNER_ALLOWED_DOMAINS) — checked here when a task is created and again on the runner.
-- Task kinds are read-only for now (read pages, download, list FASAH declarations). Anything that submits forms,
-  pays, deletes, sends data or changes account settings is not a kind the runner accepts.
-- Every task can be stopped from WhatsApp or /agent-runner; the runner checks after each step.
-- A task is «done» only when the runner verified its result (e.g. the file exists, has the right type and opens).
+Security model (owner requirements):
+1. Device token: generated here, shown ONCE in the response body (never in a URL), stored only as SHA-256. Revoke
+   and rotate from /agent-runner. On the PC it lives in Windows Credential Manager, not in a file or the code.
+2. Only admins listed in RUNNER_VIEWER_USER_IDS (or any admin when unset) see tasks, files and screenshots.
+   Screenshots of login pages are rejected; uploads are limited to the expected file types and sizes.
+3. Allowlisted domains (RUNNER_ALLOWED_DOMAINS), https only: checked when a task is created, on claim, and for every
+   URL the runner reports (navigation, redirect, popup, download). A violation stops the task.
+4. Stop is effective during execution (the runner polls /control and aborts in-flight requests). Every step is logged.
+   A task is «done» only with a verified file. A task runs once: no re-queue, finish/upload are idempotent,
+   stale running tasks fail instead of re-running.
+5. Payment, deletion, sending data, submitting forms or changing account settings never run on their own: the runner
+   asks for an approval checkpoint; the manager approves each one with «نفذ CODE» (or the page button), otherwise it
+   expires as refused.
 """
 import base64
 import datetime as dt
@@ -22,7 +25,7 @@ import json
 import os
 import re
 import secrets
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -33,12 +36,16 @@ router = APIRouter()
 DEFAULT_DOMAINS = 'fasah.zatca.gov.sa,zatca.gov.sa,gulf-logistics-ai-v7-production.up.railway.app'
 KINDS = {
     'download_test': 'تجربة: تنزيل ملف تجريبي من النظام والتحقق منه',
-    'read_page': 'قراءة صفحة مسموحة وحفظ نصها وصورة منها',
+    'read_page': 'قراءة صفحة مسموحة وحفظ نصها',
     'download_file': 'تنزيل ملف من رابط مسموح والتحقق منه',
-    'fasah_declarations': 'قراءة قائمة البيانات في فسح (استيراد/تصدير) وحفظها كملف CSV — قراءة فقط',
+    'fill_form': 'تعبئة نموذج في موقع مسموح (الإرسال يحتاج موافقتك)',
+    'fasah_declarations': 'قراءة قائمة البيانات في فسح وحفظها CSV — قراءة فقط',
 }
+FILE_TYPES = {'application/pdf', 'text/csv', 'text/plain', 'image/png', 'image/jpeg',
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
 STATUS_AR = {'queued': 'بالانتظار', 'running': 'قيد التنفيذ', 'stopping': 'جارٍ الإيقاف', 'stopped': 'أوقفت',
              'done': 'نجحت وتم التحقق ✅', 'failed': 'فشلت ❌'}
+STALE_MINUTES = 30
 _READY = False
 
 
@@ -47,8 +54,10 @@ def allowed_domains():
 
 
 def domain_allowed(url):
-    host = (urlparse(str(url or '')).hostname or '').lower()
-    return bool(host) and urlparse(url).scheme == 'https' and any(host == d or host.endswith('.' + d) for d in allowed_domains())
+    parsed = urlparse(str(url or ''))
+    host = (parsed.hostname or '').lower()
+    schemes = ('https', 'http') if os.getenv('RUNNER_ALLOW_HTTP_LOOPBACK') == '1' and host in ('127.0.0.1',) else ('https',)
+    return bool(host) and parsed.scheme in schemes and any(host == d or host.endswith('.' + d) for d in allowed_domains())
 
 
 def init():
@@ -63,39 +72,67 @@ def init():
             created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ, finished_at TIMESTAMPTZ)''')
         c.execute('''CREATE TABLE IF NOT EXISTS runner_steps(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL, ok BOOLEAN NOT NULL,
             text TEXT NOT NULL, screenshot BYTEA, created_at TIMESTAMPTZ NOT NULL)''')
+        c.execute('ALTER TABLE runner_steps ADD COLUMN IF NOT EXISTS url TEXT')
         c.execute('''CREATE TABLE IF NOT EXISTS runner_files(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL, name TEXT NOT NULL,
             mime TEXT NOT NULL, size BIGINT NOT NULL, sha256 TEXT NOT NULL, verified BOOLEAN NOT NULL, data BYTEA NOT NULL,
             created_at TIMESTAMPTZ NOT NULL)''')
+        c.execute('CREATE UNIQUE INDEX IF NOT EXISTS runner_files_once ON runner_files(task_id, sha256)')
+        c.execute('''CREATE TABLE IF NOT EXISTS runner_approvals(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL, action TEXT NOT NULL,
+            detail TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', decided_by TEXT, created_at TIMESTAMPTZ NOT NULL,
+            decided_at TIMESTAMPTZ)''')
     _READY = True
 
 
-# ---------- tasks (from WhatsApp / page) ----------
+# ---------- tasks ----------
 
 def create_task(kind, params, actor=''):
     init()
     if kind not in KINDS:
         return None, 'نوع المهمة غير مدعوم. المتاح: ' + '، '.join(KINDS.values())
-    params = {k: v for k, v in (params or {}).items() if v not in (None, '')}
-    if kind in ('read_page', 'download_file') and not domain_allowed(params.get('url')):
+    params = {k: v for k, v in (params or {}).items() if v not in (None, '', [])}
+    if kind in ('read_page', 'download_file', 'fill_form') and not domain_allowed(params.get('url')):
         return None, 'الموقع غير مسموح. المواقع المسموحة: ' + '، '.join(allowed_domains())
+    if kind == 'fill_form':
+        fields = params.get('fields')
+        if not isinstance(fields, list) or not fields or len(fields) > 30:
+            return None, 'حدد حقول النموذج وقيمها.'
+        for f in fields:
+            label = str((f or {}).get('label') or '')
+            if re.search(r'(password|كلمة\s*(ال)?(مرور|سر)|otp|رمز\s*(ال)?تحقق|cvv|iban|ايبان|بطاقة)', label, re.I):
+                return None, 'لا أعبئ كلمات المرور أو رموز التحقق أو بيانات البطاقات والحسابات البنكية.'
     if kind == 'fasah_declarations':
         params['which'] = 'export' if str(params.get('which', '')).startswith(('ex', 'تص')) else 'import'
     with db() as c:
         tid = c.execute('INSERT INTO runner_tasks(kind,params_json,created_by,created_at) VALUES(%s,%s,%s,%s) RETURNING id',
                         (kind, json.dumps(params, ensure_ascii=False), actor, utcnow())).fetchone()['id']
-        device = c.execute('SELECT MAX(last_seen) s FROM runner_devices WHERE enabled').fetchone()['s']
-    online = device and (dt.datetime.now(dt.timezone.utc) - device).total_seconds() < 180
-    return tid, (f'🖥 أنشأت المهمة #{tid}: {KINDS[kind]}.' + ('' if online else
-                 '\n⚠️ جهاز العمل غير متصل الآن؛ تبدأ المهمة عند تشغيله.') + f'\nللإيقاف اكتب: أوقف المهمة {tid}')
+        seen = c.execute('SELECT MAX(last_seen) s FROM runner_devices WHERE enabled').fetchone()['s']
+    online = seen and (dt.datetime.now(dt.timezone.utc) - seen).total_seconds() < 180
+    return tid, (f'🖥 أنشأت المهمة #{tid}: {KINDS[kind]}.' + ('' if online else '\n⚠️ جهاز العمل غير متصل الآن؛ تبدأ المهمة عند تشغيله.')
+                 + f'\nللإيقاف اكتب: أوقف المهمة {tid}')
 
 
-def stop_task(tid):
+def stop_task(tid, reason='أوقفت بطلبك'):
     init()
     with db() as c:
         row = c.execute("""UPDATE runner_tasks SET status=CASE WHEN status='queued' THEN 'stopped' ELSE 'stopping' END,
             finished_at=CASE WHEN status='queued' THEN %s ELSE finished_at END WHERE id=%s AND status IN ('queued','running')
             RETURNING status""", (utcnow(), int(tid))).fetchone()
+        if row:
+            c.execute("UPDATE runner_approvals SET status='denied',decided_by='stop',decided_at=%s WHERE task_id=%s AND status='pending'",
+                      (utcnow(), int(tid)))
+            c.execute('INSERT INTO runner_steps(task_id,ok,text,created_at) VALUES(%s,FALSE,%s,%s)', (int(tid), '⏹ ' + reason, utcnow()))
     return f'⏹ أوقفت المهمة #{tid}.' if row else 'المهمة غير موجودة أو انتهت.'
+
+
+def decide(approval_id, approve, actor):
+    init()
+    with db() as c:
+        row = c.execute("""UPDATE runner_approvals SET status=%s,decided_by=%s,decided_at=%s WHERE id=%s AND status='pending'
+            AND created_at>NOW()-INTERVAL '15 minutes' RETURNING task_id,action""",
+                        ('approved' if approve else 'denied', actor, utcnow(), int(approval_id))).fetchone()
+    if not row:
+        return 'الطلب غير موجود أو انتهت مدته (15 دقيقة) أو تم البت فيه.'
+    return ('✅ وافقت على: ' if approve else '⛔ رفضت: ') + row['action'] + f" (المهمة #{row['task_id']})"
 
 
 def task_text(tid=None):
@@ -106,41 +143,54 @@ def task_text(tid=None):
         if not task:
             return 'لا توجد مهام.'
         steps = c.execute('SELECT ok,text FROM runner_steps WHERE task_id=%s ORDER BY id', (task['id'],)).fetchall()
-        files = c.execute('SELECT id,name,size,verified FROM runner_files WHERE task_id=%s', (task['id'],)).fetchall()
+        files = c.execute('SELECT name,size,verified FROM runner_files WHERE task_id=%s', (task['id'],)).fetchall()
     lines = [f"🖥 المهمة #{task['id']} — {KINDS.get(task['kind'], task['kind'])}: {STATUS_AR.get(task['status'], task['status'])}"]
     lines += [('✅ ' if s['ok'] else '❌ ') + s['text'] for s in steps[-12:]]
-    from app.daily_poster import base_url
-    lines += [f"📎 {f['name']} ({f['size']:,} بايت){' — تم التحقق' if f['verified'] else ''}: {base_url()}/agent-runner/files/{f['id']}" for f in files]
+    lines += [f"📎 {f['name']} ({f['size']:,} بايت){' — تم التحقق' if f['verified'] else ''}" for f in files]
+    if files:
+        lines.append('الملفات في صفحة /agent-runner (للمخولين فقط).')
     return '\n'.join(lines)
 
 
-# ---------- runner API ----------
+# ---------- runner API (token in header only) ----------
+
+def token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
 
 def device_for(request):
     init()
     token = request.headers.get('X-Runner-Token', '')
-    if not token:
+    if not token or len(token) > 200:
         raise HTTPException(401, 'token required')
-    digest = hashlib.sha256(token.encode()).hexdigest()
     with db() as c:
-        device = c.execute('SELECT * FROM runner_devices WHERE token_hash=%s AND enabled', (digest,)).fetchone()
+        device = c.execute('SELECT * FROM runner_devices WHERE token_hash=%s AND enabled', (token_hash(token),)).fetchone()
         if not device:
             raise HTTPException(401, 'unknown device')
         c.execute('UPDATE runner_devices SET last_seen=%s WHERE id=%s', (utcnow(), device['id']))
     return device
 
 
-def own_task(c, device, tid):
-    task = c.execute('SELECT * FROM runner_tasks WHERE id=%s AND device_id=%s', (tid, device['id'])).fetchone()
+def own_task(c, device, tid, lock=False):
+    task = c.execute('SELECT * FROM runner_tasks WHERE id=%s AND device_id=%s' + (' FOR UPDATE' if lock else ''), (tid, device['id'])).fetchone()
     if not task:
         raise HTTPException(404, 'task')
     return task
+
+
+def violation(c, tid, url):
+    c.execute("UPDATE runner_tasks SET status='stopping' WHERE id=%s AND status='running'", (tid,))
+    c.execute('INSERT INTO runner_steps(task_id,ok,text,url,created_at) VALUES(%s,FALSE,%s,%s,%s)',
+              (tid, '⛔ عنوان غير مسموح؛ أوقفت المهمة', str(url)[:300], utcnow()))
 
 
 @router.post('/api/runner/claim')
 def claim(request: Request):
     device = device_for(request)
     with db() as c:
+        # A crashed run is never re-executed: it fails and needs a new task.
+        c.execute("""UPDATE runner_tasks SET status='failed',finished_at=%s,result_json='{"error":"انقطع التنفيذ"}'
+            WHERE status IN ('running','stopping') AND started_at<NOW()-make_interval(mins => %s)""", (utcnow(), STALE_MINUTES))
         task = c.execute("""UPDATE runner_tasks SET status='running',device_id=%s,started_at=%s WHERE id=(
             SELECT id FROM runner_tasks WHERE status='queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *""",
                          (device['id'], utcnow())).fetchone()
@@ -148,43 +198,103 @@ def claim(request: Request):
         return {'task': None}
     params = json.loads(task['params_json'])
     if 'url' in params and not domain_allowed(params['url']):
-        stop_task(task['id'])
+        stop_task(task['id'], 'رابط غير مسموح')
         return {'task': None}
-    return {'task': {'id': task['id'], 'kind': task['kind'], 'params': params}, 'allowed_domains': allowed_domains()}
+    return {'task': {'id': task['id'], 'kind': task['kind'], 'params': params}, 'allowed_domains': allowed_domains(),
+            'allow_http_loopback': os.getenv('RUNNER_ALLOW_HTTP_LOOPBACK') == '1'}
+
+
+@router.get('/api/runner/tasks/{tid}/control')
+def control(tid: int, request: Request):
+    device = device_for(request)
+    with db() as c:
+        task = own_task(c, device, tid)
+        c.execute("""UPDATE runner_approvals SET status='denied',decided_by='expired',decided_at=%s
+            WHERE task_id=%s AND status='pending' AND created_at<=NOW()-INTERVAL '15 minutes'""", (utcnow(), tid))
+        approvals = c.execute('SELECT id,status FROM runner_approvals WHERE task_id=%s', (tid,)).fetchall()
+    return {'stop': task['status'] not in ('running',), 'approvals': {str(a['id']): a['status'] for a in approvals}}
 
 
 @router.post('/api/runner/tasks/{tid}/step')
 async def step(tid: int, request: Request):
     device = device_for(request)
     body = await request.json()
+    url = str(body.get('url') or '')
     shot = body.get('screenshot_b64')
     data = base64.b64decode(shot) if shot else None
-    if data and len(data) > 3 * 1024 * 1024:
-        data = None
+    if data and (len(data) > 3 * 1024 * 1024 or not data.startswith(b'\x89PNG') or re.search(r'(login|signin|auth|otp)', url, re.I)):
+        data = None  # never keep screenshots of sign-in pages or non-PNG data
+    with db() as c:
+        task = own_task(c, device, tid, lock=True)
+        if task['status'] not in ('running', 'stopping'):
+            raise HTTPException(409, 'task finished')
+        if url and not domain_allowed(url):
+            violation(c, tid, url)
+            return {'stop': True}
+        c.execute('INSERT INTO runner_steps(task_id,ok,text,url,screenshot,created_at) VALUES(%s,%s,%s,%s,%s,%s)',
+                  (tid, bool(body.get('ok', True)), str(body.get('text') or '')[:1000], url[:300] or None, data, utcnow()))
+    return {'stop': task['status'] != 'running'}
+
+
+@router.post('/api/runner/tasks/{tid}/approval')
+async def request_approval(tid: int, request: Request):
+    """The runner reached a sensitive action (submit/pay/delete/send): ask the manager, one approval per action."""
+    device = device_for(request)
+    body = await request.json()
+    action = str(body.get('action') or 'إجراء')[:200]
+    detail = str(body.get('detail') or '')[:1500]
     with db() as c:
         task = own_task(c, device, tid)
-        c.execute('INSERT INTO runner_steps(task_id,ok,text,screenshot,created_at) VALUES(%s,%s,%s,%s,%s)',
-                  (tid, bool(body.get('ok', True)), str(body.get('text') or '')[:1000], data, utcnow()))
-    return {'stop': task['status'] == 'stopping'}
+        if task['status'] != 'running':
+            raise HTTPException(409, 'task not running')
+        aid = c.execute('INSERT INTO runner_approvals(task_id,action,detail,created_at) VALUES(%s,%s,%s,%s) RETURNING id',
+                        (tid, action, detail, utcnow())).fetchone()['id']
+        text = (f'🔐 المهمة #{tid} تطلب موافقتك قبل: {action}\n{detail}\n')
+        try:
+            from app import transport_desk
+            chat = transport_desk.manager_chat(c)
+            if chat:
+                token = transport_desk.pending(c, chat[0], chat[1], {'tool': 'runner_approve', 'approval_id': aid}, 15)
+                text += f'للموافقة اكتب: نفذ {token}\nللرفض: ارفض الطلب {aid} — أو اتركه 15 دقيقة فيُرفض تلقائيًا.'
+            else:
+                text += f'وافق أو ارفض من صفحة /agent-runner (الطلب {aid}).'
+        except Exception:
+            text += f'وافق أو ارفض من صفحة /agent-runner (الطلب {aid}).'
+    try:
+        import asyncio
+        from app.owner_briefing import deliver
+        asyncio.get_running_loop().create_task(deliver(text))
+    except Exception:
+        pass
+    return {'approval_id': aid}
 
 
 @router.post('/api/runner/tasks/{tid}/file')
 async def upload(tid: int, request: Request):
     device = device_for(request)
     body = await request.json()
+    mime = str(body.get('mime') or '').split(';')[0].strip().lower()
+    if mime not in FILE_TYPES:
+        raise HTTPException(415, 'file type not allowed')
     data = base64.b64decode(body.get('data_b64') or '')
     if not data or len(data) > 25 * 1024 * 1024:
         raise HTTPException(400, 'file size')
     digest = hashlib.sha256(data).hexdigest()
-    if body.get('sha256') and body['sha256'] != digest:
+    if body.get('sha256') != digest:
         raise HTTPException(400, 'checksum mismatch')
+    if body.get('source_url') and not domain_allowed(body['source_url']):
+        with db() as c:
+            violation(c, tid, body['source_url'])
+        raise HTTPException(403, 'source not allowed')
     with db() as c:
-        own_task(c, device, tid)
-        fid = c.execute('''INSERT INTO runner_files(task_id,name,mime,size,sha256,verified,data,created_at)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''', (tid, re.sub(r'[^\w.\-؀-ۿ ]', '_', str(body.get('name') or 'file'))[:120],
-                                                            str(body.get('mime') or 'application/octet-stream')[:80], len(data), digest,
-                                                            bool(body.get('verified')), data, utcnow())).fetchone()['id']
-    return {'id': fid, 'sha256': digest}
+        task = own_task(c, device, tid, lock=True)
+        if task['status'] not in ('running', 'stopping'):
+            raise HTTPException(409, 'task finished')
+        row = c.execute('''INSERT INTO runner_files(task_id,name,mime,size,sha256,verified,data,created_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(task_id,sha256) DO NOTHING RETURNING id''',
+                        (tid, re.sub(r'[^\w.\-؀-ۿ ]', '_', str(body.get('name') or 'file'))[:120], mime, len(data), digest,
+                         bool(body.get('verified')), data, utcnow())).fetchone()
+    return {'id': row['id'] if row else None, 'duplicate': row is None, 'sha256': digest}
 
 
 @router.post('/api/runner/tasks/{tid}/finish')
@@ -193,10 +303,14 @@ async def finish(tid: int, request: Request):
     body = await request.json()
     status = body.get('status') if body.get('status') in ('done', 'failed', 'stopped') else 'failed'
     with db() as c:
-        task = own_task(c, device, tid)
+        task = own_task(c, device, tid, lock=True)
+        if task['status'] not in ('running', 'stopping'):
+            raise HTTPException(409, 'already finished')
+        if task['status'] == 'stopping':
+            status = 'stopped'
         if status == 'done':
             verified = c.execute('SELECT COUNT(*) n FROM runner_files WHERE task_id=%s AND verified', (tid,)).fetchone()['n']
-            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations') and not verified:
+            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'read_page') and not verified:
                 status = 'failed'  # never «done» without a verified result
         c.execute('UPDATE runner_tasks SET status=%s,result_json=%s,finished_at=%s WHERE id=%s',
                   (status, json.dumps(body.get('result') or {}, ensure_ascii=False)[:20000], utcnow(), tid))
@@ -219,107 +333,151 @@ def test_file():
     return Response(pdf, media_type='application/pdf', headers={'Content-Disposition': 'attachment; filename="afaq-runner-test.pdf"'})
 
 
-# ---------- admin page ----------
+# ---------- admin page (authorized admins only) ----------
 
-def admin(request):
+def viewer(request):
     from app.social_publishing import admin as social_admin
-    return social_admin(request)
+    session = social_admin(request)
+    allowed = {x.strip() for x in os.getenv('RUNNER_VIEWER_USER_IDS', '').split(',') if x.strip()}
+    if allowed and str(session.get('user_id')) not in allowed:
+        raise HTTPException(403, 'غير مخول لعرض مهام جهاز العمل.')
+    return session
+
+
+async def form(request, session):
+    from app.social_publishing import csrf
+    data = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
+    csrf(session, data)
+    return data
+
+
+def token_page(name, token):
+    body = ('<h1>رمز الجهاز: ' + html.escape(name) + '</h1><p>انسخه الآن إلى برنامج الجهاز. لن يظهر مرة أخرى، ولا يُحفظ في النظام إلا مشفرًا.</p>'
+            '<p dir="ltr" style="font-size:18px;word-break:break-all;background:#081925;padding:14px">' + html.escape(token) + '</p>'
+            '<p><a href="/agent-runner">رجوع</a></p>')
+    from app.naqliat_connector import _page
+    return HTMLResponse(_page('رمز الجهاز', body), headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
 
 
 @router.get('/agent-runner', response_class=HTMLResponse)
-def page(request: Request, new_token: str = ''):
+def page(request: Request):
     from app.naqliat_connector import _page
-    session = admin(request)
+    session = viewer(request)
     init()
     e = lambda v: html.escape(str(v if v is not None else ''))
     with db() as c:
         devices = c.execute('SELECT * FROM runner_devices ORDER BY id').fetchall()
         tasks = c.execute('SELECT * FROM runner_tasks ORDER BY id DESC LIMIT 30').fetchall()
-        steps = c.execute('SELECT id,task_id,ok,text,(screenshot IS NOT NULL) shot,created_at FROM runner_steps WHERE task_id = ANY(%s) ORDER BY id',
-                          ([t['id'] for t in tasks] or [0],)).fetchall()
-        files = c.execute('SELECT id,task_id,name,size,verified FROM runner_files WHERE task_id = ANY(%s)', ([t['id'] for t in tasks] or [0],)).fetchall()
+        ids = [t['id'] for t in tasks] or [0]
+        steps = c.execute('SELECT id,task_id,ok,text,(screenshot IS NOT NULL) shot FROM runner_steps WHERE task_id = ANY(%s) ORDER BY id', (ids,)).fetchall()
+        files = c.execute('SELECT id,task_id,name,size,verified FROM runner_files WHERE task_id = ANY(%s)', (ids,)).fetchall()
+        approvals = c.execute("SELECT * FROM runner_approvals WHERE task_id = ANY(%s) ORDER BY id", (ids,)).fetchall()
     csrf = '<input type="hidden" name="csrf" value="' + e(session['csrf']) + '">'
-    body = ('<div class="nav"><a href="/dashboard">الرئيسية</a></div><h1>جهاز العمل (تنفيذ في المتصفح)</h1>'
-            '<p class="muted">المواقع المسموحة: ' + e('، '.join(allowed_domains())) + '. المهام الحالية قراءة وتنزيل فقط؛ '
-            'لا دفع ولا حذف ولا إرسال بيانات ولا تغيير إعدادات.</p>')
-    if new_token:
-        body += ('<div class="card" style="border-color:#ff7900"><b>رمز الجهاز (يظهر مرة واحدة فقط — انسخه الآن إلى برنامج الجهاز):</b>'
-                 '<p dir="ltr" style="font-size:18px;word-break:break-all">' + e(new_token) + '</p></div>')
-    body += '<div class="card"><h2>الأجهزة</h2>' + ''.join(
-        f"<p>{e(d['name'])} — {'متصل' if d['last_seen'] and (dt.datetime.now(dt.timezone.utc) - d['last_seen']).total_seconds() < 180 else 'غير متصل'}"
-        f" — آخر ظهور {e(str(d['last_seen'])[:16])}</p>" for d in devices) + (
-        '<form method="post" action="/agent-runner/devices">' + csrf + '<input name="name" placeholder="اسم الجهاز (مثال: كمبيوتر المكتب)" required>'
-        '<button class="btn">إضافة جهاز وإنشاء رمز</button></form></div>')
-    body += ('<div class="card"><h2>مهمة جديدة</h2><form method="post" action="/agent-runner/tasks">' + csrf +
-             '<select name="kind">' + ''.join(f'<option value="{k}">{e(v)}</option>' for k, v in KINDS.items()) +
-             '</select><input name="url" placeholder="الرابط (لقراءة صفحة أو تنزيل ملف)"><button class="btn">إنشاء</button></form></div>')
+    post = lambda path, label: f'<form method="post" action="{path}" style="display:inline">{csrf}<button class="btn">{label}</button></form>'
+    body = ('<div class="nav"><a href="/dashboard">الرئيسية</a></div><h1>جهاز العمل</h1>'
+            '<p class="muted">المواقع المسموحة: ' + e('، '.join(allowed_domains())) + '. الإرسال والدفع والحذف وتغيير الإعدادات تحتاج موافقتك لكل عملية.</p>')
+    body += '<div class="card"><h2>الأجهزة</h2>'
+    for d in devices:
+        online = d['last_seen'] and (dt.datetime.now(dt.timezone.utc) - d['last_seen']).total_seconds() < 180
+        body += (f"<p>{e(d['name'])} — {'مفعل' if d['enabled'] else 'ملغى'} — {'متصل' if online else 'غير متصل'} "
+                 + (post(f"/agent-runner/devices/{d['id']}/rotate", 'تغيير الرمز') + ' ' + post(f"/agent-runner/devices/{d['id']}/revoke", 'إلغاء الرمز')
+                    if d['enabled'] else '') + '</p>')
+    body += ('<form method="post" action="/agent-runner/devices">' + csrf + '<input name="name" placeholder="اسم الجهاز" required>'
+             '<button class="btn">إضافة جهاز وإنشاء رمز</button></form></div>')
+    body += ('<div class="card"><h2>مهمة جديدة (قراءة وتنزيل)</h2><form method="post" action="/agent-runner/tasks">' + csrf +
+             '<select name="kind">' + ''.join(f'<option value="{k}">{e(v)}</option>' for k, v in KINDS.items() if k != 'fill_form') +
+             '</select><input name="url" placeholder="الرابط"><button class="btn">إنشاء</button></form></div>')
     for t in tasks:
-        tsteps = [s for s in steps if s['task_id'] == t['id']]
-        tfiles = [f for f in files if f['task_id'] == t['id']]
-        stop = ('<form method="post" action="/agent-runner/tasks/' + str(t['id']) + '/stop" style="display:inline">' + csrf +
-                '<button class="btn">إيقاف</button></form>') if t['status'] in ('queued', 'running') else ''
-        body += (f"<div class='card'><h3>#{t['id']} — {e(KINDS.get(t['kind'], t['kind']))}: {e(STATUS_AR.get(t['status'], t['status']))} {stop}</h3>"
-                 + ''.join(f"<div>{'✅' if s['ok'] else '❌'} {e(s['text'])}"
-                           + (f" — <a href='/agent-runner/shots/{s['id']}' target=_blank>صورة</a>" if s['shot'] else '') + '</div>' for s in tsteps)
-                 + ''.join(f"<div>📎 <a href='/agent-runner/files/{f['id']}'>{e(f['name'])}</a> ({f['size']:,} بايت){' ✅ تم التحقق' if f['verified'] else ''}</div>"
-                           for f in tfiles) + '</div>')
-    return HTMLResponse(_page('جهاز العمل', body))
+        stop = post(f"/agent-runner/tasks/{t['id']}/stop", '⏹ إيقاف') if t['status'] in ('queued', 'running') else ''
+        body += f"<div class='card'><h3>#{t['id']} — {e(KINDS.get(t['kind'], t['kind']))}: {e(STATUS_AR.get(t['status'], t['status']))} {stop}</h3>"
+        for a in [a for a in approvals if a['task_id'] == t['id']]:
+            body += (f"<div>🔐 طلب {a['id']}: {e(a['action'])} — {e(a['status'])} "
+                     + (post(f"/agent-runner/approvals/{a['id']}/approve", 'موافقة') + ' ' + post(f"/agent-runner/approvals/{a['id']}/deny", 'رفض')
+                        if a['status'] == 'pending' else '') + '</div>')
+        body += ''.join(f"<div>{'✅' if s['ok'] else '❌'} {e(s['text'])}" + (f" — <a href='/agent-runner/shots/{s['id']}' target=_blank>صورة</a>" if s['shot'] else '')
+                        + '</div>' for s in steps if s['task_id'] == t['id'])
+        body += ''.join(f"<div>📎 <a href='/agent-runner/files/{f['id']}'>{e(f['name'])}</a> ({f['size']:,} بايت){' ✅ تم التحقق' if f['verified'] else ''}</div>"
+                        for f in files if f['task_id'] == t['id']) + '</div>'
+    return HTMLResponse(_page('جهاز العمل', body), headers={'Cache-Control': 'no-store'})
 
 
 @router.post('/agent-runner/devices')
 async def add_device(request: Request):
-    from app.social_publishing import csrf
-    from urllib.parse import parse_qs, quote
-    session = admin(request)
-    data = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
-    csrf(session, data)
+    session = viewer(request)
+    data = await form(request, session)
     init()
     token = 'afaq-runner-' + secrets.token_urlsafe(32)
+    name = str(data.get('name') or 'جهاز')[:80]
     with db() as c:
-        c.execute('INSERT INTO runner_devices(name,token_hash,created_at) VALUES(%s,%s,%s)',
-                  (str(data.get('name') or 'جهاز')[:80], hashlib.sha256(token.encode()).hexdigest(), utcnow()))
-    return RedirectResponse('/agent-runner?new_token=' + quote(token), 303)
+        c.execute('INSERT INTO runner_devices(name,token_hash,created_at) VALUES(%s,%s,%s)', (name, token_hash(token), utcnow()))
+    return token_page(name, token)
+
+
+@router.post('/agent-runner/devices/{did}/rotate')
+async def rotate(did: int, request: Request):
+    session = viewer(request)
+    await form(request, session)
+    token = 'afaq-runner-' + secrets.token_urlsafe(32)
+    with db() as c:
+        row = c.execute('UPDATE runner_devices SET token_hash=%s WHERE id=%s AND enabled RETURNING name', (token_hash(token), did)).fetchone()
+    if not row:
+        raise HTTPException(404)
+    return token_page(row['name'], token)
+
+
+@router.post('/agent-runner/devices/{did}/revoke')
+async def revoke(did: int, request: Request):
+    session = viewer(request)
+    await form(request, session)
+    with db() as c:
+        c.execute('UPDATE runner_devices SET enabled=FALSE WHERE id=%s', (did,))
+    return RedirectResponse('/agent-runner', 303)
 
 
 @router.post('/agent-runner/tasks')
 async def add_task(request: Request):
-    from app.social_publishing import csrf
-    from urllib.parse import parse_qs
-    session = admin(request)
-    data = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
-    csrf(session, data)
+    session = viewer(request)
+    data = await form(request, session)
+    if data.get('kind') == 'fill_form':
+        raise HTTPException(400, 'تعبئة النماذج تُطلب من واتساب مع تحديد الحقول.')
     create_task(data.get('kind'), {'url': data.get('url')}, 'الموقع')
     return RedirectResponse('/agent-runner', 303)
 
 
 @router.post('/agent-runner/tasks/{tid}/stop')
 async def stop_from_page(tid: int, request: Request):
-    from app.social_publishing import csrf
-    from urllib.parse import parse_qs
-    session = admin(request)
-    csrf(session, {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()})
+    session = viewer(request)
+    await form(request, session)
     stop_task(tid)
+    return RedirectResponse('/agent-runner', 303)
+
+
+@router.post('/agent-runner/approvals/{aid}/{decision}')
+async def approval_from_page(aid: int, decision: str, request: Request):
+    session = viewer(request)
+    await form(request, session)
+    if decision not in ('approve', 'deny'):
+        raise HTTPException(404)
+    decide(aid, decision == 'approve', 'page:' + str(session.get('user_id')))
     return RedirectResponse('/agent-runner', 303)
 
 
 @router.get('/agent-runner/files/{fid}')
 def file_download(fid: int, request: Request):
-    from app.naqliat_connector import _session
-    _session(request)
+    viewer(request)
     with db() as c:
         f = c.execute('SELECT name,mime,data FROM runner_files WHERE id=%s', (fid,)).fetchone()
     if not f:
         raise HTTPException(404)
-    from urllib.parse import quote
-    return Response(bytes(f['data']), media_type=f['mime'], headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(f['name'])})
+    return Response(bytes(f['data']), media_type=f['mime'], headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(f['name']),
+                                                                     'Cache-Control': 'no-store'})
 
 
 @router.get('/agent-runner/shots/{sid}')
 def screenshot(sid: int, request: Request):
-    from app.naqliat_connector import _session
-    _session(request)
+    viewer(request)
     with db() as c:
         s = c.execute('SELECT screenshot FROM runner_steps WHERE id=%s', (sid,)).fetchone()
     if not s or not s['screenshot']:
         raise HTTPException(404)
-    return Response(bytes(s['screenshot']), media_type='image/png')
+    return Response(bytes(s['screenshot']), media_type='image/png', headers={'Cache-Control': 'no-store'})

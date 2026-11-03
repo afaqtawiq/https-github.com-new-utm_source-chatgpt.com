@@ -95,12 +95,12 @@ def run_staff_routing(providers, inbound):
             inbound('staff-06-owner-collision',STAFF,'CI-STAFF-COLLISION نعم متاحة')
         assert one("SELECT COUNT(*) n FROM shipment_events WHERE shipment_id=? AND event_type='owner_whatsapp_reply'",(sid,))['n']==0
         assert one('SELECT status FROM freight_negotiations WHERE shipment_id=?',(sid,))['status']=='awaiting_owner'
-        # Image load needs its own current instruction and confident classification.
+        # Owner policy (Nov 2026): a confident load screenshot is registered and answered with a ready «نفذ CODE»;
+        # nobody is contacted until the manager confirms. A negated caption registers nothing.
         with patch.object(load_vision,'extract',return_value=fixtures['single_load']), \
-             patch.object(load_vision,'save_load',side_effect=AssertionError('Unrequested image registered')):
-            inbound('staff-07-load-ambiguous',STAFF,'',attachments=attachments)
-            assert 'هل تريد تسجيلها' in providers.replies['staff-07-load-ambiguous']['message']
+             patch.object(load_vision,'save_load',side_effect=AssertionError('Negated image registered')):
             inbound('staff-08-load-negated',STAFF,'لا تسجل هذه الحمولة',attachments=attachments)
+            assert 'لم أسجل' in providers.replies['staff-08-load-negated']['message']
         for confidence in (None,False,float('nan'),float('inf'),-1,1.1,0.79,'0.99'):
             fields={**fixtures['single_load'],'confidence':confidence}
             assert not load_vision.verified_single_load(fields)
@@ -112,7 +112,8 @@ def run_staff_routing(providers, inbound):
             inbound('staff-09-load-explicit',STAFF,'سجل هذه الحمولة',attachments=attachments)
             inbound('staff-09-load-explicit',STAFF,'سجل هذه الحمولة',attachments=attachments)
             assert save.call_count==1
-            assert 'لم أبدأ أي تواصل' in providers.replies['staff-09-load-explicit']['message']
+            assert 'نفذ' in providers.replies['staff-09-load-explicit']['message']
+            assert 'لن أقبل أو أرفض' in providers.replies['staff-09-load-explicit']['message']
             image_saved=one("SELECT n.id,s.id shipment_id,f.provider_message_id FROM naqliat_loads n JOIN shipments s ON s.reference=('NQ-'||n.id::text) JOIN freight_negotiations f ON f.shipment_id=s.id WHERE n.capture_method='whatsapp_image_ai' ORDER BY n.id DESC LIMIT 1")
             assert image_saved and image_saved['provider_message_id'] is None
             inbound('staff-09b-load-same-image',STAFF,'سجل هذه الحمولة',attachments=attachments)
