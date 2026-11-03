@@ -243,3 +243,5 @@ app.include_router(agent_runner_router)
 from app.fasah_tracking import register_worker as register_fasah_tracking, init as init_fasah_tracking
 init_fasah_tracking()
 register_fasah_tracking(app)
+from app.prospect_replies import register_worker as register_prospect_replies
+register_prospect_replies(app)
