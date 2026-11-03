@@ -240,3 +240,6 @@ app.include_router(video_publish_router)
 from app.agent_runner import router as agent_runner_router, init as init_agent_runner
 init_agent_runner()
 app.include_router(agent_runner_router)
+from app.fasah_tracking import register_worker as register_fasah_tracking, init as init_fasah_tracking
+init_fasah_tracking()
+register_fasah_tracking(app)

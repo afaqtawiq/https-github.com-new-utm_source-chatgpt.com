@@ -220,12 +220,20 @@ def customer_declaration_status(sender):
     except Exception:
         return None
     found = [r for r in found if r.get('stage') not in ('closed',)]
-    if not found:
+    try:
+        from app.fasah_tracking import customer_lines
+        live = customer_lines(sender)
+    except Exception:
+        live = []
+    if not found and not live:
         return None
     lines = ['هذه آخر حالة مسجلة لشحناتك لدينا:']
     for r in found:
         ref = r.get('declaration_number') or r.get('bill_number') or ('ملف ' + str(r['id']))
         lines.append('• ' + str(ref) + (' — ' + r['port'] if r.get('port') else '') + ': ' + STAGE_LABELS.get(r.get('stage'), 'قيد المتابعة'))
+    if live:
+        lines.append('الحالة في منصة فسح:' if found else 'الحالة الحالية في منصة فسح:')
+        lines.extend(live)
     lines.append('لأي تفاصيل إضافية تواصل مع فريق العمليات على 0507665873.')
     return '\n'.join(lines)
 

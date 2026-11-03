@@ -325,7 +325,9 @@ async def finish(tid: int, request: Request):
     try:
         import asyncio
         from app.owner_briefing import deliver
-        asyncio.get_running_loop().create_task(deliver(task_text(tid)))
+        auto = task.get('created_by') == 'متابعة تلقائية'
+        if not auto:  # the 2-hourly FASAH tracking reads report only status changes, not every run
+            asyncio.get_running_loop().create_task(deliver(task_text(tid)))
     except Exception:
         pass
     if status == 'done' and task['kind'] in ('fasah_declarations', 'fasah_details'):
@@ -386,6 +388,17 @@ def after_fasah(tid):
         params = json.loads(task['params_json'])
         if task['kind'] == 'fasah_declarations':
             rows = list(_csv.DictReader(_io.StringIO(bytes(f['data']).decode('utf-8-sig'))))
+            from app import fasah_tracking
+            try:
+                changed = fasah_tracking.after_read(task, rows)
+                if params.get('track'):
+                    fasah_tracking.read_succeeded()
+                if changed:
+                    notify(changed)
+            except Exception as exc:
+                print('FASAH_TRACKING', tid, type(exc).__name__, str(exc)[:200], flush=True)
+            if params.get('track'):
+                return  # automatic status reads never prepare billing (the manual reads do)
             new = unbilled(rows, 'سلة')
             if not new:
                 notify(f'📋 فسح (#{tid}): كل بيانات سلة الرحائب في القائمة مسجلة في الحسابات.')

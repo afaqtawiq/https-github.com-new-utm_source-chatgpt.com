@@ -69,6 +69,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
     {'name': 'runner_task', 'description': 'Manager only. Create a task for the WORK COMPUTER browser: download_test (first trial), read_page (url), download_file (url), fill_form (url + fields [{label,value}] + optional submit_label; submitting waits for the manager approval), fasah_declarations (which import/export, party = importer/exporter name filter e.g. «سلة», since YYYY-MM-DD, pages 1-20 — read-only list; new unbilled سلة الرحائب declarations are then prepared for billing with a confirmation code), fasah_details (number — read one declaration invoice and fees). Allowed sites only; never passwords/OTP.',
      'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'party': {'type': 'string'}, 'since': {'type': 'string'}, 'pages': {'type': 'string'}, 'number': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
+    {'name': 'fasah_tracking', 'description': 'Live status of open FASAH declarations read by the work computer every 2 hours (under review, waiting duties, inspection, released). Optional filter (number or importer name). e.g. «حالة البيانات في فسح» «وش وضع بيانات سلة».',
+     'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
+    {'name': 'fasah_importer_phone', 'description': 'Manager only. Save the WhatsApp number of an importer AS ITS NAME APPEARS IN FASAH, so status-change messages to that customer can be prepared (sent only after «نفذ»). e.g. «رقم المستورد سلة الرحائب 0551234567».',
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}}, 'required': ['name', 'phone']}},
     {'name': 'runner_deny', 'description': 'Manager refuses a work-computer approval request («ارفض الطلب 4»).',
      'input_schema': {'type': 'object', 'properties': {'approval': {'type': 'string'}}, 'required': ['approval']}},
     {'name': 'runner_status', 'description': 'Steps, result and files of a work-computer task (latest if no id).',
@@ -349,6 +353,18 @@ def tool_container_update(c, a):
 def tool_containers_status(c, a):
     from app import container_returns
     return container_returns.status_text(a.get('filter') or '')
+
+
+def tool_fasah_tracking(c, a):
+    from app import fasah_tracking
+    return fasah_tracking.status_text(a.get('filter') or '')
+
+
+def tool_fasah_importer_phone(c, a):
+    if not _member().get('manager'):
+        return 'حفظ أرقام العملاء للمتابعة للمدير فقط.'
+    from app import fasah_tracking
+    return fasah_tracking.save_contact(a.get('name'), a.get('phone'), _member().get('name') or '')
 
 
 def tool_party_statement(c, a):
