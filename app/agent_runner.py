@@ -386,7 +386,8 @@ def page(request: Request):
              '<button class="btn">إضافة جهاز وإنشاء رمز</button></form></div>')
     body += ('<div class="card"><h2>مهمة جديدة (قراءة وتنزيل)</h2><form method="post" action="/agent-runner/tasks">' + csrf +
              '<select name="kind">' + ''.join(f'<option value="{k}">{e(v)}</option>' for k, v in KINDS.items() if k != 'fill_form') +
-             '</select><input name="url" placeholder="الرابط"><button class="btn">إنشاء</button></form></div>')
+             '</select><select name="which"><option value="import">الاستيراد</option><option value="export">التصدير</option></select>'
+             '<input name="url" placeholder="الرابط"><button class="btn">إنشاء</button></form></div>')
     for t in tasks:
         stop = post(f"/agent-runner/tasks/{t['id']}/stop", '⏹ إيقاف') if t['status'] in ('queued', 'running') else ''
         body += f"<div class='card'><h3>#{t['id']} — {e(KINDS.get(t['kind'], t['kind']))}: {e(STATUS_AR.get(t['status'], t['status']))} {stop}</h3>"
@@ -440,7 +441,7 @@ async def add_task(request: Request):
     data = await form(request, session)
     if data.get('kind') == 'fill_form':
         raise HTTPException(400, 'تعبئة النماذج تُطلب من واتساب مع تحديد الحقول.')
-    create_task(data.get('kind'), {'url': data.get('url')}, 'الموقع')
+    create_task(data.get('kind'), {'url': data.get('url'), 'which': data.get('which')}, 'الموقع')
     return RedirectResponse('/agent-runner', 303)
 
 
