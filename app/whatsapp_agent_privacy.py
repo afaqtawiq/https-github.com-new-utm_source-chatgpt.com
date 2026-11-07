@@ -555,7 +555,7 @@ color colour gate phrase distinctive unique
 # Reviewed, public local knowledge only. Pinning the entire source prevents a
 # future edit from silently expanding this permission to new or private text.
 # This is NOT an approval for any PDF bearing the same textual content.
-_PUBLIC_KNOWLEDGE_SHA256 = 'e32a8e14e65af2a033ecaebbd91fd113841cd9e057c7ebfb4d957602478128ff'
+_PUBLIC_KNOWLEDGE_SHA256 = '4f8cab2a80092d7fadb1cb419f66e9019730f1754febe6605dad4901d0287caa'
 # Only verified company services remain admitted from this legacy document.
 # Its regulatory sections are superseded by the dated guidance below; filtering
 # individual risky words had silently removed invoice facts but kept stale rules.

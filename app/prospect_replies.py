@@ -53,9 +53,18 @@ def clearance_rate(tiers, containers):
     return tiers.get(2) if containers <= 5 else tiers.get(6)
 
 
+def export_request(details):
+    """Keep export requests out of the legacy container-only quotation builder."""
+    text = ' '.join(str(details.get(k) or '') for k in
+                    ('customs_direction', 'service', 'summary', 'port', 'source_text'))
+    return bool(re.search(r'(?:(?<![\w])(?:[وفبل]|ال|لل){0,3}(?:تصدير|صادر(?:ة|ه|ات)?)(?![\w])|\b(?:re[ -]?)?export(?:s|ed|ing|ation)?\b|出口)', text, re.I))
+
+
 def build_quote(company, d, number):
     """Formal quotation text from approved prices only. Returns (text, total, missing) — missing lists what the
     team must price separately (unknown route/service)."""
+    if export_request(d):
+        return None, 0, ['تأكيد منفذ التصدير وعدد البوالص أو شحنات التريلا قبل إعداد عرض الصادر']
     tiers, routes = price_table()
     containers = max(1, min(int(d.get('containers') or 1), 200))
     lines, total, missing = [], 0, []
@@ -131,10 +140,15 @@ def classify(text):
             if isinstance(data, dict) and data.get('intent') in INTENTS:
                 if data.get('route_key') not in routes:
                     data['route_key'] = None
+                if export_request({'source_text': text}):
+                    data['customs_direction'] = 'export'
                 return data
         except Exception as exc:
             print('PROSPECT_REPLY_CLASSIFY', type(exc).__name__, str(exc)[:120], flush=True)
-    return fallback(text)
+    data = fallback(text)
+    if export_request({'source_text': text}):
+        data['customs_direction'] = 'export'
+    return data
 
 
 # ---------- scanning inbound messages ----------
@@ -223,6 +237,8 @@ def process(now=None):
                           f'لإرسال العرض للعميل اكتب: نفذ {token}']
                 if missing:
                     lines.append('⚠️ يحتاج تسعير من الفريق: ' + '، '.join(missing))
+            elif missing and export_request(d):
+                lines.append('⚠️ عرض الصادر يحتاج تأكيد المنفذ وعدد البوالص أو شحنات التريلا. أجور تخليص الصادر البري 200 ريال لكل بوليصة أو شحنة تريلا واحدة، تكلفة التخليص فقط، ولا تشمل أي رسوم أو تكاليف أخرى. لا تُستخدم شرائح الحاويات لهذا الطلب.')
             elif missing:
                 lines.append('⚠️ لا يوجد سعر معتمد لـ: ' + '، '.join(missing) + ' — جهّز له عرضًا خاصًا.')
             out.append('\n'.join(lines))
