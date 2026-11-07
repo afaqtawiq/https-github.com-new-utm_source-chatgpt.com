@@ -37,6 +37,7 @@ jobs:
         env:
           COMPANY_ARCHIVE_TEST_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python -m pytest tests/test_land_export_pricing.py tests/test_prospect_replies.py tests/test_whatsapp_natural.py -q
+      - run: python -m pytest tests/test_saber_knowledge.py -q
       - run: python -m pytest tests/test_comment_responder.py tests/test_comment_identity.py -q
       - run: python tests/comment_postgres_acceptance.py
         env:

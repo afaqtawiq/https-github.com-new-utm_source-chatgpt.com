@@ -50,7 +50,12 @@ CLASSIFY = """You help a Saudi customs broker. For each item choose the most lik
 (or null if none fits), and state the general requirement for that goods type ONLY from the knowledge
 (SABER product/shipment certificates, SFDA registration, other permit, or none). Arabic, short.
 Return ONLY JSON: {"items": [{"index": int, "code": str|null, "alternatives": [str], "requirement": str, "note": str}]}
-Codes must be copied exactly from the candidates. Never invent codes or rates."""
+Codes must be copied exactly from the candidates. Never invent codes or rates.
+Tariff candidates contain duty information, not a verified live SABER classification.
+Do not infer a product certificate, exemption, or "none" from a code prefix, duty rate,
+or the word coal/charcoal. Distinguish product COC, self-declaration and shipment certificate;
+for unverified individual codes state that current official SABER/team review is required.
+Never claim to have queried SABER; this workflow has no live SABER lookup."""
 
 
 def ask(system, payload, max_tokens=4000):
