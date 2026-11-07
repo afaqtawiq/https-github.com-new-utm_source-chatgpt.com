@@ -555,7 +555,7 @@ color colour gate phrase distinctive unique
 # Reviewed, public local knowledge only. Pinning the entire source prevents a
 # future edit from silently expanding this permission to new or private text.
 # This is NOT an approval for any PDF bearing the same textual content.
-_PUBLIC_KNOWLEDGE_SHA256 = '4f8cab2a80092d7fadb1cb419f66e9019730f1754febe6605dad4901d0287caa'
+_PUBLIC_KNOWLEDGE_SHA256 = '403eca0c2a294fbbb73c0c8172cf52c93eea0d89e8545ba5ce30f8894f758df3'
 # Only verified company services remain admitted from this legacy document.
 # Its regulatory sections are superseded by the dated guidance below; filtering
 # individual risky words had silently removed invoice facts but kept stale rules.
@@ -871,7 +871,7 @@ Never invent document access, source facts, operational status or private data.
 No links, credentials, bank/card details, private health/minor/asset information,
 JSON, code or markup in your reply. Output only the natural, short Arabic reply.'''
 
-# Public guidance reviewed 2026-10-10. Kept separate from the pinned company
+# Public guidance reviewed 2026-10-10; SABER updated 2026-11-07. Kept separate from the pinned company
 # excerpt and from PDF provenance; never treat it as the user's shipment record.
 _CUSTOMS_GUIDANCE_SYSTEM = '''
 VERIFIED GENERAL SAUDI CUSTOMS GUIDANCE (reviewed 2026-10-10):
@@ -894,10 +894,37 @@ not a claim that this assistant filed anything or a promised clearance time.
 SASO guidance on shipment certificates (updated 2026-05-04):
 https://www.saso.gov.sa/ar/mediacenter/news/Pages/saso-news-1483.aspx
 https://www.saso.gov.sa/ar/eservices/Pages/MainEServicesDetails.aspx?serviceid=397
-For products within SASO/Saber's applicable scope, check the current product
-classification and relevant conformity/shipment requirements before declaring a
-specific certificate necessary. Do not apply a blanket Saber rule to every good
-or confuse product conformity and shipment certificates.
+For products within SASO/Saber's applicable scope, from 1 October 2025 the
+shipment certificate must precede the customs declaration for regulated AND
+nonregulated products. Regulated products need a product conformity certificate
+(or the accepted equivalent the actual listing specifies), then a shipment
+certificate. Nonregulated products need product registration, self-declaration,
+then a shipment certificate. Nonregulated is NOT exempt from Saber. When saying
+no product certificate is required, never imply no shipment certificate is needed.
+Do not apply a blanket Saber rule to every good regardless of authority/scope.
+SABER classification guidance reviewed 2026-11-07:
+https://saber.sa/Home/HSCodes
+https://saber.sa/Home/NonRegulatedProducts
+Use the exact national 12-digit HS code, matching description, technical regulation,
+required certificates and additional requirements. This chat has no live Saber
+lookup. Do not claim to have checked it, fabricate an exhaustive list, or determine
+a code's present requirements from a duty-rate search, code prefix or product name.
+A missing result means unverified, NOT exempt; refer to the official lookup/team.
+Dated examples visible during this review, not permanent shipment determinations:
+320649000001 (other colouring matter/preparations in chapter note 3, excluding
+3203/3204/3205) listed the paints/varnishes regulation and QM or product COC;
+252520000000 (mica powder) appeared in the nonregulated list, requiring
+self-declaration then an imported shipment certificate. Recheck each exact item;
+do not extend these examples to other HS codes or whole chapters.
+No verified blanket exemption for coal or charcoal is established. Distinguish
+wood/vegetable or shell/nut charcoal from mineral coal, ask for material/use and
+exact HS code, and require current official verification before stating a route.
+Customs-duty exemption and product-certificate exemption do NOT establish Saber
+or shipment-certificate exemption. Non-consumer-display shipments have a separate,
+conditional route under https://saber.sa/Home/Terms; that route's product-certificate
+exemption does not remove its shipment certificate. Do not generalize industrial,
+personal or noncommercial exceptions to commercial goods. Other authorities'
+permits may still apply. Do not apply Saudi import rules to exports or transit.
 No blanket Arabic-label requirement or blanket labeling exemption is established
 by this reference. Product labels depend on the applicable product regulation;
 do not claim a universal requirement or exemption for furniture or other goods.
