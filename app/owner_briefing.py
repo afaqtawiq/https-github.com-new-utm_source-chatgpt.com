@@ -29,6 +29,8 @@ def init():
             detail TEXT NOT NULL DEFAULT '', changed_at TIMESTAMPTZ NOT NULL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS owner_briefings(day DATE PRIMARY KEY, channel TEXT NOT NULL,
             body TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL)''')
+    from app.customer_followup_digest import init as init_followup_delivery
+    init_followup_delivery()
 
 
 LABELS = {'claude': 'مفتاح Claude (فهم رسائل واتساب والردود)', 'meta': 'ربط فيسبوك وإنستغرام (Meta)',
@@ -173,6 +175,11 @@ async def deliver(text):
             return 'whatsapp'
         except Exception as exc:
             print('OWNER_ALERT_WHATSAPP_FAILED', type(exc).__name__, str(exc)[:120], flush=True)
+    return await deliver_email(text)
+
+
+async def deliver_email(text):
+    """Existing fallback, kept separate so new WhatsApp-only sections cannot leak."""
     try:
         from app.prospect_autopilot import system_user
         from app.spacemail import send as mail_send
@@ -212,7 +219,8 @@ def register_worker(app):
                     hour = int(os.getenv('OWNER_BRIEFING_HOUR', '8'))
                     if now.hour >= hour and await run_in_threadpool(claim_briefing, now.date()):
                         text = await run_in_threadpool(briefing_text, now.date())
-                        channel = await deliver(text)
+                        from app.customer_followup_digest import deliver_morning
+                        channel = await deliver_morning(text, now.date())
                         await run_in_threadpool(save_briefing, now.date(), channel, text)
                 except asyncio.CancelledError:
                     raise

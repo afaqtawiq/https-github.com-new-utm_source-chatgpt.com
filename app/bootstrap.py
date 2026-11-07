@@ -21,6 +21,7 @@ from app.operations_control import router as operations_control_router
 from app.control_tower import router as control_tower_router
 from app.ceo_command import router as ceo_command_router
 from app.customer360 import router as customer360_router
+from app.customer_followup import router as customer_followup_router
 from app.customer_success import router as customer_success_router
 from app.revenue_growth import router as revenue_growth_router
 from app.management_autopilot import router as management_autopilot_router
@@ -108,6 +109,7 @@ async def enterprise_security_guard(request,call_next):
  response=await tracked_request(request,call_next,sess);response.headers['X-Content-Type-Options']='nosniff';response.headers['X-Frame-Options']='DENY';response.headers['Referrer-Policy']='same-origin';response.headers['Permissions-Policy']='camera=(), microphone=(self), geolocation=()' if request.url.path in ('/retell-web-test','/commands') else 'camera=(), microphone=(), geolocation=()';return response
 for r in (verification_router,intelligence_router,sales_copilot_router,outbound_router,gmail_oauth_router,revenue_sales_router,sales_workspace_router,followup_automation_router,inbound_sales_router,inbound_actions_router,quote_builder_router,quote_pricing_router,quote_workflow_router,operations_control_router,control_tower_router,ceo_command_router,customer360_router,customer_success_router,revenue_growth_router,management_autopilot_router,security_governance_router,team_rbac_router,identity_hardening_router,fine_permissions_router,mfa_stepup_router,security_operations_router,incident_response_router,retell_integration_router,phone_sales_router,crm_contacts_router):app.include_router(r)
 app.include_router(data_import_router)
+app.include_router(customer_followup_router)
 app.include_router(drivers_management_router)
 from app.carrier_directory import router as carrier_directory_router, init_storage as init_carrier_storage
 init_carrier_storage()
