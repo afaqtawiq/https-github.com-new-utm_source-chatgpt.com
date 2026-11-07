@@ -67,6 +67,8 @@ async def lead(request: Request):
         raise HTTPException(400)
     if not isinstance(data, dict) or data.get('website'):  # honeypot
         raise HTTPException(400)
+    if data.get('scope') == 'land_export':
+        return JSONResponse({'error': 'أجور تخليص الصادر البري 200 ريال لكل بوليصة أو شحنة تريلا واحدة، تكلفة التخليص فقط، ولا تشمل أي رسوم أو تكاليف أخرى. تواصل مع الفريق لتأكيد العدد وعرض الصادر.'}, status_code=400)
     company = ' '.join(str(data.get('company') or '').split())[:120]
     phone = phone_ok(data.get('phone'))
     service = data.get('service') if data.get('service') in ('clearance', 'transport', 'both') else None
@@ -134,30 +136,35 @@ label{display:block;font-weight:600;margin:12px 0 6px}select,input{width:100%;pa
 @media(max-width:520px){.grid{grid-template-columns:1fr}.seg{grid-template-columns:1fr}}
 </style></head><body><div class="w">
 <div class="brand">آفاق طويق | AFAQ TWIQ</div><h1>احسب سعر شحنتك الآن</h1>
-<p class="sub">تخليص جمركي في جميع المنافذ السعودية — البحرية والجوية والبرية — ونقل بري إلى مستودعك، بالأسعار المعتمدة وبدون انتظار.</p>
+<p class="sub">حاسبة أجور الحاويات والنقل للمسارات المذكورة. لا تُستخدم نتائج هذه الحاسبة لتخليص الصادر عبر المنافذ البرية.</p>
 <div class="card">
-<label>الخدمة</label><div class="seg" id="svc"><button data-v="both" class="on">تخليص + نقل</button><button data-v="clearance">تخليص فقط</button><button data-v="transport">نقل فقط</button></div>
+<label for="scope">نوع حساب السعر</label><select id="scope"><option value="containers">أجور الحاويات والنقل (لا يشمل الصادر البري)</option><option value="land_export">تخليص صادر بري</option></select>
+<div id="containerOptions"><label>الخدمة</label><div class="seg" id="svc"><button data-v="both" class="on">تخليص + نقل</button><button data-v="clearance">تخليص فقط</button><button data-v="transport">نقل فقط</button></div>
 <div class="grid"><div><label for="n">عدد الحاويات في البوليصة</label><input id="n" type="number" min="1" max="200" value="1"></div>
 <div id="routeBox"><label for="route">المسار</label><select id="route">__ROUTES__</select></div></div>
 </div>
-<div class="card"><div class="row"><span>التخليص الجمركي</span><span id="c">—</span></div><div class="row"><span>النقل البري</span><span id="t">—</span></div>
+</div>
+<div class="card" id="containerResult"><div class="row"><span>التخليص الجمركي</span><span id="c">—</span></div><div class="row"><span>النقل البري</span><span id="t">—</span></div>
 <div class="total" id="tot">—</div>
-<p class="note">الأسعار معتمدة وصالحة 15 يومًا، الشاحنة حتى 27 طن. لا تشمل الرسوم الجمركية وضريبة الاستيراد والرسوم الحكومية وأجور الموانئ والخط الملاحي؛ يتحملها المستورد حسب فواتيرها. أجور التخليص نفسها في جميع المنافذ؛ وللنقل من منافذ ومسارات أخرى (الدمام، المنافذ البرية، المطارات…) يرسل الفريق عرضًا خاصًا.</p></div>
-<div class="card"><label for="co">اسم الشركة</label><input id="co" autocomplete="organization" placeholder="مثال: مؤسسة النخبة للتجارة">
+<p class="note">الأسعار معتمدة وصالحة 15 يومًا، الشاحنة حتى 27 طن. لا تشمل الرسوم الجمركية وضريبة الاستيراد والرسوم الحكومية وأجور الموانئ والخط الملاحي؛ يتحملها المستورد حسب فواتيرها. لتخليص الصادر البري سعر مستقل: 200 ريال لكل بوليصة أو شحنة تريلا واحدة، تكلفة التخليص فقط، ولا تشمل أي رسوم أو تكاليف أخرى. اطلب عرض الصادر من الفريق؛ وللنقل من منافذ ومسارات أخرى (الدمام، المنافذ البرية، المطارات…) يرسل الفريق عرضًا خاصًا.</p></div>
+<div class="card" id="exportResult" hidden><div class="total">200 ريال</div><p>أجور تخليص الصادر عبر المنافذ البرية لكل بوليصة أو شحنة تريلا واحدة، تكلفة التخليص فقط، ولا تشمل أي رسوم أو تكاليف أخرى.</p><p class="note">لتأكيد عدد البوالص أو شحنات التريلا وإعداد العرض، تواصل مع فريق آفاق. هذا السعر لا ينطبق على الصادر البحري أو الجوي.</p><a class="cta" href="https://wa.me/966507665873">اطلب عرض تخليص الصادر عبر واتساب</a></div>
+<div class="card" id="leadForm"><label for="co">اسم الشركة</label><input id="co" autocomplete="organization" placeholder="مثال: مؤسسة النخبة للتجارة">
 <label for="ph">رقم الجوال (واتساب)</label><input id="ph" inputmode="tel" autocomplete="tel" placeholder="05xxxxxxxx">
 <input class="hp" id="website" tabindex="-1" autocomplete="off">
 <button class="cta" id="go">احصل على العرض الرسمي عبر واتساب</button><div class="err" id="err"></div>
 <p class="note">رخصة التخليص الجمركي 2513 — رخصة النقل 11/00098402 — نعمل 24/7.</p></div>
 </div><script>
 const D=__DATA__;let svc='both';const f=x=>x.toLocaleString('en-US')+' ريال';
-function calc(){const n=Math.max(1,Math.min(200,parseInt(document.getElementById('n').value)||1));const r=document.getElementById('route').value;
+function calc(){const landExport=document.getElementById('scope').value==='land_export';
+['containerOptions','containerResult','leadForm'].forEach(i=>document.getElementById(i).hidden=landExport);document.getElementById('exportResult').hidden=!landExport;if(landExport)return;
+const n=Math.max(1,Math.min(200,parseInt(document.getElementById('n').value)||1));const r=document.getElementById('route').value;
 let c=0,t=0;if(svc!=='transport'){c=n*(n<=1?D.tiers[1]:n<=5?D.tiers[2]:D.tiers[6]);}if(svc!=='clearance'&&D.routes[r]){t=n*D.routes[r];}
 document.getElementById('c').textContent=svc==='transport'?'—':f(c)+' ('+n+' × '+(c/n)+')';document.getElementById('t').textContent=svc==='clearance'?'—':f(t);
 document.getElementById('tot').textContent=f(c+t);document.getElementById('routeBox').style.display=svc==='clearance'?'none':'block';}
 document.querySelectorAll('#svc button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#svc button').forEach(x=>x.classList.remove('on'));b.classList.add('on');svc=b.dataset.v;calc();});
-['n','route'].forEach(i=>document.getElementById(i).oninput=calc);calc();
+['n','route','scope'].forEach(i=>document.getElementById(i).oninput=calc);calc();
 document.getElementById('go').onclick=async()=>{const e=document.getElementById('err');e.textContent='';
-const body={company:document.getElementById('co').value,phone:document.getElementById('ph').value,service:svc,route:document.getElementById('route').value,
+const body={scope:document.getElementById('scope').value,company:document.getElementById('co').value,phone:document.getElementById('ph').value,service:svc,route:document.getElementById('route').value,
 containers:document.getElementById('n').value,website:document.getElementById('website').value,source:'__SRC__'};
 try{const r=await fetch('/price/lead',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();
 if(!r.ok){e.textContent=j.error||'تعذر الإرسال';return;}location.href=j.whatsapp;}catch(x){e.textContent='تعذر الإرسال، حاول مرة أخرى.';}};
