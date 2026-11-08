@@ -120,7 +120,8 @@ def test_tariff_call_cannot_bypass_required_saber_lookup(monkeypatch):
         'name': 'tariff_search', 'input': {'ar': ['wood']}}])
     monkeypatch.setattr(natural, 'tariff_result', lambda a: [])
     answer = asyncio.run(natural.reply('هل البند الجمركي للخشب عليه سابر؟'))
-    assert answer == natural.SABER_UNVERIFIED_REPLY
+    assert answer.startswith(natural.SABER_UNVERIFIED_REPLY)
+    assert 'لم أتحقق هنا من تعرفة هذه البضاعة' in answer
     assert calls[0]['tool_choice'] == {'type': 'tool', 'name': 'saber_search'}
 
 

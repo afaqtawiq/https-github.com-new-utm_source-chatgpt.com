@@ -54,21 +54,21 @@ def test_updated_hash_preserves_public_knowledge_allowlist_and_document_boundary
     assert LOOKUP not in public
 
 
-@pytest.mark.parametrize('question,answer', [
+@pytest.mark.parametrize('question,answer,tariff_boundary', [
     ('الفحم مستثنى من سابر صح؟',
-     'لا أقدر أؤكد إعفاء الفحم بشكل عام. هل المقصود فحم نباتي أو حجري، وما رمزه الجمركي إن توفر؟'),
+     'لا أقدر أؤكد إعفاء الفحم بشكل عام. هل المقصود فحم نباتي أو حجري، وما رمزه الجمركي إن توفر؟', False),
     ('البضاعة غير خاضعة للوائح يعني ما تحتاج سابر؟',
-     'غير الخاضع للائحة فنية يحتاج إقرارًا ذاتيًا ثم شهادة الإرسالية، وليس إعفاءً من سابر.'),
+     'غير الخاضع للائحة فنية يحتاج إقرارًا ذاتيًا ثم شهادة الإرسالية، وليس إعفاءً من سابر.', False),
     ('عطني المنتجات والبنود اللي عليها شهادة مطابقة واللي ما عليها',
-     'التصنيف يعتمد على البند الكامل والوصف. القائمة الرسمية: https://saber.sa/Home/HSCodes'),
+     'التصنيف يعتمد على البند الكامل والوصف. القائمة الرسمية: https://saber.sa/Home/HSCodes', False),
     ('البند الجمركي ما ظهر في سابر هل هو معفى؟',
-     'عدم ظهور البند ليس إعفاءً. يلزم مراجعة الرمز والوصف مع الفريق.'),
+     'عدم ظهور البند ليس إعفاءً. يلزم مراجعة الرمز والوصف مع الفريق.', True),
     ('البند 252520000000 عليه شهادة مطابقة منتج؟',
-     'مسحوق ميكا ظهر في القائمة غير الخاضعة وقت المراجعة؛ يلزم تأكيد التصنيف الحالي قبل الشحن.'),
+     'مسحوق ميكا ظهر في القائمة غير الخاضعة وقت المراجعة؛ يلزم تأكيد التصنيف الحالي قبل الشحن.', False),
     ('استورد فحم والرسوم الجمركية صفر، خلاص ما أحتاج سابر؟',
-     'الإعفاء الجمركي لا يحدد حالة سابر. يلزم التحقق من نوع الفحم والبند الكامل.'),
+     'الإعفاء الجمركي لا يحدد حالة سابر. يلزم التحقق من نوع الفحم والبند الكامل.', True),
 ])
-def test_natural_prompt_receives_saber_boundaries_and_sources(monkeypatch, question, answer):
+def test_natural_prompt_receives_saber_boundaries_and_sources(monkeypatch, question, answer, tariff_boundary):
     requests = []
     original = httpx.AsyncClient
 
@@ -82,6 +82,7 @@ def test_natural_prompt_receives_saber_boundaries_and_sources(monkeypatch, quest
         assert [tool['name'] for tool in body['tools']] == ['tariff_search', 'saber_search']
         if len(requests) == 1:
             assert body['messages'][-1]['content'] == question
+            assert body['tool_choice'] == {'type': 'tool', 'name': 'saber_search'}
             return httpx.Response(200, json={'content': [{'type': 'tool_use', 'id': 'reference-test',
                 'name': 'saber_search', 'input': {'query': ''}}]})
         return httpx.Response(200, json={'content': [{'type': 'text', 'text': answer}]})
@@ -95,7 +96,15 @@ def test_natural_prompt_receives_saber_boundaries_and_sources(monkeypatch, quest
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', deny_network)
     monkeypatch.setattr(natural.httpx, 'AsyncClient', lambda **kwargs: original(
         transport=httpx.MockTransport(handle), **kwargs))
-    assert asyncio.run(natural.reply(question)) == natural.SABER_GENERAL_REPLY
+    result = asyncio.run(natural.reply(question))
+    # A customs-code/duty premise is not verified by an empty SABER query.
+    # Preserve the exact deterministic answer and label only that unchecked
+    # premise; no additional model turn or tariff lookup is implied.
+    expected = natural.SABER_GENERAL_REPLY
+    if tariff_boundary:
+        expected += ('\n\nوبخصوص البند أو الرسم الجمركي، نتيجة سابر لا تحددهما؛ '
+                     'لم أتحقق هنا من تعرفة هذه البضاعة، ويلزم بحث مستقل ومراجعة البند السعودي الساري قبل الاعتماد.')
+    assert result == expected
     assert len(requests) == 1
 
 
