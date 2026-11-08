@@ -543,6 +543,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'send_whatsapp':
         from app.manager_actions import send_message
         return send_message(c, {'to': action['to'], 'text': action['text']})
+    if action.get('tool') == 'record_bank_payments':
+        from app import bank_reconcile
+        return bank_reconcile.record(int(action['batch']), 'مطابقة كشف البنك — ' + (member.get('name') or 'المدير'))
     if action.get('tool') == 'customer_care_send':
         from app import customer_care
         return customer_care.start_send(action['batch'])
