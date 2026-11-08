@@ -33,6 +33,12 @@ Return ONLY JSON: {"items": [{"description": str, "quantity": str|null, "value":
 Max 15 items."""
 
 
+STRICT = '''
+Public pre-purchase check (strict): choose a code ONLY when its description fits the item's nature AND its stated specs
+(material, capacity, use). If none fits, or your note would say another subheading fits better, return code null and
+put the better heading in the note (e.g. «الأقرب فصل 94 أثاث الجلوس»). A wrong code is worse than no code.'''
+
+
 def init():
     with db() as c:
         c.execute('''CREATE TABLE IF NOT EXISTS precheck_requests(id BIGSERIAL PRIMARY KEY, company TEXT, phone TEXT,
@@ -109,7 +115,8 @@ def classify(items):
     from app import tariff_lookup
     table, candidates = [], []
     for index, item in enumerate(items):
-        found = tariff_lookup.search_many(item.get('search_ar') or [item['description']], item.get('search_en') or [], limit=6)
+        terms_ar = [t for t in (item.get('search_ar') or []) if isinstance(t, str)][:2] + [str(item['description'])[:80]]
+        found = tariff_lookup.search_many(terms_ar, item.get('search_en') or [], limit=8)
         entries = tariff_lookup.as_prompt(found)
         candidates.append({'index': index, 'description': item['description'], 'candidates': entries})
         table.append({re.sub(r'\D', '', e['code']): e for e in entries})
@@ -121,7 +128,7 @@ def classify(items):
             from app.customs_policy import CUSTOMS_FIRST_POLICY
             from app.fasah_ai import CLASSIFY, ask
             question = ' '.join(c['description'] for c in candidates)
-            got = ask(CLASSIFY + '\n\nKnowledge (Arabic):\n' + KNOWLEDGE + CUSTOMS_FIRST_POLICY + guidance_for(question),
+            got = ask(CLASSIFY + STRICT + '\n\nKnowledge (Arabic):\n' + KNOWLEDGE + CUSTOMS_FIRST_POLICY + guidance_for(question),
                       {'items': candidates}, max_tokens=3000).get('items')
             for choice in got if isinstance(got, list) else []:
                 if isinstance(choice, dict) and type(choice.get('index')) is int:
@@ -253,7 +260,7 @@ try{const r=await fetch('/check/run',{method:'POST',body:new FormData(f)});const
 if(!r.ok){err.textContent=j.error||'تعذر الفحص';return;}
 let h='<div class="card"><h2>نتيجة الفحص المبدئي</h2>';let tot={d:0,v:0,ok:false};
 for(const it of j.report){h+='<div class="item"><b>'+e(it.description)+'</b>'+(it.confirmed_by_ai?'':'<span class="tag">مرشح نصي</span>')+'<br>';
-h+=it.code?'البند: <span class="code">'+e(it.code)+'</span> — الرسم: '+e(it.duty)+'<br><span class="note">'+e(it.tariff_text)+'</span>':'<span class="req">يحتاج تصنيفًا من المخلص بعد معرفة المواصفات</span>';
+h+=it.code?'بند مرشح: <span class="code">'+e(it.code)+'</span> — الرسم: '+e(it.duty)+'<br><span class="note">'+e(it.tariff_text)+'</span>':'<span class="req">يحتاج تصنيفًا من المخلص بعد معرفة المواصفات</span>';
 if(it.requirement)h+='<br><span class="req">الاشتراطات: '+e(it.requirement)+'</span>';
 if(it.estimate){h+='<br>تقديري: رسوم '+n(it.estimate.duty)+' + ضريبة استيراد '+n(it.estimate.vat)+' ريال';tot.d+=it.estimate.duty;tot.v+=it.estimate.vat;tot.ok=true;}
 if(it.note)h+='<br><span class="note">'+e(it.note)+'</span>';h+='</div>';}
