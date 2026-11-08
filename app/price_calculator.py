@@ -152,6 +152,7 @@ label{display:block;font-weight:600;margin:12px 0 6px}select,input{width:100%;pa
 <label for="ph">رقم الجوال (واتساب)</label><input id="ph" inputmode="tel" autocomplete="tel" placeholder="05xxxxxxxx">
 <input class="hp" id="website" tabindex="-1" autocomplete="off">
 <button class="cta" id="go">احصل على العرض الرسمي عبر واتساب</button><div class="err" id="err"></div>
+<p class="note">قبل ما تشتري؟ <a href="/check" style="color:var(--gold)">افحص أصناف عرض المورد مجانًا</a> — البند الجمركي والرسوم واشتراطات سابر.</p>
 <p class="note">رخصة التخليص الجمركي 2513 — رخصة النقل 11/00098402 — نعمل 24/7.</p></div>
 </div><script>
 const D=__DATA__;let svc='both';const f=x=>x.toLocaleString('en-US')+' ريال';
