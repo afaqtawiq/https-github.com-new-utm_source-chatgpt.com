@@ -77,10 +77,13 @@ def test_natural_prompt_receives_saber_boundaries_and_sources(monkeypatch, quest
         requests.append(body)
         assert KNOWLEDGE in body['system']
         assert 'لا تؤكد إعفاء الفحم أو حالة بند غير متحققة' in body['system']
-        assert 'لا تدّعِ بحثًا حيًا في سابر' in body['system']
+        assert 'ولا تدّعِ بحثًا حيًا في سابر دون نتيجة ناجحة' in body['system']
         assert LOOKUP in body['system'] and SOURCE in body['system']
-        assert body['messages'][-1]['content'] == question
-        assert [tool['name'] for tool in body['tools']] == ['tariff_search']
+        assert [tool['name'] for tool in body['tools']] == ['tariff_search', 'saber_search']
+        if len(requests) == 1:
+            assert body['messages'][-1]['content'] == question
+            return httpx.Response(200, json={'content': [{'type': 'tool_use', 'id': 'reference-test',
+                'name': 'saber_search', 'input': {'query': ''}}]})
         return httpx.Response(200, json={'content': [{'type': 'text', 'text': answer}]})
 
     async def deny_network(*args, **kwargs):
@@ -92,7 +95,7 @@ def test_natural_prompt_receives_saber_boundaries_and_sources(monkeypatch, quest
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', deny_network)
     monkeypatch.setattr(natural.httpx, 'AsyncClient', lambda **kwargs: original(
         transport=httpx.MockTransport(handle), **kwargs))
-    assert asyncio.run(natural.reply(question)) == answer
+    assert asyncio.run(natural.reply(question)) == natural.SABER_GENERAL_REPLY
     assert len(requests) == 1
 
 

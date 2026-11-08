@@ -38,7 +38,7 @@ jobs:
         env:
           COMPANY_ARCHIVE_TEST_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python -m pytest tests/test_land_export_pricing.py tests/test_prospect_replies.py tests/test_whatsapp_natural.py -q
-      - run: python -m pytest tests/test_saber_knowledge.py -q
+      - run: python -m pytest tests/test_saber_knowledge.py tests/test_saber_lookup.py tests/test_saber_natural_lookup.py tests/test_saber_team_lookup.py tests/test_saber_answers.py -q
       - run: python -m pytest tests/test_daily_poster.py tests/test_daily_poster_english.py -q
       - run: python tests/daily_poster_english_postgres_acceptance.py
         env:
@@ -119,6 +119,9 @@ jobs:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
 
       - run: python tests/whatsapp_agent_postgres_acceptance.py
+        env:
+          AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python tests/command_agent_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: pip install -r desktop-runner/requirements.txt && python -m playwright install --with-deps chromium

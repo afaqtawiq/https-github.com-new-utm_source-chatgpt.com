@@ -609,7 +609,13 @@ def call_model(messages, system):
 
 
 def run_agent(c, raw):
-    if command_ai.LEGACY_MODEL_DISABLED.get() or not os.getenv('ANTHROPIC_API_KEY'):
+    if command_ai.LEGACY_MODEL_DISABLED.get():
+        return None
+    # Do not allow the team model to guess product conformity from static text.
+    # Actions mentioning SABER retain the existing tool and confirmation route.
+    if command_ai.is_saber_information_question(raw):
+        return command_ai.answer_saber_question(raw)
+    if not os.getenv('ANTHROPIC_API_KEY'):
         return None
     member = _member()
     history = []
