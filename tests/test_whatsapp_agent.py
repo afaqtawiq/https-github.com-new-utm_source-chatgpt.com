@@ -277,8 +277,8 @@ def test_real_store_history_reaches_mocked_conversational_request_without_metada
     outbound=json.dumps(bodies[1],ensure_ascii=False)
     assert first_question in outbound and first_reply in outbound
     assert all(value not in outbound for value in (ACCOUNT,OWNER,CONVERSATION,'authorization_generation','job_id'))
-    # Only the read-only tariff lookup may be offered to the customer model; never action tools.
-    assert [t['name'] for t in bodies[1].get('tools', [])] in ([], ['tariff_search']) and len(setup['sends'])==2
+    # Only the two read-only public lookups may be offered; never action tools.
+    assert [t['name'] for t in bodies[1].get('tools', [])] in ([], ['tariff_search', 'saber_search']) and len(setup['sends'])==2
 
 
 def test_owner_general_text_model_timeout_never_retries_or_sends(setup,monkeypatch):

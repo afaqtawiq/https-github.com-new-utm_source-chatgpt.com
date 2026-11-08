@@ -10,9 +10,12 @@ Two entry points, both keeping every existing safety rule:
   customer messages, calls and driver broadcasts still go through their review screens.
 
 Claude only chooses an action and its fields; it never runs SQL or sends anything itself.
-Without ANTHROPIC_API_KEY everything behaves exactly as before.
+Without ANTHROPIC_API_KEY operational routes stay unchanged; SABER questions fail closed.
 """
 import json
+import asyncio
+import queue
+import threading
 from contextvars import ContextVar
 import os
 import re
@@ -196,10 +199,77 @@ def _report(c, period):
     return f'تقرير {label}:\n' + '\n'.join(lines)
 
 
-def answer_question(question):
-    """Read-only conversation; no tools, operational lookup or action dispatch."""
+# Only informational SABER questions enter the read-only catalogue flow.
+# Operational requests remain with their existing handlers/confirmation gates.
+_SABER_ACTION = re.compile(
+    r"(?:^|[\s،,:;])(?:و)?(?:ارسل[ي]?|ابعث[ي]?|بلغ[ي]?|احجز[ي]?|احجزي|"
+    r"سجل[ي]?|اضف[ي]?|ضيف[ي]?|حدث[ي]?|عدل[ي]?|احذف[ي]?|ادفع[ي]?|"
+    r"سدد[ي]?|اعتمد[ي]?|نفذ[ي]?|انشر[ي]?|اتصل[ي]?|افتح[ي]?|"
+    r"اصدر[ي]?|استخرج[ي]?|قدم[ي]?|الغ[ي]?|فاوض[ي]?|اسند[ي]?|اطبع[ي]?|"
+    r"send|book|register|add|update|edit|delete|pay|approve|execute|publish|"
+    r"call|open|issue|submit|cancel|assign|print)(?:ها|ه|هم|لي|لنا)?(?:\s|[؟?!.،,:;]|$)", re.I)
+_SABER_OPERATIONAL = re.compile(
+    r"رصيد|حساب|فاتور|مدفوع|مبلغ|سعر|تكلف|حالة|وضع\s+شحن|شحنت|شحنة|"
+    r"عميل|عملاء|سائق|سواق|حاوي|بيان|تقرير|موظف|"
+    r"\b(?:balance|account|invoice|payment|price|cost|status|shipment|customer|driver|container|report)\b", re.I)
+_SABER_QUESTION = re.compile(
+    r"[؟?]|(?:^|\s)(?:هل|وش|ايش|ماذا|كيف|متطلبات|احتاج|يحتاج|تحتاج|عليه|عليها|يلزم|يلزمه|تلزم|"
+    r"does|do|is|are|what|which|need|needs|require|requirements)(?:\s|$)", re.I)
+_SABER_SLOTS = threading.BoundedSemaphore(2)
+_SABER_DEADLINE = 50
+
+
+def is_saber_information_question(question):
+    from app.whatsapp_natural import needs_saber_search
+    text = wa.normalize(question).casefold()
+    return bool(needs_saber_search(text) and _SABER_QUESTION.search(text)
+                and not _SABER_ACTION.search(text) and not _SABER_OPERATIONAL.search(text))
+
+
+def answer_saber_question(question):
+    """Bridge async read-only search without nesting loops or sharing DB handles.
+
+    Bounded daemon workers support callers already inside an async webhook. The
+    coroutine deadline cancels network work; busy/error/disabled paths fail closed.
+    No operational history, database connection, or write tools enter this flow.
+    """
+    from app import whatsapp_natural as natural
+    fallback = natural.SABER_UNVERIFIED_REPLY
     if LEGACY_MODEL_DISABLED.get():
         return None
+    if not _SABER_SLOTS.acquire(blocking=False):
+        return fallback
+    result = queue.Queue(maxsize=1)
+
+    async def lookup():
+        async with asyncio.timeout(_SABER_DEADLINE):
+            return await natural.reply(str(question)[:2000], history=())
+
+    def worker():
+        try:
+            result.put(asyncio.run(lookup()) or fallback)
+        except Exception:
+            result.put(fallback)
+        finally:
+            _SABER_SLOTS.release()
+
+    try:
+        threading.Thread(target=worker, daemon=True, name='saber-readonly').start()
+    except Exception:
+        _SABER_SLOTS.release()
+        return fallback
+    try:
+        return result.get(timeout=_SABER_DEADLINE + 2)
+    except queue.Empty:
+        return fallback
+
+
+def answer_question(question):
+    """Read-only conversation; SABER questions use the official catalogue flow."""
+    if LEGACY_MODEL_DISABLED.get():
+        return None
+    if is_saber_information_question(question):
+        return answer_saber_question(question)
     from app.customs_knowledge import KNOWLEDGE
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
