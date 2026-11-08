@@ -16,6 +16,8 @@ import secrets
 
 import httpx
 
+from app.customs_policy import CUSTOMS_FIRST_POLICY
+
 from app import command_ai
 from app import whatsapp_admin as admin
 
@@ -625,7 +627,7 @@ def run_agent(c, raw):
             history.append(f"الموظف: {item['command'][:400]}\nالمساعد: {item['reply'][:400]}")
     except ImportError:
         pass
-    system = SYSTEM + ('\nالمرسل: ' + (member.get('name') or 'عضو الفريق') + ('، وهو المدير.' if member.get('manager') else '، ليس المدير؛ رسائل العملاء الخارجية تحتاج تأكيد المدير.'))
+    system = SYSTEM + CUSTOMS_FIRST_POLICY + ('\nالمرسل: ' + (member.get('name') or 'عضو الفريق') + ('، وهو المدير.' if member.get('manager') else '، ليس المدير؛ رسائل العملاء الخارجية تحتاج تأكيد المدير.'))
     if history:
         system += '\nآخر المحادثة للسياق فقط:\n' + '\n'.join(history)
     messages = [{'role': 'user', 'content': raw[:2000]}]

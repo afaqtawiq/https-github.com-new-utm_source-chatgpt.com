@@ -16,17 +16,20 @@ import re
 
 import httpx
 
+from app.customs_policy import CUSTOMS_FIRST_POLICY, INTAKE_POLICY, INTAKE_CUSTOMS_KEYS, intake_details
+
 from app import afaaq_customer_reply as base
 from app import zernio_receiver as receiver
 from app.customs_knowledge import KNOWLEDGE
 from app import tariff_lookup
+from app.customs_case_guidance import guidance_for
 
 MODEL = os.getenv('INTAKE_MODEL', 'claude-sonnet-5')
 KEYS = ('service', 'route', 'cargo', 'deadline')
 
 SYSTEM = """You are the WhatsApp assistant of Afaq Tuwaiq (آفاق طويق), a Saudi customs clearance and logistics company with an office in Jeddah.
 Services: customs clearance at all Saudi customs ports (sea ports, airports and land borders) for import, export and transit;
-acting as the Saudi importer of record for companies without a Saudi entity; SABER/SASO certificate coordination;
+coordinating importer-of-record services after verifying the record-holding entity and the transaction; SABER/SASO certificate coordination;
 land transport across Saudi Arabia and the GCC; storage and handling; door-to-door delivery. Customers are Saudi, GCC and foreign companies.
 
 Your job in each reply: understand the customer, answer briefly and honestly, and collect the four request details:
@@ -51,7 +54,7 @@ Rules you must never break:
 - Answer questions about Saudi customs procedures, documents, SABER, SFDA and other permits, prohibited goods and how
   duties and VAT work, using ONLY the knowledge below. Give the general requirement for the goods type, say the Afaq
   team confirms the exact requirement for their specific product (by HS code) before shipping, then ask the next
-  missing detail. If the knowledge does not cover it, say the team will confirm; never guess.
+  missing detail. Product-specific SABER requirements need the existing official lookup path; static knowledge is not a current result. If the knowledge does not cover it, say the team will confirm; never guess.
 - Customs code (البند الجمركي) and duty rate questions for a specific product: if no tariff_candidates are given,
   set "tariff_lookup" to up to 3 search phrasings in Arabic and 3 in English using customs tariff wording
   (for example sofa -> "مقاعد بهياكل خشب" / "seats with wooden frames"), and keep the reply to one short line.
@@ -79,20 +82,20 @@ Return ONLY a JSON object:
  "reply": str}"""
 
 
-SYSTEM = SYSTEM + '\n\nKnowledge (Arabic):\n' + KNOWLEDGE
+SYSTEM = SYSTEM + '\n\nKnowledge (Arabic):\n' + KNOWLEDGE + CUSTOMS_FIRST_POLICY + INTAKE_POLICY
 
 
 def ask(fields, pending, text, candidates=None):
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None
-    saved = {k: fields.get(k) for k in KEYS + ('company',) if fields.get(k)}
+    saved = {k: fields.get(k) for k in KEYS + ('company',) + INTAKE_CUSTOMS_KEYS if fields.get(k)}
     payload = {'saved_request': saved, 'last_question_asked': pending,
                'recent_conversation': HISTORY.get(), 'customer_message': text[:4000]}
     if candidates is not None:
         payload['tariff_candidates'] = candidates or 'no matching lines found'
     user = json.dumps(payload, ensure_ascii=False)
-    body = {'model': MODEL, 'max_tokens': 1000, 'thinking': {'type': 'disabled'}, 'system': SYSTEM, 'messages': [{'role': 'user', 'content': user}]}
+    body = {'model': MODEL, 'max_tokens': 1000, 'thinking': {'type': 'disabled'}, 'system': SYSTEM + guidance_for(text, HISTORY.get()), 'messages': [{'role': 'user', 'content': user}]}
     try:
         with httpx.Client(timeout=25) as client:
             response = client.post('https://api.anthropic.com/v1/messages', json=body,
@@ -127,14 +130,15 @@ def reply(fields, pending, text, selection, updates, greeting):
             second['fields'] = {**(ai.get('fields') or {}), **(second.get('fields') or {})}
             ai = second
     fields = dict(fields)
-    if ai.get('new_request') and any(fields.get(k) for k in KEYS):
+    if ai.get('new_request') and any(fields.get(k) for k in KEYS + INTAKE_CUSTOMS_KEYS):
         history = list(fields.get('_previous_requests') or [])
-        history.append({k: fields.get(k) for k in KEYS + ('company', 'latest_follow_up') if fields.get(k)})
+        history.append({k: fields.get(k) for k in KEYS + ('company', 'latest_follow_up') + INTAKE_CUSTOMS_KEYS if fields.get(k)})
         fields = {k: v for k, v in fields.items() if k.startswith('_whatsapp')}
         fields['_previous_requests'] = history[-10:]
     for k, v in (ai.get('fields') or {}).items():
         if k in KEYS + ('company',) and isinstance(v, str) and v.strip() and v.strip().lower() not in ('null', 'none'):
             fields[k] = v.strip()[:2000]
+    fields.update(intake_details(ai.get('fields')))
     fields.update(updates or {})
     fields['latest_message'] = raw[:12000]
     missing = [k for k, _ in base.QUESTIONS if not fields.get(k)]

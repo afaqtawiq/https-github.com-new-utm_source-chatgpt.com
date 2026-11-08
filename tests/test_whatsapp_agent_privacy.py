@@ -2494,19 +2494,19 @@ def test_customs_negated_current_timing_never_echoes_next_week(provider):
 @pytest.mark.parametrize('mode,label,document,forbidden', [
     ('بحري', 'البحري', 'بوليصة الشحن', '«المنافيست»'),
     ('جوي', 'الجوي', 'بوليصة الشحن', '«المنافيست»'),
-    ('بري', 'البري', 'بيان الحمولة', 'بوليصة الشحن'),
+    ('بري', 'البري', 'البيان الجمركي من دولة المصدر', 'بوليصة الشحن'),
 ])
 def test_customs_transit_fallback_uses_mode_specific_document_and_conditional_invoice(provider, mode, label, document, forbidden):
     provider['answer'] = 'سأرفع البيان.'
     result = chat_reply(f'عندي شحنة ترانزيت والشحن {mode}، ما المستندات المطلوبة؟')
     assert result.used_model and not result.ok and result.reason.startswith('reply_action_')
     assert label in result.text and document in result.text
-    assert 'الفاتورة إن وجدت' in result.text and forbidden not in result.text
+    assert 'الفاتورة والمستندات الإضافية عند طلب الهيئة' in result.text and forbidden not in result.text
     assert 'طريقة الشحن' not in result.text
     payload = json.loads(provider['requests'][0].content)
-    assert 'إجراءات-البضائع-العابرة---ترانزيت.aspx' in payload['system']
-    assert 'customs seals' in payload['system'] and 'guarantee accepted by customs' in payload['system']
-    assert 'guaranteed time' in payload['system'] and 'fee amount' in payload['system']
+    assert 'Rules-of-Customs-Procedures.pdf' in payload['system']
+    assert 'risk-based checks, seals, accepted' in payload['system'] and 'guarantee, route/time/tracking' in payload['system']
+    assert 'clearance deadline' in payload['system'] and 'fee amount' in payload['system']
 
 
 def test_customs_national_export_fallback_keeps_marking_exception_and_permit_scope(provider):
@@ -2538,9 +2538,9 @@ def test_customs_definite_temporary_export_direct_question_is_not_national_produ
 
 
 @pytest.mark.parametrize('question,answer', [
-    ('ما مستندات الترانزيت البري؟', 'للترانزيت البري، مستند النقل بيان الحمولة، والفاتورة إن وجدت. ما نوع البضاعة؟'),
-    ('ما مستندات الترانزيت البحري؟', 'للترانزيت البحري، بوليصة الشحن والفاتورة إن وجدت من المستندات المطلوبة.'),
-    ('ما مستندات الترانزيت الجوي؟', 'للترانزيت الجوي، مستند النقل بوليصة الشحن، والفاتورة إن وجدت.'),
+    ('ما مستندات الترانزيت البري؟', 'للترانزيت البري، يرفق البيان الجمركي من دولة المصدر والفاتورة عند طلب الهيئة. ما نوع البضاعة؟'),
+    ('ما مستندات الترانزيت البحري؟', 'للترانزيت البحري، ترفق بوليصة الشحن وتقدم الفاتورة عند طلب الهيئة.'),
+    ('ما مستندات الترانزيت الجوي؟', 'للترانزيت الجوي، ترفق بوليصة الشحن والفاتورة عند طلب الهيئة.'),
     ('ما مستندات تصدير المنتجات الوطنية؟', 'للمنتجات الوطنية، الفاتورة وبوليصة الشحن وشهادة المنشأ مع مراعاة استثناء دلالة المنشأ واسم المنتج الثابتين وشروط الهيئة.'),
 ])
 def test_customs_sourced_mode_and_movement_explanations_are_valid_model_answers(provider, question, answer):
@@ -2549,7 +2549,8 @@ def test_customs_sourced_mode_and_movement_explanations_are_valid_model_answers(
     assert result.used_model and result.ok and result.text == answer
     payload = json.loads(provider['requests'][0].content)
     assert 'ONLY for national products' in payload['system']
-    assert 'cargo manifest for land' in payload['system']
+    assert 'source-country customs declaration' in payload['system']
+    assert 'manifest is not a replacement' in payload['system']
 
 
 def test_customs_origin_marking_exception_cannot_hide_approved_price_tail(provider):

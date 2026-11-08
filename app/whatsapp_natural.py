@@ -12,16 +12,20 @@ import re
 
 import httpx
 
+from app.customs_policy import CUSTOMS_FIRST_POLICY
+from app.customs_case_guidance import (guidance_for, SABER_FEE_QUERY, SABER_FEE_NOTE,
+                                     SABER_TRANSPORT_FEE_QUERY, SABER_TRANSPORT_FEE_NOTE)
+
 SUPPORT = '0507665873'
 EXTRA_NUMBERS = {'0507665873', '966507665873', '0530130435', '966530130435'}
 MAX_CHARS = 1400
 ACTION_CLAIM = re.compile(r'(سأحجز|سنحجز|حجزت|حجزنا|تم\s*الحجز|أرسلت\s*لك|ارسلت\s*لك|تم\s*الإرسال|تم\s*الارسال|سأرسل|سنرسل\s*السائق|نفذت|تم\s*التنفيذ|تم\s*التأكيد|أكدت\s*الحجز|وصلت\s*شحنتك|شحنتك\s*وصلت|تم\s*الفسح)')
 
 SYSTEM = """أنت موظف خدمة العملاء على واتساب لمؤسسة «آفاق طويق للتخليص الجمركي والنقل» في السعودية.
-اكتب بالعربية السعودية المهذبة والطبيعية، كأنك موظف حقيقي: مختصر وواضح ودود، بدون مقدمات طويلة ولا تكرار.
+اكتب بالعربية السعودية المهذبة والطبيعية، بصفتك مساعدة رقمية: مختصر وواضح ودود، بدون مقدمات طويلة ولا تكرار.
 أجب عن سؤال العميل نفسه مباشرة. إذا كان سؤاله عامًا (مثل: عندكم تخليص؟ عندكم نقل؟) فأكّد الخدمة واذكر أهم ما يلزم في سطرين،
 ثم اسأله سؤالًا واحدًا مفيدًا لإكمال الطلب (المنفذ أو المسار، نوع البضاعة، عدد الحاويات).
-اعتمد فقط على «معلومات آفاق» أدناه. الأسعار تُذكر فقط من قسم الأسعار المعتمدة كما هي، مع التنبيه أنها أجور الخدمة فقط وأن الرسوم الحكومية على المستورد.
+اعتمد على «معلومات آفاق» والمراجع المؤرخة المتاحة أدناه. أتعاب آفاق تُذكر فقط من قسم الأسعار المعتمدة كما هي، بنطاق ووحدة وشروط الخدمة نفسها؛ لا تنقل شروط خدمة إلى خدمة أخرى. رسوم الجهات الخارجية تُذكر فقط بمصدرها وتاريخها ونطاقها وشروطها المتحققة، ولا تصبح تلقائيًا عرضًا لشحنة العميل أو جزءًا من أتعابنا.
 لتخليص الصادر البري استخدم السعر ووحدة الاحتساب والاستثناءات الخاصة به في المعلومات، ولا تستخدم شرائح الحاويات أو تستنتج المعاملة الضريبية لأجر الخدمة.
 في أسئلة سابر ميّز شهادة مطابقة المنتج عن شهادة الإرسالية والإقرار الذاتي، ولا تؤكد إعفاء الفحم أو حالة بند غير متحققة، ولا تدّعِ بحثًا حيًا في سابر دون نتيجة ناجحة من أداة saber_search؛ اتبع المصادر وحدود المعرفة أدناه.
 لا تخترع أسعارًا أو مددًا أو وعودًا. ما ليس في المعلومات قل إن الفريق يرسل له عرضًا خاصًا أو يتابع معه، ورقم الدعم واتساب/اتصال 0507665873 (أو 0530130435).
@@ -38,11 +42,27 @@ TARIFF_TOOL = {'name': 'tariff_search', 'description': 'Search the GCC unified c
                'input_schema': {'type': 'object', 'properties': {'ar': {'type': 'array', 'items': {'type': 'string'}},
                                                                  'en': {'type': 'array', 'items': {'type': 'string'}}}}}
 TARIFF_RULES = '''
-عند سؤال العميل عن الجمارك أو الرسوم أو التعرفة أو البند الجمركي لبضاعة معينة: استخدم أداة tariff_search، ثم اذكر أقرب بند أو بندين
-(رقم البند ووصفه ونسبة الرسم) بصياغة مختصرة، ووضح أنه تصنيف مبدئي من التعرفة الجمركية الموحدة لدول الخليج والبند النهائي يحدده
-المخلص في فسح حسب مواصفات المنتج، وأن ضريبة القيمة المضافة 15% تضاف عند الاستيراد، وقد تلزم شهادات (سابر/الغذاء والدواء) حسب المنتج.
-إذا لم تجد بندًا واضحًا اطلب وصفًا أدق للمنتج (المادة، الاستخدام). اعرض حساب الرسوم المتوقعة فقط إذا ذكر العميل قيمة البضاعة.
+عند السؤال عن البند الجمركي أو نسبة الرسم لبضاعة معينة استخدم tariff_search بالوصف الفني.
+نتيجتها مرشحات من جدول خليجي محفوظ بتاريخ 30 سبتمبر 2026، وليست تحققًا حيًا من التعريفة السعودية الحالية.
+لا تخترع بندًا أو نسبة أو مبلغًا. استعمل الرقم والوصف وسياق العنوان والشروط كاملة؛ كلمة «غيرها» وحدها ليست تصنيفًا.
+إذا نقصت المادة أو الاستخدام فاطلب التفصيل الفاصل دون تكرار ما أعطاه العميل، ولا تعتبر أول نتيجة تصنيفًا نهائيًا.
+قبل اعتماد المعاملة يراجع المخلص البند السعودي الساري والوصف والمنشأ والقيود لدى زاتكا.
+لا تستنتج سابر أو الضريبة أو الإعفاء من هذا البحث. أجب أيضًا عن أي جزء آخر من السؤال (مثل النقل) من مصادره المعتمدة وحدها.
 '''
+TARIFF_UNVERIFIED_REPLY = ('لم أتمكن من تثبيت بند من مصدر التعرفة المتاح الآن. '
+                           'ما المادة المصنوع منها المنتج واستخدامه، أو البند المقترح إن توفر؟ '
+                           'التصنيف ونسبة الرسم يحتاجان مراجعة البند السعودي الساري قبل الاعتماد.')
+TARIFF_SOURCE_NOTE = ('مرجع التصنيف: جدول التعرفة الخليجي المحفوظ بتاريخ 30 سبتمبر 2026؛ '
+                      'بنود مبدئية وليست تحققًا حيًا من البند السعودي الحالي.\n')
+_TARIFF_INTENT = re.compile(
+    r'البند\s*الجمركي|(?:الرمز|رمز)\s*(?:ال)?جمركي|التعرفة\s*الجمركية|'
+    r'(?:رسوم|الرسوم|الرسم)\s*الجمركي|كم\s*(?:جمارك|الجمارك)|'
+    r'\bhs\s*code\b|customs\s*(?:duty|duties|tariff)|tariff\s*(?:code|rate)', re.I)
+
+
+def needs_tariff_search(question):
+    return bool(_TARIFF_INTENT.search(str(question)))
+
 
 
 SABER_TOOL = {
@@ -111,10 +131,9 @@ def tariff_result(args):
     from app import tariff_lookup
     try:
         items = tariff_lookup.search_many(args.get('ar'), args.get('en'))
-        import json as _json
-        return _json.dumps(tariff_lookup.as_prompt(items[:8]), ensure_ascii=False) if items else 'لا توجد نتائج مطابقة.'
+        return tariff_lookup.as_prompt(items[:8]) if items else []
     except Exception:
-        return 'تعذر البحث في التعرفة الآن.'
+        return []
 
 
 def model():
@@ -173,77 +192,103 @@ async def reply(question, history=()):
     from app import whatsapp_agent_privacy as privacy
     if privacy.identity_requested(str(question)):
         return None
+    saber_needed = needs_saber_search(question)
+    # Keep certificate evidence deterministic while answering an explicit fee
+    # part from a separately dated source. Catalogue success never proves cost.
+    def saber_reply(answer):
+        if SABER_FEE_QUERY.search(str(question)):
+            answer += '\n\n' + SABER_FEE_NOTE
+        if SABER_TRANSPORT_FEE_QUERY.search(str(question)):
+            answer += '\n\n' + SABER_TRANSPORT_FEE_NOTE
+        return answer
+    tariff_needed = needs_tariff_search(question) and not saber_needed
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
     name = model()
     if not key or not re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', name):
-        return None
+        return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
     from app.customs_knowledge import KNOWLEDGE
+    case_guidance = guidance_for(question, history)
     msgs = messages(question, history)
     text = ''
-    saber_needed = needs_saber_search(question)
+    tariff_checked = False
+    tariff_evidence = []
     saber_checked = False
     saber_evidence = []
     saber_attempts = 0
     try:
         async with httpx.AsyncClient(timeout=40) as client:
             for _ in range(3):
-                body = {'model': name, 'max_tokens': 900, 'system': SYSTEM + TARIFF_RULES + KNOWLEDGE + SABER_RULES,
+                body = {'model': name, 'max_tokens': 900, 'system': SYSTEM + TARIFF_RULES + KNOWLEDGE + SABER_RULES + CUSTOMS_FIRST_POLICY + case_guidance,
                         'messages': msgs, 'tools': [TARIFF_TOOL, SABER_TOOL]}
                 if saber_needed and not saber_checked:
                     body['tool_choice'] = {'type': 'tool', 'name': 'saber_search'}
+                elif tariff_needed and not tariff_checked:
+                    body['tool_choice'] = {'type': 'tool', 'name': 'tariff_search'}
                 r = await client.post('https://api.anthropic.com/v1/messages', json=body,
                                       headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
                 if r.status_code != 200:
                     print('WHATSAPP_NATURAL_HTTP', r.status_code, flush=True)
-                    return SABER_UNVERIFIED_REPLY if saber_needed else None
+                    return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
                 data = r.json()
                 content = data.get('content', [])
                 uses = [p for p in content if isinstance(p, dict) and p.get('type') == 'tool_use']
                 if not uses:
                     if saber_needed and not saber_checked:
-                        return SABER_UNVERIFIED_REPLY
+                        return saber_reply(SABER_UNVERIFIED_REPLY)
+                    if tariff_needed and not tariff_checked:
+                        return TARIFF_UNVERIFIED_REPLY
                     text = '\n'.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
                     break
                 if len(uses) > 4:
-                    return SABER_UNVERIFIED_REPLY if saber_needed else None
+                    return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
                 tool_results = []
                 for use in uses:
                     if not isinstance(use.get('id'), str) or not use['id'] or not isinstance(use.get('input'), dict):
-                        return SABER_UNVERIFIED_REPLY if saber_needed else None
+                        return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
                     tool_name = use.get('name')
                     if tool_name == 'saber_search':
                         saber_attempts += 1
                         if saber_attempts > 3:
-                            return SABER_UNVERIFIED_REPLY
+                            return saber_reply(SABER_UNVERIFIED_REPLY)
                         evidence = await saber_result(use.get('input') or {})
                         saber_checked = True
                         if evidence.get('status') == 'general_guidance':
                             # No product evidence exists: do not let a second model
                             # turn an empty query into a product-specific assertion.
-                            return SABER_GENERAL_REPLY
+                            return saber_reply(SABER_GENERAL_REPLY)
                         if evidence.get('status') != 'results':
-                            return SABER_UNVERIFIED_REPLY
+                            return saber_reply(SABER_UNVERIFIED_REPLY)
                         # Render verified certificate fields directly, never ask
                         # a second model to reinterpret the official requirements.
                         from app.saber_answers import render_answer
-                        return render_answer(evidence, question)
+                        return saber_reply(render_answer(evidence, question))
                     elif tool_name == 'tariff_search':
-                        output = tariff_result(use.get('input') or {})
+                        candidates = tariff_result(use.get('input') or {})
+                        if not candidates:
+                            return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else TARIFF_UNVERIFIED_REPLY
+                        tariff_checked = True
+                        tariff_evidence.extend(candidates)
+                        output = json.dumps({'source_note': TARIFF_SOURCE_NOTE, 'candidates': candidates}, ensure_ascii=False)
                     else:
-                        return SABER_UNVERIFIED_REPLY if saber_needed else None
+                        return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
                     tool_results.append({'type': 'tool_result', 'tool_use_id': use['id'],
                                          'content': output})
                 msgs = msgs + [{'role': 'assistant', 'content': content},
                                {'role': 'user', 'content': tool_results}]
     except (httpx.HTTPError, ValueError) as exc:
         print('WHATSAPP_NATURAL_ERROR', type(exc).__name__, flush=True)
-        return SABER_UNVERIFIED_REPLY if saber_needed else None
+        return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
     # Allow only numbers and URLs actually returned by the fixed official lookup.
-    grounding = KNOWLEDGE + '\n' + '\n'.join(
+    grounding = KNOWLEDGE + case_guidance + '\n' + '\n'.join(
         str(item.get('code', '')) + '\n' + str(evidence.get('source_url', ''))
         for evidence in saber_evidence for item in evidence.get('results', []))
+    if tariff_evidence and not text.strip():
+        return TARIFF_UNVERIFIED_REPLY
+    if tariff_evidence:
+        grounding += '\n' + json.dumps(tariff_evidence, ensure_ascii=False)
+        text = TARIFF_SOURCE_NOTE + text
     result = safe(text, grounding)
     if result is None:
         print('WHATSAPP_NATURAL_REJECTED', flush=True)
-        return SABER_UNVERIFIED_REPLY if saber_needed else None
+        return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
     return result
