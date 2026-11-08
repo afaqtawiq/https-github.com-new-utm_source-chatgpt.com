@@ -499,6 +499,60 @@ class Task:
         raise ValueError('لم أجد البيان ' + number + ' في القائمة')
 
 
+    def find_row(self, page, number, which):
+        if self.params.get('party'):
+            self.filter_party(page, self.params['party'], which)
+        for p in range(1, 11):
+            if p > 1 and not self.next_page(page, p):
+                break
+            row = page.locator('tr', has_text=number)
+            if row.count():
+                return row.first
+        raise ValueError('لم أجد البيان ' + number + ' في القائمة')
+
+    def do_fasah_release_notice(self):
+        """Download the customs release notice (إشعار الفسح) PDF of ONE released declaration — read-only."""
+        which, number = self.params.get('which', 'import'), str(self.params.get('number') or '')
+        if not re.fullmatch(r'\d{3,8}', number):
+            raise ValueError('رقم البيان غير صالح')
+        page = self.fasah_list(which)
+        row = self.find_row(page, number, which)
+        labels = re.compile(r'(طباعة إشعار الفسح|إشعار الفسح|اشعار الفسح|طباعة الإشعار|طباعة)')
+        target = row.get_by_text(labels)
+        if not target.count():
+            row.get_by_text('إظهار التفاصيل').first.click(timeout=8000)
+            self.wait(page, 4)
+            target = page.get_by_role('button', name=labels)
+            if not target.count():
+                target = page.get_by_text(labels)
+        if not target.count():
+            self.step('لم أجد زر إشعار الفسح للبيان ' + number, False, page=page)
+            raise ValueError('زر إشعار الفسح غير ظاهر (قد لا يكون البيان مفسوحًا بعد)')
+        path = self.dir / f'release-{number}.pdf'
+        before = set(self.context.pages)
+        try:
+            with page.expect_download(timeout=45000) as info:
+                target.first.click(timeout=8000)
+            info.value.save_as(path)
+        except Exception:
+            # Some screens open the PDF in a new tab instead of downloading it: fetch that URL in the same session.
+            pdf_url = None
+            for other in self.context.pages:
+                if other not in before and allowed(other.url, self.domains, self.loopback):
+                    other.wait_for_load_state('domcontentloaded', timeout=30000)
+                    pdf_url = other.url
+                    break
+            if not pdf_url:
+                self.step('لم يبدأ تنزيل إشعار الفسح', False, page=page)
+                raise ValueError('لم يبدأ تنزيل إشعار الفسح')
+            body = self.context.request.get(pdf_url, timeout=60000).body()
+            if not body.startswith(b'%PDF'):
+                raise ValueError('الصفحة المفتوحة ليست ملف PDF')
+            path.write_bytes(body)
+        self.step('نزّلت إشعار الفسح للبيان ' + number)
+        return self.upload(path, page.url)
+
+
 def run_one(api, got, context):
     task = Task(api, got['task'], got.get('allowed_domains') or [], context, got.get('allow_http_loopback', False))
     status, result = 'failed', {}

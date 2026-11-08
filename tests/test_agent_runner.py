@@ -28,7 +28,7 @@ def test_create_task_refusals_before_any_storage():
 
 
 def test_only_known_kinds():
-    assert set(ar.KINDS) == {'download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details'}
+    assert set(ar.KINDS) == {'download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details', 'fasah_release_notice'}
     assert 'application/x-msdownload' not in ar.FILE_TYPES
 
 

@@ -41,6 +41,7 @@ KINDS = {
     'fill_form': 'تعبئة نموذج في موقع مسموح (الإرسال يحتاج موافقتك)',
     'fasah_declarations': 'قراءة قائمة البيانات في فسح وحفظها CSV — قراءة فقط',
     'fasah_details': 'قراءة تفاصيل بيان واحد في فسح (الفاتورة والرسوم) — قراءة فقط',
+    'fasah_release_notice': 'تنزيل إشعار الفسح PDF لبيان مفسوح — قراءة فقط',
 }
 FILE_TYPES = {'application/pdf', 'text/csv', 'text/plain', 'image/png', 'image/jpeg',
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
@@ -101,14 +102,14 @@ def create_task(kind, params, actor=''):
             label = str((f or {}).get('label') or '')
             if re.search(r'(password|كلمة\s*(ال)?(مرور|سر)|otp|رمز\s*(ال)?تحقق|cvv|iban|ايبان|بطاقة)', label, re.I):
                 return None, 'لا أعبئ كلمات المرور أو رموز التحقق أو بيانات البطاقات والحسابات البنكية.'
-    if kind in ('fasah_declarations', 'fasah_details'):
+    if kind in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
         params['which'] = 'export' if str(params.get('which', '')).startswith(('ex', 'تص')) else 'import'
         if params.get('since') and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(params['since'])):
             return None, 'التاريخ بصيغة 2026-10-01.'
         params['pages'] = max(1, min(int(re.sub(r'\D', '', str(params.get('pages') or '3')) or 3), 20))
         if params.get('party'):
             params['party'] = str(params['party'])[:60]
-    if kind == 'fasah_details' and not re.fullmatch(r'\d{3,8}', str(params.get('number') or '')):
+    if kind in ('fasah_details', 'fasah_release_notice') and not re.fullmatch(r'\d{3,8}', str(params.get('number') or '')):
         return None, 'اذكر رقم البيان.'
     with db() as c:
         tid = c.execute('INSERT INTO runner_tasks(kind,params_json,created_by,created_at) VALUES(%s,%s,%s,%s) RETURNING id',
@@ -318,19 +319,19 @@ async def finish(tid: int, request: Request):
             status = 'stopped'
         if status == 'done':
             verified = c.execute('SELECT COUNT(*) n FROM runner_files WHERE task_id=%s AND verified', (tid,)).fetchone()['n']
-            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'read_page') and not verified:
+            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'read_page') and not verified:
                 status = 'failed'  # never «done» without a verified result
         c.execute('UPDATE runner_tasks SET status=%s,result_json=%s,finished_at=%s WHERE id=%s',
                   (status, json.dumps(body.get('result') or {}, ensure_ascii=False)[:20000], utcnow(), tid))
     try:
         import asyncio
         from app.owner_briefing import deliver
-        auto = task.get('created_by') == 'متابعة تلقائية'
+        auto = str(task.get('created_by') or '').startswith('متابعة تلقائية')
         if not auto:  # the 2-hourly FASAH tracking reads report only status changes, not every run
             asyncio.get_running_loop().create_task(deliver(task_text(tid)))
     except Exception:
         pass
-    if status == 'done' and task['kind'] in ('fasah_declarations', 'fasah_details'):
+    if status == 'done' and task['kind'] in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
         import threading
         threading.Thread(target=after_fasah, args=(tid,), daemon=True).start()
     return {'status': status}
@@ -382,7 +383,7 @@ def after_fasah(tid):
     try:
         with db() as c:
             task = c.execute('SELECT * FROM runner_tasks WHERE id=%s', (tid,)).fetchone()
-            f = c.execute('SELECT name,data FROM runner_files WHERE task_id=%s AND verified ORDER BY id DESC LIMIT 1', (tid,)).fetchone()
+            f = c.execute('SELECT id,name,data FROM runner_files WHERE task_id=%s AND verified ORDER BY id DESC LIMIT 1', (tid,)).fetchone()
         if not f:
             return
         params = json.loads(task['params_json'])
@@ -417,6 +418,11 @@ def after_fasah(tid):
                 lines.append('• استيراد: ' + '، '.join(n['number'] for n in imports)
                              + '\n  أرسلت جهاز العمل يقرأ فاتورة ورسوم كل بيان (قراءة فقط)، ثم أجهز لك التسجيل للموافقة.')
             notify('\n'.join(lines))
+        elif task['kind'] == 'fasah_release_notice' or params.get('purpose') == 'duties':
+            from app import fasah_docs
+            message = fasah_docs.after_task(task, params, f)
+            if message:
+                notify(message)
         else:
             text = bytes(f['data']).decode('utf-8', 'replace')[:60000]
             fields = extract_details(text)

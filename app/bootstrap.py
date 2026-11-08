@@ -259,3 +259,6 @@ register_prospect_followups(app)
 from app.price_calculator import router as price_calculator_router, init as init_price_calculator
 init_price_calculator()
 app.include_router(price_calculator_router)
+from app.fasah_docs import router as fasah_docs_router, init as init_fasah_docs
+init_fasah_docs()
+app.include_router(fasah_docs_router)
