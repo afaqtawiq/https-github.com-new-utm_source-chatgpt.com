@@ -361,6 +361,14 @@ async def handle_pdf(c, payload, sender, index):
                                 | si.XLSX | si.CSV, 15 * 1024 * 1024)
         if not got:
             raise ValueError('تعذر تنزيل الملف؛ أعد إرساله.')
+        from app import bank_reconcile
+        _att = ((payload.get('message') or {}).get('attachments') or [{}])[index] or {}
+        if bank_reconcile.is_bank(caption + ' ' + ' '.join(str(_att.get(k) or '') for k in ('name', 'fileName', 'filename'))):
+            lines = await bank_reconcile.extract(si.content_for(got[0], got[1]))
+            if not lines:
+                return audit(c, payload, sender, 'قرأت كشف البنك لكن لم أجد حوالات واردة فيه؛ تأكد أنه كشف الحساب الصحيح.', command)
+            reply, _ = bank_reconcile.prepare(c, lines, str(sender or ''))
+            return audit(c, payload, sender, reply, command + '\nكشف بنك: ' + str(len(lines)))
         if not got[0].startswith(b'%PDF'):
             # Excel / CSV statement (كشف) of several declarations.
             from app.prospect_autopilot import system_user
