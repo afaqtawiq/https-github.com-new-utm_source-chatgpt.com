@@ -262,3 +262,6 @@ app.include_router(price_calculator_router)
 from app.fasah_docs import router as fasah_docs_router, init as init_fasah_docs
 init_fasah_docs()
 app.include_router(fasah_docs_router)
+from app.precheck import router as precheck_router, init as init_precheck
+init_precheck()
+app.include_router(precheck_router)
