@@ -199,7 +199,15 @@ def after_read(task, rows):
     """Called by the runner after every verified FASAH list read (manual or automatic)."""
     import json
     params = json.loads(task['params_json']) if isinstance(task.get('params_json'), str) else (task.get('params_json') or {})
-    return change_message(ingest(rows, params.get('which', 'import')))
+    changes = ingest(rows, params.get('which', 'import'))
+    message = change_message(changes)
+    try:
+        from app import fasah_docs
+        if fasah_docs.request_for(changes) and message:
+            message += '\n\n📥 أرسلت جهاز العمل يجلب إشعار الفسح ورقم سداد الرسوم للبيانات المتغيرة (قراءة فقط).'
+    except Exception as exc:
+        print('FASAH_DOCS_REQUEST', type(exc).__name__, str(exc)[:160], flush=True)
+    return message
 
 
 # ---------- manager commands ----------

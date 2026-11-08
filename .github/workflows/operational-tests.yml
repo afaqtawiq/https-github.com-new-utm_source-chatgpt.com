@@ -132,6 +132,9 @@ jobs:
       - run: python tests/fasah_tracking_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python tests/fasah_docs_acceptance.py
+        env:
+          AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python tests/prospect_replies_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
