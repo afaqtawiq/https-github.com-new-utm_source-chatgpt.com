@@ -23,6 +23,9 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from app.customs_policy import CUSTOMS_FIRST_POLICY
+from app.customs_case_guidance import guidance_for
+
 from app import command_assistant as page
 from app import whatsapp_admin as wa
 
@@ -80,7 +83,7 @@ def ask_claude(actions, text):
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None
-    body = {'model': MODEL, 'max_tokens': 600, 'thinking': {'type': 'disabled'}, 'system': SYSTEM + '\n\n' + actions + _staff_context(),
+    body = {'model': MODEL, 'max_tokens': 600, 'thinking': {'type': 'disabled'}, 'system': SYSTEM + CUSTOMS_FIRST_POLICY + '\nFor customs advice choose question, for HS/duty choose tariff where listed. Advice does not authorize writes. Preserve explicit transport and other supported actions.\n' + actions + _staff_context(),
             'messages': [{'role': 'user', 'content': text[:1500]}]}
     try:
         with httpx.Client(timeout=25) as client:
@@ -284,7 +287,7 @@ def answer_question(question):
               'or prior conversation. You only see this message and the knowledge below, not another assistant\'s '
               'memory or other conversations. For shipment status ask for its reference instead of guessing. '
               'Use ONLY the knowledge below for company/customs facts, rates, requirements and official links; '
-              'when absent, say you need to verify. Send supplied links exactly as written.\n\n' + KNOWLEDGE + _staff_context())
+              'when absent, say you need to verify. Send supplied links exactly as written.\n\n' + KNOWLEDGE + _staff_context() + CUSTOMS_FIRST_POLICY + guidance_for(question))
     body = {'model': MODEL, 'max_tokens': 1200, 'thinking': {'type': 'disabled'}, 'system': system,
             'messages': [{'role': 'user', 'content': str(question)[:2000]}]}
     try:

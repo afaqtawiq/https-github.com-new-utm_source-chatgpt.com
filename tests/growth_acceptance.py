@@ -13,14 +13,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+def run_followups_at(pf, when):
+    # The eligibility clock and persisted send timestamps must advance together.
+    with patch.object(pf, 'utcnow', return_value=when):
+        return asyncio.run(pf.run(when))
+
+
 def run():
     from fastapi.testclient import TestClient
     from app.bootstrap import app
     from app import prospect_followups as pf, prospect_replies, zernio_whatsapp as wa
     from app.daily_prospects import decide, today
-    from app.storage import db, utcnow
+    from app.storage import db
     pf.init(); prospect_replies.init()
-    now = utcnow()
+    now = dt.datetime(2026, 11, 8, 6, 35, tzinfo=dt.timezone.utc)
     with db() as c:
         uid = c.execute("INSERT INTO users(email,name,password_hash,role,created_at) VALUES('a@fixture.invalid','admin','x','admin',%s) RETURNING id",
                         (now,)).fetchone()['id']
@@ -50,19 +56,19 @@ def run():
         c.execute('UPDATE daily_prospects SET decided_at=%s WHERE id=ANY(%s)', (work - dt.timedelta(days=4), ids))
     with patch.dict(os.environ, env), patch.object(pf, 'ensure_template', AsyncMock(return_value='APPROVED')), \
             patch.object(wa, 'send', AsyncMock(side_effect=lambda to, text, **k: sent.append((to, text)))):
-        stats = asyncio.run(pf.run(work))
+        stats = run_followups_at(pf, work)
         assert stats['sent'] == 2, stats
         assert sorted(t for t, _ in sent) == ['+966500000501', '+966500000502']  # not suppressed, not replied
         assert 'نتابع معكم رسالتنا السابقة' in sent[0][1] and 'لإيقاف الرسائل أرسل: إيقاف' in sent[0][1]
-        assert asyncio.run(pf.run(work))['sent'] == 0  # step 1 only once
+        assert run_followups_at(pf, work)['sent'] == 0  # step 1 only once
         later = work + dt.timedelta(days=4)
         while not pf.in_hours(later):
             later += dt.timedelta(hours=1)
-        assert asyncio.run(pf.run(later))['sent'] == 2  # step 2 at day 7+
+        assert run_followups_at(pf, later)['sent'] == 2  # step 2 at day 7+
         assert 'جرّبونا في شحنة واحدة' in sent[-1][1]
-        assert asyncio.run(pf.run(later + dt.timedelta(days=5)))['sent'] == 0  # then stop
+        assert run_followups_at(pf, later + dt.timedelta(days=5))['sent'] == 0  # then stop
     with patch.dict(os.environ, {'AUTO_OUTREACH': '0'}):
-        assert asyncio.run(pf.run(work))['enabled'] is False
+        assert run_followups_at(pf, work)['enabled'] is False
     # Template text must match the exact message the agent sends.
     params = wa.template_parameters({'components': [{'type': 'BODY', 'text': pf.template_spec()['components'][0]['text']}]},
                                     pf.body('شركة 0', pf.step_line(1)))

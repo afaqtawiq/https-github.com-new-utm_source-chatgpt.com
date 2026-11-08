@@ -29,6 +29,9 @@ import unicodedata
 
 import httpx
 
+from app.customs_policy import CUSTOMS_FIRST_POLICY
+from app.customs_case_guidance import guidance_for
+
 
 API_URL = 'https://api.anthropic.com/v1/messages'
 MAX_DOCUMENT_CHARS = 24_000
@@ -555,7 +558,7 @@ color colour gate phrase distinctive unique
 # Reviewed, public local knowledge only. Pinning the entire source prevents a
 # future edit from silently expanding this permission to new or private text.
 # This is NOT an approval for any PDF bearing the same textual content.
-_PUBLIC_KNOWLEDGE_SHA256 = '403eca0c2a294fbbb73c0c8172cf52c93eea0d89e8545ba5ce30f8894f758df3'
+_PUBLIC_KNOWLEDGE_SHA256 = 'b58c63c0523238a4e2ca42da3757d5e65d20af35586a5a140356cf668545d6f8'
 # Only verified company services remain admitted from this legacy document.
 # Its regulatory sections are superseded by the dated guidance below; filtering
 # individual risky words had silently removed invoice facts but kept stale rules.
@@ -871,10 +874,10 @@ Never invent document access, source facts, operational status or private data.
 No links, credentials, bank/card details, private health/minor/asset information,
 JSON, code or markup in your reply. Output only the natural, short Arabic reply.'''
 
-# Public guidance reviewed 2026-10-10; SABER updated 2026-11-07. Kept separate from the pinned company
+# Public guidance reviewed 2026-11-08; SABER updated 2026-11-07. Kept separate from the pinned company
 # excerpt and from PDF provenance; never treat it as the user's shipment record.
 _CUSTOMS_GUIDANCE_SYSTEM = '''
-VERIFIED GENERAL SAUDI CUSTOMS GUIDANCE (reviewed 2026-10-10):
+VERIFIED GENERAL SAUDI CUSTOMS GUIDANCE (general sources rechecked 2026-11-08):
 This reference is available to every ordinary non-document conversation. Its
 presence does NOT classify the current request as customs. Use only relevant
 facts: ordinary chat, transport-only pricing, company-service and unrelated
@@ -883,7 +886,8 @@ Earlier assistant replies and legacy regulatory snippets are not authorities.
 ZATCA Import Instructions, updated 2026-08-31:
 https://zatca.gov.sa/ar/RulesRegulations/Taxes/Pages/customs-bussiness/import-pages/Import-Instructions.aspx
 For imports into Saudi Arabia the core documents are the commercial invoice and
-bill of lading. A certificate of origin is not mandatory when a fixed origin
+the applicable transport document: bill of lading for sea/air, and the export
+declaration issued in the shipping country for land. A certificate of origin is not mandatory when a fixed origin
 marking meeting the applicable requirements exists; do not omit that condition.
 Additional registrations, certificates and permits depend on the goods, their
 verified HS classification and the responsible authority. Never guess an HS
@@ -942,15 +946,19 @@ exception is conditional on the guide's local-invoice/customs-declaration rule.
 Restricted goods need the relevant permits. The described sequence is customs
 declaration, supporting documents, risk-based inspection, applicable other
 charges, then departure authorization. Describe it without claiming execution.
-ZATCA transit guide (reviewed 2026-10-10):
-https://eservices.zatca.gov.sa/sites/sc/ar/CustomsGuideNew/HQweb/Pages/newGuide1438/إجراءات-البضائع-العابرة---ترانزيت.aspx
-Transit uses a bill of lading for sea/air or a cargo manifest for land; an
-invoice is required if available. Non-regular sea services have a separate
-manifest provision. The process describes declaration, documents, risk-based
-inspection and customs seals, a guarantee accepted by customs and applicable
-other charges, then exit authorization. These are procedural requirements,
-not a promise of clearance, a guaranteed time, a fee amount or a financial
-undertaking by the assistant. Do not apply transit rules to import/export.
+Current consolidated ZATCA procedure rules, amended June 2026:
+https://zatca.gov.sa/ar/RulesRegulations/Taxes/Documents/Rules-of-Customs-Procedures.pdf
+Transit archive: bill of lading for sea/air and source-country customs declaration
+for land. Invoice and additional documents are requested when needed. A land
+manifest is not a replacement for that declaration. Check RFS/TIR exceptions
+for their exact route. Follow declaration, risk-based checks, seals, accepted
+guarantee, route/time/tracking obligations, exit and settlement. No automatic
+financial undertaking, approval, fee amount or clearance deadline follows.
+Marine advance filing distinguishes carrier 72/24-hour rules and voyage
+exceptions from importer filing after manifest notice no later than actual
+arrival. A general 48-hour instruction is not one deadline for every role/mode.
+Re-export Article 31 requires import-declaration linkage and identifying marks;
+an older no-prior-declaration example is unresolved, not a current permission.
 When asked a customs document-requirement question, give the known requirements,
 then ask only missing goods type, transport mode or arrival port, at most two
 details. Preserve user-stated origin and timing without asking again.
@@ -1698,7 +1706,8 @@ def _customs_failure_reply(question: str, entries: tuple[dict[str, str], ...] = 
         known = ('من الصين ' if context['china'] else '') + ('الأسبوع القادم ' if context['next_week'] else '')
         intro = 'بالنسبة لشحنتك ' + known.strip() + '، ' if known else ''
         scope = 'للاستيراد إلى السعودية، ' if context['saudi_destination'] else 'إذا كانت الشحنة واردة إلى السعودية، '
-        answer = (intro + scope + 'الأساس هو الفاتورة التجارية وبوليصة الشحن. '
+        transport_document = ('بيان التصدير الصادر من دولة الشحن' if context['mode_name'] == 'land' else 'بوليصة الشحن المناسبة لوسيلة النقل')
+        answer = (intro + scope + 'الأساس هو الفاتورة التجارية و' + transport_document + '. '
             'شهادة المنشأ غير إلزامية عند وجود دلالة منشأ ثابتة مستوفية للاشتراطات؛ '
             'وقد تُطلب شهادات أو مستندات إضافية حسب البضاعة والجهة المختصة.')
     elif movement == 'export':
@@ -1712,10 +1721,10 @@ def _customs_failure_reply(question: str, entries: tuple[dict[str, str], ...] = 
     else:
         transport = {'sea': 'للترانزيت البحري، مستند النقل بوليصة الشحن',
                      'air': 'للترانزيت الجوي، مستند النقل بوليصة الشحن',
-                     'land': 'للترانزيت البري، مستند النقل بيان الحمولة «المنافيست»'}
+                     'land': 'للترانزيت البري، يرفق البيان الجمركي من دولة المصدر، وليس المنافيست بديلًا عنه'}
         answer = (transport.get(context['mode_name'],
-            'للترانزيت، مستند النقل بوليصة الشحن للبحر والجو، وبيان الحمولة «المنافيست» للبر')
-            + '، والفاتورة إن وجدت. وتختلف ضوابط العبور بحسب وسيلة النقل ومنافذه.')
+            'للترانزيت، ترفق بوليصة الشحن للبحر والجو، والبيان الجمركي من دولة المصدر للبر')
+            + '، والفاتورة والمستندات الإضافية عند طلب الهيئة. تُراجع استثناءات العبور وضوابطه حسب المسار.')
     missing = [label for key, label in (('goods', 'نوع البضاعة'), ('mode', 'طريقة الشحن'),
                                         ('port', 'منفذ الوصول' if movement == 'import' else 'منفذ العبور' if movement == 'transit' else 'منفذ التصدير'))
                if not context[key]]
@@ -2432,9 +2441,9 @@ naturally to the user's intent; ask a brief clarification or request the needed
 source when necessary. Never claim that an absent document was read.'''
             if implicit_document_detail(screened_question.safe_text) and checked_history.entries:
                 source_note += '\nYou may restate facts explicitly supplied by the user in history, attributed with حسب وصفك. Do not treat earlier assistant statements as evidence or invent missing values.'
-        system = CONVERSATION_SYSTEM + source_note
+        system = CONVERSATION_SYSTEM + source_note + CUSTOMS_FIRST_POLICY
         if not using_document and not missing_document:
-            system += _CUSTOMS_GUIDANCE_SYSTEM + _broker_guidance_system()
+            system += _CUSTOMS_GUIDANCE_SYSTEM + _broker_guidance_system() + guidance_for(screened_question.safe_text, previous.entries)
     else:
         system = SYSTEM
     money_targets = (_reviewed_money_targets(screened_question.safe_text)
