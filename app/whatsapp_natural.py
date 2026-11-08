@@ -21,6 +21,92 @@ EXTRA_NUMBERS = {'0507665873', '966507665873', '0530130435', '966530130435'}
 MAX_CHARS = 1400
 ACTION_CLAIM = re.compile(r'(سأحجز|سنحجز|حجزت|حجزنا|تم\s*الحجز|أرسلت\s*لك|ارسلت\s*لك|تم\s*الإرسال|تم\s*الارسال|سأرسل|سنرسل\s*السائق|نفذت|تم\s*التنفيذ|تم\s*التأكيد|أكدت\s*الحجز|وصلت\s*شحنتك|شحنتك\s*وصلت|تم\s*الفسح)')
 
+# Narrow response-side guard. This is not semantic validation of all claims.
+CUSTOMS_ACTION_CLAIM = re.compile(
+    r'(?<!\w)تم\s*(?:(?:إصدار|اصدار)\s*(?:شهادة|شهاده)|'
+    r'(?:تقديم|إرسال|ارسال|تسجيل)\s*(?:ال)?بيان\s*(?:ال)?جمركي|'
+    r'(?:سداد|دفع)\s*(?:ال)?رسوم\s*(?:ال)?جمركية)')
+
+
+def customs_action_asserted(text):
+    for match in CUSTOMS_ACTION_CLAIM.finditer(text):
+        # Only the immediately preceding clause can qualify this occurrence.
+        prefix = re.split(r'[،,؛;.!؟?\n]', text[:match.start()])[-1].strip()
+        if re.search(r'(?:^|\s)(?:هل|إذا|اذا|عندما|حين|متى|بعدما|كلما)\s*$', prefix):
+            continue
+        if re.search(r'(?:^|\s)(?:لم|لا)\s+(?:أقل|اقل|نقل|نؤكد|أؤكد|اؤكد)\s+(?:إنه|أنه|انه|إن|أن|ان)?\s*$', prefix):
+            continue
+        return True
+    return False
+
+
+CLEARANCE_GUARANTEE = re.compile(
+    r'(?<!\w)(?:أضمن|اضمن|نضمن)\s+(?:(?:لك|لكم)\s+)?(?:الفسح|الإفراج|الافراج)')
+
+
+def clearance_guaranteed(text):
+    for match in CLEARANCE_GUARANTEE.finditer(text):
+        prefix = re.split(r'[،,؛;.!؟?\n]', text[:match.start()])[-1].strip()
+        if not re.search(r'(?:^|\s)(?:لا|لن|لم|هل)\s*$', prefix):
+            return True
+    return False
+
+
+def percentages(text):
+    # Numeric membership only, not proof of the rate's product/tax applicability.
+    values = re.findall(r'(?<![\d.])([\d]+(?:[.٫][\d]+)?)\s*[%٪]', text)
+    return {float(value.replace('٫', '.')) for value in values}
+
+
+# No verified structured fee ledger exists in this ordinary-text lane. Do not
+# present model-generated shipment aggregates as verified monetary totals.
+FEE_TOTAL_UNVERIFIED_REPLY = (
+    'لا أستطيع التحقق من إجمالي رسوم الشحنة هنا. يلزم كشف بنود موثق يوضح ما يشمله كل مبلغ، '
+    'والمدفوع والضريبة والبنود غير المسعرة، حتى لا نحسب الرسوم مرتين أو نعرض مجموعًا ناقصًا كإجمالي نهائي. '
+    'أتعاب آفاق المعتمدة منفصلة عن رسوم الجهات الأخرى.')
+_EXTERNAL_FEE_CONTEXT = re.compile(
+    r'تخليص|جمرك|جمارك|سابر|\bsaber\b|\bcustoms\b|'
+    r'(?:رسوم|تكلف[ةه]|فاتور[ةه]|أجور|اجور).{0,40}(?:ميناء|الميناء|وكيل|الوكيل|كشف|الكشف|موعد|الموعد|مناول|ناقل)|'
+    r'(?:وكيل|الوكيل|ميناء|الميناء|مناول[ةه]|الكشف|الموعد)\s*[:：]?\s*\d|'
+    r'(?:carrier|agent|port|inspection|appointment|terminal).{0,30}(?:fee|cost|charge|invoice|\d)', re.I)
+_FEE_AGGREGATE = re.compile(
+    r'(?:الإجمالي|الاجمالي|إجمالي|اجمالي|المجموع|مجموع|التكلفة\s*(?:الكاملة|النهائية)|'
+    r'\b(?:grand\s+total|total|all.in)\b)([^،,؛;!?؟\n]{0,65}?)\d', re.I)
+
+
+def unverified_fee_total(question, answer, history=()):
+    question = str(question or '')
+    # A port in a transport route or an exclusion disclaimer does not turn a
+    # transport-only quote into a customs fee calculation.
+    transport = re.search(r'نقل|\btransport\b|\btrucking\b', question, re.I)
+    explicit_context = _EXTERNAL_FEE_CONTEXT.search(question)
+    if transport and not explicit_context:
+        return False
+    context = question + '\n' + answer
+    if not explicit_context and len(question.strip()) < 60 and not re.search(
+            r'شحن[ةه]\s*(?:جديد|ثاني)|new\s+shipment', question, re.I):
+        for entry in list(history or ())[-2:]:
+            if isinstance(entry, dict):
+                context += '\n' + str(entry.get('question') or entry.get('customer') or '')[:1500]
+    if not _EXTERNAL_FEE_CONTEXT.search(context):
+        return False
+    for match in _FEE_AGGREGATE.finditer(answer):
+        prefix = re.split(r'[،,؛;.!؟?\n]', answer[:match.start()])[-1].strip()
+        if re.search(r'(?:^|\s)(?:ليس|ليست|لا\s+(?:أؤكد|اؤكد|نؤكد)|'
+                     r'لا\s+(?:أستطيع|استطيع|يمكنني)\s+تأكيد)\s*$', prefix):
+            continue
+        # Partial figures are not promoted to a total merely by a disclaimer
+        # elsewhere: the aggregate itself must be explicitly labelled partial.
+        qualifier = match.group(1)
+        partial = re.fullmatch(r'\s*(?:الجزئي|جزئي|جزئياً|جزئيًا|partial|subtotal)\s*[:：=]?\s*', qualifier, re.I)
+        disclaimer = re.search(r'غير\s*نهائي|ليس\s*(?:هذا\s*)?(?:ال)?إجمالي|ليس\s*(?:هذا\s*)?(?:ال)?اجمالي|'
+                               r'لا\s*(?:يمثل|يشمل)\s*(?:كل|جميع)|غير\s*(?:معروف|مسعر)|not\s*(?:a\s*)?(?:final|complete)', answer, re.I)
+        if partial and disclaimer:
+            continue
+        return True
+    return False
+
+
 SYSTEM = """أنت موظف خدمة العملاء على واتساب لمؤسسة «آفاق طويق للتخليص الجمركي والنقل» في السعودية.
 اكتب بالعربية السعودية المهذبة والطبيعية، بصفتك مساعدة رقمية: مختصر وواضح ودود، بدون مقدمات طويلة ولا تكرار.
 أجب عن سؤال العميل نفسه مباشرة. إذا كان سؤاله عامًا (مثل: عندكم تخليص؟ عندكم نقل؟) فأكّد الخدمة واذكر أهم ما يلزم في سطرين،
@@ -57,6 +143,7 @@ TARIFF_SOURCE_NOTE = ('مرجع التصنيف: جدول التعرفة الخل
 _TARIFF_INTENT = re.compile(
     r'البند\s*الجمركي|(?:الرمز|رمز)\s*(?:ال)?جمركي|التعرفة\s*الجمركية|'
     r'(?:رسوم|الرسوم|الرسم)\s*الجمركي|كم\s*(?:جمارك|الجمارك)|'
+    r'(?:نسبة|نسبه)\s*(?:ال)?(?:رسم|جمارك)|\bduty\s*rate\b|'
     r'\bhs\s*code\b|customs\s*(?:duty|duties|tariff)|tariff\s*(?:code|rate)', re.I)
 
 
@@ -165,7 +252,7 @@ def safe(text, knowledge):
     if re.search(r'(كلمة\s*(المرور|السر)|رمز\s*التحقق|رقم\s*البطاقة|الآيبان|IBAN)', text) and 'لا ' not in text:
         return None
     # Never claim or promise an executed action (booking, sending, dispatching, confirming).
-    if ACTION_CLAIM.search(text):
+    if ACTION_CLAIM.search(text) or customs_action_asserted(text) or clearance_guaranteed(text):
         return None
     return text
 
@@ -193,6 +280,7 @@ async def reply(question, history=()):
     if privacy.identity_requested(str(question)):
         return None
     saber_needed = needs_saber_search(question)
+    mixed_tariff = saber_needed and needs_tariff_search(question)
     # Keep certificate evidence deterministic while answering an explicit fee
     # part from a separately dated source. Catalogue success never proves cost.
     def saber_reply(answer):
@@ -200,6 +288,9 @@ async def reply(question, history=()):
             answer += '\n\n' + SABER_FEE_NOTE
         if SABER_TRANSPORT_FEE_QUERY.search(str(question)):
             answer += '\n\n' + SABER_TRANSPORT_FEE_NOTE
+        if mixed_tariff:
+            answer += ('\n\nوبخصوص البند أو الرسم الجمركي، نتيجة سابر لا تحددهما؛ '
+                       'لم أتحقق هنا من تعرفة هذه البضاعة، ويلزم بحث مستقل ومراجعة البند السعودي الساري قبل الاعتماد.')
         return answer
     tariff_needed = needs_tariff_search(question) and not saber_needed
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
@@ -287,6 +378,10 @@ async def reply(question, history=()):
     if tariff_evidence:
         grounding += '\n' + json.dumps(tariff_evidence, ensure_ascii=False)
         text = TARIFF_SOURCE_NOTE + text
+    if tariff_evidence and percentages(text) - percentages(grounding):
+        return TARIFF_UNVERIFIED_REPLY
+    if unverified_fee_total(question, text, history):
+        return FEE_TOTAL_UNVERIFIED_REPLY
     result = safe(text, grounding)
     if result is None:
         print('WHATSAPP_NATURAL_REJECTED', flush=True)

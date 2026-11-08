@@ -37,7 +37,7 @@ jobs:
       - run: python tests/company_archive_postgres_acceptance.py
         env:
           COMPANY_ARCHIVE_TEST_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
-      - run: python -m pytest tests/test_growth_acceptance_clock.py tests/test_customs_case_guidance.py tests/test_fasah_ai_accuracy.py tests/test_customs_first.py tests/test_land_export_pricing.py tests/test_prospect_replies.py tests/test_whatsapp_natural.py -q
+      - run: python -m pytest tests/test_growth_acceptance_clock.py tests/test_customs_case_guidance.py tests/test_fasah_ai_accuracy.py tests/test_customs_document_qualification.py tests/test_customs_first.py tests/test_customs_qualification.py tests/test_land_export_pricing.py tests/test_prospect_replies.py tests/test_whatsapp_natural.py -q
       - run: python -m pytest tests/test_saber_knowledge.py tests/test_saber_lookup.py tests/test_saber_natural_lookup.py tests/test_saber_team_lookup.py tests/test_saber_answers.py -q
       - run: python -m pytest tests/test_daily_poster.py tests/test_daily_poster_english.py -q
       - run: python tests/daily_poster_english_postgres_acceptance.py
