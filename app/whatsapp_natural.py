@@ -337,6 +337,11 @@ async def reply(question, history=()):
         return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
     from app.customs_knowledge import KNOWLEDGE
     case_guidance = guidance_for(question, history)
+    try:
+        from app.agent_learning import block as learned_block
+        learned = learned_block()
+    except Exception:
+        learned = ''
     msgs = messages(question, history)
     text = ''
     tariff_checked = False
@@ -347,7 +352,7 @@ async def reply(question, history=()):
     try:
         async with httpx.AsyncClient(timeout=40) as client:
             for _ in range(3):
-                body = {'model': name, 'max_tokens': 900, 'system': SYSTEM + TARIFF_RULES + KNOWLEDGE + SABER_RULES + CUSTOMS_FIRST_POLICY + case_guidance,
+                body = {'model': name, 'max_tokens': 900, 'system': SYSTEM + TARIFF_RULES + KNOWLEDGE + SABER_RULES + CUSTOMS_FIRST_POLICY + case_guidance + learned,
                         'messages': msgs, 'tools': [TARIFF_TOOL, SABER_TOOL]}
                 if saber_needed and not saber_checked:
                     body['tool_choice'] = {'type': 'tool', 'name': 'saber_search'}
@@ -411,7 +416,7 @@ async def reply(question, history=()):
         print('WHATSAPP_NATURAL_ERROR', type(exc).__name__, flush=True)
         return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
     # Allow only numbers and URLs actually returned by the fixed official lookup.
-    grounding = KNOWLEDGE + case_guidance + '\n' + '\n'.join(
+    grounding = KNOWLEDGE + case_guidance + learned + '\n' + '\n'.join(
         str(item.get('code', '')) + '\n' + str(evidence.get('source_url', ''))
         for evidence in saber_evidence for item in evidence.get('results', []))
     if tariff_evidence and not text.strip():
