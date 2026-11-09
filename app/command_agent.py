@@ -81,6 +81,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'cargo': {'type': 'string'}, 'loading_date': {'type': 'string'}, 'vehicle_type': {'type': 'string'}, 'limit': {'type': 'string'}}, 'required': ['origin', 'destination', 'cargo']}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
+    {'name': 'stock_video', 'description': 'Produce a FREE short vertical marketing video: footage from Pexels (free licence), free local Arabic narration, royalty-free music, Afaq brand cards and phone end card. The manager gets a preview link and a «نفذ» code; nothing is published before «نفذ». topic = what the video is about. e.g. «سوي فيديو عن التخليص في ميناء جدة» «فيديو مجاني عن نقل الحاويات للرياض».',
+     'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}}, 'required': ['topic']}},
     {'name': 'customer_care', 'description': 'Existing customers programme: transport offer to customers we clear for, and win-back messages to customers inactive 60+ days. action=prepare prepares a batch now (sent only after «نفذ»); action=status shows results. e.g. «جهز رسائل العملاء» «نتائج رسائل العملاء الحاليين».',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['prepare', 'status']}}, 'required': ['action']}},
     {'name': 'runner_deny', 'description': 'Manager refuses a work-computer approval request («ارفض الطلب 4»).',
@@ -398,6 +400,11 @@ def tool_driver_prices(c, a):
     from app import driver_quotes
     m = re.search(r'(\d+)', str(a.get('ref') or ''))
     return driver_quotes.summary(int(m.group(1)) if m else None)
+
+
+def tool_stock_video(c, a):
+    from app import stock_video
+    return stock_video.start(_clean(a.get('topic'), 300), _member().get('name') or '')
 
 
 def tool_customer_care(c, a):
