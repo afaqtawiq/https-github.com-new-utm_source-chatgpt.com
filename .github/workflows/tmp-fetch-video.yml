@@ -1,0 +1,17 @@
+name: tmp-fetch-video
+on:
+  push:
+    branches: [tmp/fetch-jeddah-video]
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          curl -fsSL -o jeddah-vertical.mp4 https://gulf-logistics-ai-v7-production.up.railway.app/media-exports/91d96bc2b1ce1fd2d8f4efb0b2ac08bf111a8216f5703bfc.mp4
+          curl -fsSL -o jeddah-horizontal.mp4 https://gulf-logistics-ai-v7-production.up.railway.app/media-exports/09edb21cbc3261c6b957b3193f3532cc071c825d197b2c81.mp4
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: videos
+          path: '*.mp4'
+          retention-days: 1
