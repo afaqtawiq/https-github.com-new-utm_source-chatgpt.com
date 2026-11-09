@@ -143,10 +143,14 @@ def pixabay_candidates(query, client):
         return []
     out = []
     for v in r.json().get('hits') or []:
-        f = (v.get('videos') or {}).get('large') or (v.get('videos') or {}).get('medium') or {}
-        if f.get('url') and 4 <= (v.get('duration') or 0) <= 60 and (f.get('height') or 0) >= 720:
-            out.append({'provider': 'pixabay', 'id': str(v['id']), 'link': f['url'], 'duration': v['duration'],
-                        'author': v.get('user') or '', 'page': v.get('pageURL') or ''})
+        # Smallest rendition that is still ≥720p and well under the download limit (4K "large" files are huge).
+        variants = [f for f in (v.get('videos') or {}).values() if isinstance(f, dict) and f.get('url')
+                    and (f.get('height') or 0) >= 720 and 0 < (f.get('size') or MAX_CLIP) <= MAX_CLIP * 2 // 3]
+        if not variants or not 4 <= (v.get('duration') or 0) <= 60:
+            continue
+        f = min(variants, key=lambda f: (abs((f.get('height') or 0) - 1080), f.get('size') or 0))
+        out.append({'provider': 'pixabay', 'id': str(v['id']), 'link': f['url'], 'duration': v['duration'],
+                    'author': v.get('user') or '', 'page': v.get('pageURL') or ''})
     return out
 
 
@@ -313,9 +317,16 @@ def produce(job_id, topic, actor=''):
         root = Path(folder)
         clips, voices = [], []
         for i, scene in enumerate(plan['scenes']):
-            clip = pick_clip(scene['query'], job_id, client)
             path = root / f'clip-{i}.mp4'
-            download(clip['link'], path, client)
+            for attempt in range(4):  # a too-large or broken clip is skipped, never fatal on the first try
+                clip = pick_clip(scene['query'], job_id, client)
+                try:
+                    download(clip['link'], path, client)
+                    break
+                except VideoError as exc:
+                    print('STOCK_VIDEO_CLIP_SKIPPED', clip['provider'], clip['id'], str(exc)[:80], flush=True)
+                    if attempt == 3:
+                        raise
             clips.append(path)
             credits.append({k: clip[k] for k in ('provider', 'id', 'author', 'page')})
         voice_ok = True

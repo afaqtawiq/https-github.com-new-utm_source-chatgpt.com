@@ -111,6 +111,17 @@ def run():
             raise AssertionError('unknown host accepted')
         except sv.VideoError:
             pass
+    # 4b) Pixabay: the 4K "large" rendition is never chosen; the ~1080p one under the limit is.
+    def pix(request):
+        return httpx.Response(200, json={'hits': [{'id': 7, 'duration': 12, 'user': 'u', 'pageURL': 'https://pixabay.com/v/7', 'videos': {
+            'large': {'url': 'https://cdn.pixabay.com/large.mp4', 'width': 3840, 'height': 2160, 'size': 95000000},
+            'medium': {'url': 'https://cdn.pixabay.com/medium.mp4', 'width': 1920, 'height': 1080, 'size': 21000000},
+            'small': {'url': 'https://cdn.pixabay.com/small.mp4', 'width': 1280, 'height': 720, 'size': 9000000},
+            'tiny': {'url': 'https://cdn.pixabay.com/tiny.mp4', 'width': 960, 'height': 540, 'size': 4000000}}},
+            {'id': 8, 'duration': 10, 'videos': {'large': {'url': 'https://cdn.pixabay.com/huge.mp4', 'height': 2160, 'size': 120000000}}}]})
+    with patch.dict(os.environ, {'PIXABAY_API_KEY': 'k'}), real_client(transport=httpx.MockTransport(pix)) as client:
+        found = sv.pixabay_candidates('port', client)
+    assert [c['link'] for c in found] == ['https://cdn.pixabay.com/medium.mp4'], found
     # 5) Manager message: preview link + «نفذ» for the existing publish flow; nothing published.
     with db() as c:
         c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_voice_pending(token TEXT PRIMARY KEY, sender TEXT, conversation_id TEXT,
