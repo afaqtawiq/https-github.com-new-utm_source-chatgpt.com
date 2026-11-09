@@ -4,7 +4,7 @@ import re
 
 EMAIL = 'info@afaqtawiqs.net'
 PHONE = '+966530130435'
-WEBSITE = 'https://www.afaqtwiq.com/'
+WEBSITE = 'https://afaqtawiqs.net/'
 APP_URL = 'https://app.afaqtawiqs.net/market/'
 SOCIAL_LINKS = [
     ('لينكدإن', 'https://www.linkedin.com/in/afaqtwiq'),
@@ -91,6 +91,6 @@ def message_html(brochure_url, unsubscribe_url):
     <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;background:white;border-collapse:collapse">
     <tr><td><a href="{e(brochure_url)}"><img src="{e(artwork_url)}" width="640" alt="آفاق طويق — شحناتك في ميناء جدة، نكمل رحلتها. تخليص جمركي، نقل بري، تخزين ومناولة، شحن وتسليم." style="display:block;width:100%;max-width:640px;height:auto;border:0"></a></td></tr>
     <tr><td style="padding:26px;color:#082139;font-size:16px;line-height:1.9"><h2 style="margin:0 0 10px">هل لديكم شحنة قادمة عبر ميناء جدة؟</h2><p>آفاق طويق لخدمات التخليص الجمركي، استقبال الشحنات، النقل البري، المناولة والتخزين، والشحن والتسليم.</p><p>لطلب عرض سعر، أرسلوا نوع البضاعة والوزن أو عدد الحاويات وموعد الوصول والوجهة.</p><a href="https://wa.me/966530130435" style="display:inline-block;padding:12px 22px;background:#082139;color:white;text-decoration:none;border-radius:6px">اطلب عرض سعر عبر واتساب</a><p><a href="{e(brochure_url)}" style="color:#082139">تحميل البروشور PDF</a> — تجدون نسخة مرفقة أيضًا.</p></td></tr>
-    <tr><td style="padding:22px;background:#082139;color:white;line-height:2">واتساب: <a dir="ltr" style="color:#ecc183" href="https://wa.me/966530130435">{PHONE}</a><br>البريد: <a style="color:#ecc183" href="mailto:{EMAIL}">{EMAIL}</a><br>الموقع: <a style="color:#ecc183" href="{WEBSITE}">www.afaqtwiq.com</a> · <a style="color:#ecc183" href="{APP_URL}">التطبيق</a><br>{social_links_html()}</td></tr>
+    <tr><td style="padding:22px;background:#082139;color:white;line-height:2">واتساب: <a dir="ltr" style="color:#ecc183" href="https://wa.me/966530130435">{PHONE}</a><br>البريد: <a style="color:#ecc183" href="mailto:{EMAIL}">{EMAIL}</a><br>الموقع: <a style="color:#ecc183" href="{WEBSITE}">afaqtawiqs.net</a> · <a style="color:#ecc183" href="{APP_URL}">التطبيق</a><br>{social_links_html()}</td></tr>
     <tr><td style="padding:16px;font-size:12px;color:#526777">رسالة تعريفية بخدمات آفاق طويق. <a href="{e(unsubscribe_url)}" style="color:#526777">إيقاف الرسائل التسويقية</a></td></tr>
     </table></td></tr></table></body></html>'''

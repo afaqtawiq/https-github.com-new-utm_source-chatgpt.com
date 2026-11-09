@@ -157,7 +157,7 @@ def home(request: Request):
     cards=''.join(f'<p><a href="/customer-campaigns/{x["id"]}">{esc(x["title"])}</a> · {esc(x["created_at"])}</p>' for x in rows('SELECT id,title,created_at FROM customer_campaigns ORDER BY id DESC'))
     return HTMLResponse(shell('حملات العملاء',f'''<div class=nav><a href=/dashboard>الرئيسية</a><a href=/accounts>العملاء</a></div>
         <h1>حملات الشركات والعملاء</h1><div class=card><h2>خدمات آفاق طويق في ميناء جدة</h2>
-        <p>{EMAIL} · <span dir=ltr>{PHONE}</span> · <a href="{WEBSITE}">www.afaqtwiq.com</a></p>
+        <p>{EMAIL} · <span dir=ltr>{PHONE}</span> · <a href="{WEBSITE}">afaqtawiqs.net</a></p>
         <p>قائمة العملاء المسجلين: {ec} عنوان بريد و{wc} رقم واتساب بعد التحقق من الصيغة وإزالة التكرار والاستبعادات.</p>
         <p>التحقق من الصيغة لا يثبت أن العنوان نشط. لن تُضاف قائمة السائقين أو جهات خارج سجل العملاء.</p>
         <a href="{PDF_PATH}" target=_blank><img src="{ART_PATH}" alt="بروشور خدمات آفاق طويق في ميناء جدة" style="display:block;width:100%;max-width:440px;border-radius:12px;margin:20px 0"></a><a class=btn href="{PDF_PATH}" target=_blank>عرض البروشور PDF</a>
