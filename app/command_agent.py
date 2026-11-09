@@ -69,6 +69,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
+    {'name': 'open_fasah', 'description': 'Manager only. OPEN the FASAH platform on the WORK COMPUTER right now, without asking any question: it opens (or reuses) the FASAH window, waits up to 10 minutes for the manager to sign in himself, then refreshes the live declaration statuses (read-only). Use for «افتح فسح» «افتح لي فسح على الكمبيوتر» «شغل فسح» «ادخل فسح». Optional which=import/export.',
+     'input_schema': {'type': 'object', 'properties': {'which': {'type': 'string', 'enum': ['import', 'export']}}}},
     {'name': 'runner_task', 'description': 'Manager only. Create a task for the WORK COMPUTER browser: download_test (first trial), read_page (url), download_file (url), fill_form (url + fields [{label,value}] + optional submit_label; submitting waits for the manager approval), fasah_declarations (which import/export, party = importer/exporter name filter e.g. «سلة», since YYYY-MM-DD, pages 1-20 — read-only list; new unbilled سلة الرحائب declarations are then prepared for billing with a confirmation code), fasah_details (number — read one declaration invoice and fees). Allowed sites only; never passwords/OTP.',
      'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'party': {'type': 'string'}, 'since': {'type': 'string'}, 'pages': {'type': 'string'}, 'number': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
     {'name': 'fasah_tracking', 'description': 'Live status of open FASAH declarations read by the work computer every 2 hours (under review, waiting duties, inspection, released). Optional filter (number or importer name). e.g. «حالة البيانات في فسح» «وش وضع بيانات سلة».',
@@ -452,6 +454,20 @@ def tool_party_statement(c, a):
     if not m:
         return 'اذكر الشهر، مثل 2026-10.'
     return statement_import.statement_text(a.get('party') or '', f'{m.group(1)}-{int(m.group(2)):02d}')
+
+
+def tool_open_fasah(c, a):
+    from app import agent_runner
+    if not _member().get('manager'):
+        return 'فتح فسح على جهاز العمل للمدير فقط.'
+    tid, text = agent_runner.create_task('fasah_declarations', {'which': a.get('which') or 'import', 'pages': 1, 'track': True},
+                                         _member().get('name') or '')
+    if not tid:
+        return text
+    return (f'🖥 فتحت فسح على جهاز العمل (المهمة #{tid}).\n'
+            'إذا طلب تسجيل الدخول: سجّل دخولك بنفسك في نافذة فسح على الجهاز خلال 10 دقائق (ما أكتب كلمة المرور أو الرمز).\n'
+            'بعد الدخول تبقى النافذة مفتوحة لك، وأحدّث حالات البيانات وأرسل لك أي تغيير.'
+            + ('' if 'غير متصل' not in text else '\n⚠️ جهاز العمل غير متصل الآن؛ شغّل برنامج آفاق على الكمبيوتر وتبدأ المهمة تلقائيًا.'))
 
 
 def tool_runner_task(c, a):
