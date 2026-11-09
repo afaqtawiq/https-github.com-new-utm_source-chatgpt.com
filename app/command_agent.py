@@ -81,6 +81,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'cargo': {'type': 'string'}, 'loading_date': {'type': 'string'}, 'vehicle_type': {'type': 'string'}, 'limit': {'type': 'string'}}, 'required': ['origin', 'destination', 'cargo']}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
+    {'name': 'teach_answer', 'description': 'Teach the CUSTOMER agent an approved answer (learning loop). Use for «جواب 2: …» (gap_number from the morning performance report) or «علّم الوكيل: السؤال … الجواب …». answer = exactly what the manager wrote. Needs the manager confirmation code.',
+     'input_schema': {'type': 'object', 'properties': {'gap_number': {'type': 'string'}, 'question': {'type': 'string'}, 'answer': {'type': 'string'}}, 'required': ['answer']}},
+    {'name': 'learned_answers', 'description': 'Approved answers the customer agent learned: action=list shows them; action=revoke with id removes one («الغ الجواب 3»); action=report builds the performance report of yesterday now («تقرير أداء الوكيل»).',
+     'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'revoke', 'report']}, 'id': {'type': 'string'}}, 'required': ['action']}},
     {'name': 'stock_video', 'description': 'Produce a FREE short vertical marketing video: footage from Pexels (free licence), free local Arabic narration, royalty-free music, Afaq brand cards and phone end card. The manager gets a preview link and a «نفذ» code; nothing is published before «نفذ». topic = what the video is about. e.g. «سوي فيديو عن التخليص في ميناء جدة» «فيديو مجاني عن نقل الحاويات للرياض».',
      'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}}, 'required': ['topic']}},
     {'name': 'customer_care', 'description': 'Existing customers programme: transport offer to customers we clear for, and win-back messages to customers inactive 60+ days. action=prepare prepares a batch now (sent only after «نفذ»); action=status shows results. e.g. «جهز رسائل العملاء» «نتائج رسائل العملاء الحاليين».',
@@ -402,6 +406,32 @@ def tool_driver_prices(c, a):
     return driver_quotes.summary(int(m.group(1)) if m else None)
 
 
+def tool_teach_answer(c, a):
+    from app import agent_learning
+    question = _clean(a.get('question'), 300)
+    m = re.search(r'\d+', str(a.get('gap_number') or ''))
+    if m:
+        question = agent_learning.gap_question(int(m.group())) or ''
+        if not question:
+            return 'رقم السؤال غير موجود في آخر تقرير أداء. اكتب «تقرير أداء الوكيل» لعرض الأرقام.'
+    try:
+        question, answer = agent_learning.validate(question, a.get('answer'))
+    except ValueError as exc:
+        return str(exc)
+    token = _pending(c, {'tool': 'teach_answer', 'question': question, 'answer': answer})
+    return f'سيتعلم الوكيل:\nالسؤال: {question}\nالجواب: {answer}\nللاعتماد اكتب: نفذ {token}'
+
+
+def tool_learned_answers(c, a):
+    from app import agent_learning
+    if a.get('action') == 'revoke':
+        m = re.search(r'\d+', str(a.get('id') or ''))
+        return agent_learning.revoke(int(m.group()), _member().get('name') or '') if m else 'اكتب رقم الجواب.'
+    if a.get('action') == 'report':
+        return agent_learning.report()
+    return agent_learning.list_text()
+
+
 def tool_stock_video(c, a):
     from app import stock_video
     return stock_video.start(_clean(a.get('topic'), 300), _member().get('name') or '')
@@ -571,6 +601,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'send_whatsapp':
         from app.manager_actions import send_message
         return send_message(c, {'to': action['to'], 'text': action['text']})
+    if action.get('tool') == 'teach_answer':
+        from app import agent_learning
+        return agent_learning.save(action['question'], action['answer'], member.get('name') or '')
     if action.get('tool') == 'driver_price_request':
         from app import driver_quotes
         return driver_quotes.start(action, member.get('name') or '')
