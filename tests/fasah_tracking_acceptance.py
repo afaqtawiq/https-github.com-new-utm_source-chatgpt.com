@@ -111,6 +111,13 @@ def run():
     assert 'متابعة فسح متوقفة' in ft.session_notice()
     assert ft.session_notice() is None
     ft.read_succeeded()
+    # A manual read («افتح فسح») that succeeded after the failed automatic ones proves the session is alive → no notice.
+    with db() as c:
+        manual = c.execute("""INSERT INTO runner_tasks(kind,params_json,status,created_by,created_at)
+            VALUES('fasah_declarations','{}','done','محمد',NOW()) RETURNING id""").fetchone()['id']
+    assert ft.session_notice() is None
+    with db() as c:
+        c.execute('DELETE FROM runner_tasks WHERE id=%s', (manual,))
     assert 'متابعة فسح متوقفة' in ft.session_notice()
 
     # 9) The runner hook: an automatic read updates tracking and never prepares billing.
