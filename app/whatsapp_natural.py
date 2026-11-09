@@ -221,8 +221,8 @@ def dual_tariff_section(codes, query, today=None):
     so the caller keeps the existing explicit «not checked» deferral. Never derives a duty from SABER.
     """
     import datetime as _dt
-    from app import tariff_lookup
     try:
+        from app import tariff_lookup  # needs the database; any failure keeps the explicit deferral
         found, seen = [], set()
         for code in codes or []:
             for row in tariff_lookup.search(code, limit=1):
