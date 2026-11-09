@@ -326,5 +326,5 @@ def register_worker(app):
 
     @app.on_event('startup')
     async def _start():
-        if os.getenv('DISCOVERY_AUTO_ENABLED', '1') != '0':
-            app.state.driver_price_task = asyncio.create_task(loop())
+        init()
+        app.state.driver_price_task = asyncio.create_task(loop())
