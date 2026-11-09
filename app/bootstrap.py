@@ -269,6 +269,8 @@ app.include_router(fasah_docs_router)
 from app.precheck import router as precheck_router, init as init_precheck
 init_precheck()
 app.include_router(precheck_router)
+from app import stock_video
+stock_video.init()
 from app import clearance_card
 clearance_card.install()
 app.include_router(clearance_card.router)

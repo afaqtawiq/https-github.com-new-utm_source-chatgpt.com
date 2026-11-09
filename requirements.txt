@@ -11,3 +11,4 @@ Pillow==12.3.0
 reportlab==4.4.9
 arabic-reshaper==3.0.0
 python-bidi==0.6.6
+piper-tts==1.8.0
