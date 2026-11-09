@@ -79,6 +79,10 @@ def init():
             mime TEXT NOT NULL, size BIGINT NOT NULL, sha256 TEXT NOT NULL, verified BOOLEAN NOT NULL, data BYTEA NOT NULL,
             created_at TIMESTAMPTZ NOT NULL)''')
         c.execute('CREATE UNIQUE INDEX IF NOT EXISTS runner_files_once ON runner_files(task_id, sha256)')
+        c.execute('''CREATE TABLE IF NOT EXISTS fasah_billing_batches(id BIGSERIAL PRIMARY KEY, expected INTEGER NOT NULL,
+            notified BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS fasah_billing_items(batch_id BIGINT NOT NULL, number TEXT NOT NULL, data_json TEXT,
+            ok BOOLEAN NOT NULL, message TEXT, PRIMARY KEY(batch_id, number))''')
         c.execute('''CREATE TABLE IF NOT EXISTS runner_approvals(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL, action TEXT NOT NULL,
             detail TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', decided_by TEXT, created_at TIMESTAMPTZ NOT NULL,
             decided_at TIMESTAMPTZ)''')
@@ -331,6 +335,12 @@ async def finish(tid: int, request: Request):
             asyncio.get_running_loop().create_task(deliver(task_text(tid)))
     except Exception:
         pass
+    if status != 'done' and task['kind'] == 'fasah_details':
+        params = json.loads(task['params_json'] or '{}')
+        if params.get('batch'):  # a failed read must not leave the batch summary waiting forever
+            import threading
+            threading.Thread(target=batch_add, args=(int(params['batch']), str(params.get('number')), None,
+                                                     'تعذرت قراءة البيان على فسح'), daemon=True).start()
     if status == 'done' and task['kind'] in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
         import threading
         threading.Thread(target=after_fasah, args=(tid,), daemon=True).start()
@@ -376,6 +386,60 @@ def unbilled(rows, party_hint='سلة'):
     return out
 
 
+MAX_BILLING_BATCH = 60
+
+
+def batch_add(bid, number, d, message):
+    """One declaration of a billing batch read (or failed). When the last one arrives, ONE summary + ONE «نفذ»."""
+    with db() as c:
+        c.execute('''INSERT INTO fasah_billing_items(batch_id,number,data_json,ok,message) VALUES(%s,%s,%s,%s,%s)
+            ON CONFLICT(batch_id,number) DO UPDATE SET data_json=EXCLUDED.data_json,ok=EXCLUDED.ok,message=EXCLUDED.message''',
+                  (bid, str(number), json.dumps(d, ensure_ascii=False, default=str) if d else None, bool(d), message[:300]))
+        batch = c.execute('SELECT * FROM fasah_billing_batches WHERE id=%s FOR UPDATE', (bid,)).fetchone()
+        rows = c.execute('SELECT * FROM fasah_billing_items WHERE batch_id=%s ORDER BY number', (bid,)).fetchall()
+        if not batch or batch['notified'] or len(rows) < batch['expected']:
+            return None
+        c.execute('UPDATE fasah_billing_batches SET notified=TRUE WHERE id=%s', (bid,))
+    text = batch_summary(rows)
+    notify(text)
+    return text
+
+
+def batch_summary(rows):
+    from app import billing_rules
+    groups, ok, failed = {}, [], []
+    for r in rows:
+        if not r['ok']:
+            failed.append(f"{r['number']} ({r['message']})")
+            continue
+        d = json.loads(r['data_json'])
+        try:
+            items = billing_rules.compute(d)
+        except ValueError as exc:
+            failed.append(f"{r['number']} ({exc})")
+            continue
+        ok.append(d)
+        for it in items:
+            g = groups.setdefault((it['party'], it['kind']), {'count': 0, 'total': 0, 'numbers': []})
+            g['count'] += 1
+            g['total'] += it['amount']
+            g['numbers'].append(str(d['number']))
+    lines = [f'🧾 كشف تسجيل بيانات سلة الرحائب من فسح: {len(ok)} بيان جاهز' + (f'، {len(failed)} يحتاج مراجعة' if failed else '')]
+    order = [(billing_rules.YASMEN, 'claim', 'كشف الياسمين (مطالبة)'), (billing_rules.OMRAN, 'claim', 'كشف عمران (مطالبة)'),
+             (billing_rules.SALLA, 'payable', 'نصيب سلة الرحائب (مستحق لها)')]
+    for party, kind, label in order:
+        g = groups.get((party, kind))
+        if g:
+            lines.append(f"• {label}: {g['count']} بيان — {g['total']:,.2f} ريال\n  " + '، '.join(g['numbers']))
+    if failed:
+        lines.append('⚠️ لم تُقرأ: ' + '، '.join(failed) + ' — أرسل فواتيرها للوكيل.')
+    if ok:
+        token = prepare_billing(ok, f'{len(ok)} بيان استيراد لسلة الرحائب')
+        lines.append('القاعدة: فاتورة صادرة من الياسمين ← كشف الياسمين، وغيرها ← كشف عمران.')
+        lines.append(f'للتسجيل كمسودات في الحسابات اكتب: نفذ {token}' if token else 'تعذر تجهيز رمز التنفيذ.')
+    return '\n'.join(lines)
+
+
 def after_fasah(tid):
     import csv as _csv
     import io as _io
@@ -412,11 +476,17 @@ def after_fasah(tid):
                 token = prepare_billing(items, 'تصدير سلة الرحائب')
                 lines.append('• تصدير (100 ريال لكل بيان لسلة الرحائب): ' + '، '.join(n['number'] for n in exports)
                              + (f'\n  للتسجيل اكتب: نفذ {token}' if token else ''))
-            for n in imports[:10]:
-                create_task('fasah_details', {'which': 'import', 'number': n['number'], 'party': 'سلة', 'pages': 5}, 'تلقائي')
             if imports:
-                lines.append('• استيراد: ' + '، '.join(n['number'] for n in imports)
-                             + '\n  أرسلت جهاز العمل يقرأ فاتورة ورسوم كل بيان (قراءة فقط)، ثم أجهز لك التسجيل للموافقة.')
+                todo = imports[:MAX_BILLING_BATCH]
+                with db() as c:
+                    bid = c.execute('INSERT INTO fasah_billing_batches(expected,created_at) VALUES(%s,%s) RETURNING id',
+                                    (len(todo), utcnow())).fetchone()['id']
+                for n in todo:
+                    create_task('fasah_details', {'which': 'import', 'number': n['number'], 'party': 'سلة', 'pages': 5, 'batch': bid}, 'تلقائي')
+                lines.append(f'• استيراد: {len(todo)} بيان — ' + '، '.join(n['number'] for n in todo)
+                             + '\n  جهاز العمل يقرأ فاتورة ورسوم كل بيان (قراءة فقط). بعد آخر بيان أرسل لك كشفًا واحدًا: '
+                             'ما يُسجل على الياسمين وما يُسجل على عمران ونصيب سلة الرحائب، برمز «نفذ» واحد.'
+                             + (f'\n  (باقي {len(imports) - len(todo)} بيان؛ أعد الأمر بعد التسجيل.)' if len(imports) > len(todo) else ''))
             notify('\n'.join(lines))
         elif task['kind'] == 'fasah_release_notice' or params.get('purpose') == 'duties':
             from app import fasah_docs
@@ -431,10 +501,14 @@ def after_fasah(tid):
                 notify(f'⚠️ البيان {number}: لم أجد قيمة الفاتورة في تفاصيل فسح؛ أرسل الفاتورة للوكيل لتسجيله.')
                 return
             from app import billing_rules
+            if params.get('batch') and not fields.get('invoice_value'):
+                return batch_add(int(params['batch']), number, None, 'لم تظهر قيمة الفاتورة في تفاصيل فسح')
             d = {'number': number, 'kind': 'import', 'party': fields.get('party') or 'سلة الرحائب',
                  'supplier': fields.get('supplier') or '', 'invoice_no': fields.get('invoice_no') or '',
                  'invoice_value': str(fields.get('invoice_value')), 'duty': str(fields.get('duty') or 0),
                  'other': str(fields.get('other') or 0), 'date': fields.get('date')}
+            if params.get('batch'):
+                return batch_add(int(params['batch']), number, d, '')
             items = billing_rules.compute(d)
             token = prepare_billing([d], 'بيان ' + number)
             notify('🧾 من تفاصيل فسح — ' + billing_rules.summary(d, items)
