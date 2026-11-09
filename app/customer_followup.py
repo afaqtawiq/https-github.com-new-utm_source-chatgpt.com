@@ -399,4 +399,29 @@ def page(request: Request):
       <th>وارد غير مصنف</th><th>الإجراء الداخلي التالي</th><th>مراجع الأدلة</th></tr>'''
       + ''.join(rows) + '</table></div><h2>مهام المتابعة المفتوحة في CRM</h2><p>النتيجة أدناه من السجل الحالي، وليست استنتاجًا من رد أو محاولة إرسال. أول 100 مهمة.</p>'
       + '<div class="scroll"><table><tr><th>الفرصة</th><th>الشركة</th><th>الاستحقاق</th><th>المرحلة</th><th>النتيجة المسجلة</th></tr>'
-      + ''.join(crm_rows) + '</table></div></html>', headers=HEADERS)
+      + ''.join(crm_rows) + '</table></div>' + shipments_section() + '</html>', headers=HEADERS)
+
+
+def shipments_section():
+    """Read-only customer → shipments table (customer_shipments); never breaks the page if a source is missing."""
+    try:
+        from app.customer_shipments import section_html
+        from app.storage import db
+        with db() as c:
+            c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+            return section_html(c)
+    except Exception as exc:
+        print('CUSTOMER_SHIPMENTS_SECTION', type(exc).__name__, flush=True)
+        return '<h2>الشحنات حسب العميل</h2><p>تعذر تحميل الشحنات الآن.</p>'
+
+
+@router.get('/api/v7/customer-followup/shipments')
+def shipments_api(request: Request):
+    from fastapi.encoders import jsonable_encoder
+    from app.customer_shipments import grouped
+    from app.storage import db
+    authority(request)
+    with db() as c:
+        c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        data = grouped(c)
+    return JSONResponse(jsonable_encoder({'customers': data, 'external_actions': False}), headers=HEADERS)
