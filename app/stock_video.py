@@ -3,7 +3,7 @@
 «سوي فيديو عن التخليص في ميناء جدة» → the agent:
 1. writes a short 4-scene plan (Arabic on-screen text + narration + an English stock-footage search per scene);
 2. takes footage from Pexels (free licence; Pixabay as optional fallback) — never the same clip twice;
-3. narrates locally with Piper TTS (open-source, free, runs on our server; no paid voice service);
+3. narrates with a Microsoft Azure neural Arabic voice (free tier) when AZURE_SPEECH_KEY/REGION are set; otherwise text + music;
 4. adds music: a CC0 (public-domain) track from Freesound when a key is set, otherwise our own generated soft bed;
 5. edits a 9:16 video with the Afaq brand cards and an end card with the phone number (FFmpeg on our server);
 6. stores it and sends the manager a preview link + «نفذ» — publishing uses the existing video publisher ONLY after «نفذ».
@@ -217,7 +217,32 @@ def voice_model(client):
     return _VOICE['voice']
 
 
+def azure_configured():
+    return bool(os.getenv('AZURE_SPEECH_KEY') and re.fullmatch(r'[a-z0-9]{3,30}', os.getenv('AZURE_SPEECH_REGION', '')))
+
+
+def azure_tts(text, path, client):
+    """Microsoft Azure neural Arabic voice (free tier F0: 500k characters/month). Official REST API."""
+    from xml.sax.saxutils import escape
+    region = os.getenv('AZURE_SPEECH_REGION', '')
+    voice = os.getenv('AZURE_SPEECH_VOICE', 'ar-SA-HamedNeural')
+    if not re.fullmatch(r'[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural', voice):
+        voice = 'ar-SA-HamedNeural'
+    ssml = (f"<speak version='1.0' xml:lang='ar-SA'><voice name='{voice}'><prosody rate='-4%'>{escape(text)}</prosody></voice></speak>")
+    r = client.post(f'https://{region}.tts.speech.microsoft.com/cognitiveservices/v1', content=ssml.encode('utf-8'),
+                    headers={'Ocp-Apim-Subscription-Key': os.getenv('AZURE_SPEECH_KEY', ''), 'Content-Type': 'application/ssml+xml',
+                             'X-Microsoft-OutputFormat': 'riff-24khz-16bit-mono-pcm', 'User-Agent': 'afaq-agent'}, timeout=60)
+    if r.status_code != 200 or not r.content.startswith(b'RIFF'):
+        raise VideoError('تعذر توليد الصوت من Azure (HTTP ' + str(r.status_code) + ').')
+    path.write_bytes(r.content)
+
+
 def narrate(text, path, client):
+    """Azure neural voice when configured; the local Piper voice only if explicitly enabled (its Arabic is weak)."""
+    if azure_configured():
+        return azure_tts(text, path, client)
+    if os.getenv('STOCK_VIDEO_PIPER', '0') != '1':
+        raise VideoError('لا يوجد صوت مفعّل (أضف AZURE_SPEECH_KEY و AZURE_SPEECH_REGION).')
     voice = voice_model(client)
     with wave.open(str(path), 'wb') as out:
         voice.synthesize_wav(text, out)
@@ -340,7 +365,7 @@ def produce(job_id, topic, actor=''):
                 except Exception as exc:
                     print('STOCK_VIDEO_VOICE', type(exc).__name__, str(exc)[:120], flush=True)
                     voice_ok = False
-                    note.append('تعذر التعليق الصوتي المجاني؛ الفيديو بالنص والموسيقى فقط.')
+                    note.append('بدون تعليق صوتي: ' + (str(exc) if isinstance(exc, VideoError) else 'تعذر توليد الصوت') + ' — الفيديو بالنص والموسيقى فقط.')
             voices.append(None)
         if not voice_ok:
             voices = [None] * len(plan['scenes'])
@@ -408,5 +433,5 @@ def start(topic, actor=''):
         except Exception as exc:
             print('STOCK_VIDEO_DELIVER', type(exc).__name__, flush=True)
     threading.Thread(target=work, daemon=True).start()
-    return (f'🎬 بدأ إنتاج فيديو مجاني (#{job}) عن: {topic}\nمقاطع من Pexels + تعليق صوتي مجاني + موسيقى بدون حقوق. '
+    return (f'🎬 بدأ إنتاج فيديو مجاني (#{job}) عن: {topic}\nمقاطع مجانية' + (' + تعليق صوتي (Azure)' if azure_configured() else ' + نص وموسيقى (الصوت غير مفعّل)') + ' + موسيقى بدون حقوق. '
             'أرسل لك رابط المعاينة ورمز النشر خلال 3-6 دقائق. لن يُنشر شيء قبل «نفذ».')
