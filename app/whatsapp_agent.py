@@ -266,6 +266,29 @@ async def processing(job):
                 except Exception as exc:
                     print('TRANSPORT_MANAGER_NOTICE', type(exc).__name__, flush=True)
             return
+    if (not data.get('attachments') and data.get('question_allowed') and data.get('question')
+            and 'AFT' not in str(data['question']).upper()):
+        def price_reply():
+            try:
+                from app import driver_quotes
+                return driver_quotes.capture(job['sender'], data['question'])
+            except Exception as exc:
+                print('DRIVER_PRICE_CAPTURE', type(exc).__name__, str(exc)[:160], flush=True)
+                return None
+        quoted = await run_in_threadpool(price_reply)
+        if quoted:
+            if not await run_in_threadpool(store.reserve_model, jid, lease):
+                return
+            await run_in_threadpool(store.save_model, jid, lease, reply_text=quoted[0],
+                                    diagnostics={'model_success': True, 'model_attempted': False, 'model_reason': 'driver_price_quote'})
+            await run_in_threadpool(store.prepare_reply, jid, lease)
+            if quoted[1]:
+                try:
+                    from app.owner_briefing import deliver
+                    await deliver(quoted[1])
+                except Exception as exc:
+                    print('DRIVER_PRICE_MANAGER_NOTICE', type(exc).__name__, flush=True)
+            return
     if not data.get('attachments') and data.get('question_allowed') and data.get('question'):
         def negotiation_open(sender):
             try:

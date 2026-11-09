@@ -254,6 +254,8 @@ from app.prospect_replies import register_worker as register_prospect_replies
 register_prospect_replies(app)
 from app.customer_care import register_worker as register_customer_care
 register_customer_care(app)
+from app.driver_quotes import register_worker as register_driver_quotes
+register_driver_quotes(app)
 from app.prospect_followups import register_worker as register_prospect_followups
 register_prospect_followups(app)
 from app.price_calculator import router as price_calculator_router, init as init_price_calculator
