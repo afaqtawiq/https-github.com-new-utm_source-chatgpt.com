@@ -122,6 +122,22 @@ def run():
     with patch.dict(os.environ, {'PIXABAY_API_KEY': 'k'}), real_client(transport=httpx.MockTransport(pix)) as client:
         found = sv.pixabay_candidates('port', client)
     assert [c['link'] for c in found] == ['https://cdn.pixabay.com/medium.mp4'], found
+    # 4c) Azure neural voice: official REST call with SSML (escaped), WAV saved; no key → no voice (Piper off by default).
+    seen = {}
+    def az(request):
+        seen['url'] = str(request.url); seen['headers'] = dict(request.headers); seen['body'] = request.content.decode()
+        return httpx.Response(200, content=b'RIFF' + b'0' * 2000)
+    with patch.dict(os.environ, {'AZURE_SPEECH_KEY': 'az-test', 'AZURE_SPEECH_REGION': 'uaenorth'}), real_client(transport=httpx.MockTransport(az)) as client:
+        sv.narrate('شحنتك <في> أمان', folder / 'v.wav', client)
+    assert seen['url'] == 'https://uaenorth.tts.speech.microsoft.com/cognitiveservices/v1'
+    assert seen['headers']['ocp-apim-subscription-key'] == 'az-test' and 'ar-SA-HamedNeural' in seen['body'] and '&lt;في&gt;' in seen['body']
+    assert (folder / 'v.wav').read_bytes().startswith(b'RIFF')
+    with patch.dict(os.environ, {'AZURE_SPEECH_KEY': '', 'STOCK_VIDEO_PIPER': '0'}):
+        try:
+            sv.narrate('x', folder / 'n.wav', None)
+            raise AssertionError('voice without a provider')
+        except sv.VideoError as exc:
+            assert 'AZURE_SPEECH_KEY' in str(exc)
     # 5) Manager message: preview link + «نفذ» for the existing publish flow; nothing published.
     with db() as c:
         c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_voice_pending(token TEXT PRIMARY KEY, sender TEXT, conversation_id TEXT,
