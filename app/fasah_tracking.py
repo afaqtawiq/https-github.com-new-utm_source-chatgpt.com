@@ -297,8 +297,9 @@ def session_notice():
     """One notice when the last two automatic reads failed (FASAH signed out), then quiet until a read succeeds."""
     init()
     with db() as c:
-        rows = c.execute('''SELECT id,status FROM runner_tasks WHERE created_by=%s AND status IN ('done','failed','stopped')
-            ORDER BY id DESC LIMIT 2''', (AUTO_ACTOR,)).fetchall()
+        # Any finished FASAH list read counts: a manual «افتح فسح» / list read that succeeded proves the session is alive.
+        rows = c.execute('''SELECT id,status FROM runner_tasks WHERE kind='fasah_declarations' AND status IN ('done','failed','stopped')
+            ORDER BY id DESC LIMIT 2''').fetchall()
         if len(rows) < 2 or any(r['status'] != 'failed' for r in rows):
             return None
         sent = c.execute("SELECT value FROM fasah_tracking_state WHERE key='session_notice'").fetchone()
