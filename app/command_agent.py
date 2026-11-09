@@ -77,6 +77,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}}, 'required': ['name', 'phone']}},
     {'name': 'prospect_replies', 'description': 'Which contacted prospect companies replied to the agent outreach and how (interested, asked price, not interested, stop), with quotes prepared. Optional days (default 7). e.g. «مين رد من العملاء المحتملين» «ردود حملة التعريف».',
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'string'}}}},
+    {'name': 'driver_price_request', 'description': 'Collect MARKET prices from registered drivers for a real shipment: ask matching drivers on WhatsApp «بكم تحملها؟» (price request, not an assignment). Use for «اجمع أسعار من السواقين» «اسأل السواقين بكم ينقلون». cargo = what is carried (e.g. حاوية 40 قدم على سطحة 22 طن). vehicle_type optional (سطحة، جوانب، براد، دينا…). limit = max drivers (default 40). Needs the manager confirmation code before sending.',
+     'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'cargo': {'type': 'string'}, 'loading_date': {'type': 'string'}, 'vehicle_type': {'type': 'string'}, 'limit': {'type': 'string'}}, 'required': ['origin', 'destination', 'cargo']}},
+    {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'customer_care', 'description': 'Existing customers programme: transport offer to customers we clear for, and win-back messages to customers inactive 60+ days. action=prepare prepares a batch now (sent only after «نفذ»); action=status shows results. e.g. «جهز رسائل العملاء» «نتائج رسائل العملاء الحاليين».',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['prepare', 'status']}}, 'required': ['action']}},
     {'name': 'runner_deny', 'description': 'Manager refuses a work-computer approval request («ارفض الطلب 4»).',
@@ -379,6 +383,23 @@ def tool_prospect_replies(c, a):
     return prospect_replies.status_text(max(1, min(days, 60)))
 
 
+def tool_driver_price_request(c, a):
+    from app import driver_quotes
+    req, drivers, error = driver_quotes.prepare(a)
+    if error:
+        return error + '. أكمل البيانات وأعد الطلب.'
+    if not drivers:
+        return 'لا يوجد سائقون مسجلون متاحون لهذا الطلب.'
+    token = _pending(c, {'tool': 'driver_price_request', **req, 'vehicle_type': req['vehicle'], 'limit': len(drivers)})
+    return (f"جاهز لسؤال {len(drivers)} سائق عن سعرهم:\n" + driver_quotes.preview(req) + f"\nللإرسال اكتب: نفذ {token}")
+
+
+def tool_driver_prices(c, a):
+    from app import driver_quotes
+    m = re.search(r'(\d+)', str(a.get('ref') or ''))
+    return driver_quotes.summary(int(m.group(1)) if m else None)
+
+
 def tool_customer_care(c, a):
     from app import customer_care
     if a.get('action') == 'prepare':
@@ -543,6 +564,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'send_whatsapp':
         from app.manager_actions import send_message
         return send_message(c, {'to': action['to'], 'text': action['text']})
+    if action.get('tool') == 'driver_price_request':
+        from app import driver_quotes
+        return driver_quotes.start(action, member.get('name') or '')
     if action.get('tool') == 'record_bank_payments':
         from app import bank_reconcile
         return bank_reconcile.record(int(action['batch']), 'مطابقة كشف البنك — ' + (member.get('name') or 'المدير'))

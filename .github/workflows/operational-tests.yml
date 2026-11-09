@@ -144,6 +144,9 @@ jobs:
       - run: python tests/bank_reconcile_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python tests/driver_quotes_acceptance.py
+        env:
+          AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python tests/prospect_replies_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
