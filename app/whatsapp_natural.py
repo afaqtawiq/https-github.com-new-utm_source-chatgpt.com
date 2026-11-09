@@ -214,6 +214,39 @@ async def saber_result(args):
     return await search_product(query)
 
 
+def dual_tariff_section(codes, query, today=None):
+    """Separate, dated tariff lookup for a mixed SABER + duty question (local GCC table only, no customer data).
+
+    Exact SABER codes are looked up first, then the generic product words. Returns '' when nothing can be verified,
+    so the caller keeps the existing explicit «not checked» deferral. Never derives a duty from SABER.
+    """
+    import datetime as _dt
+    try:
+        from app import tariff_lookup  # needs the database; any failure keeps the explicit deferral
+        found, seen = [], set()
+        for code in codes or []:
+            for row in tariff_lookup.search(code, limit=1):
+                if re.sub(r'\D', '', str(row.get('code'))) == code and code not in seen:
+                    seen.add(code)
+                    found.append((row, 'نفس بند سابر'))
+        if not found and str(query or '').strip():
+            for row in tariff_lookup.search_many([query], [query], limit=3):
+                found.append((row, 'مرشح بالوصف'))
+    except Exception:
+        return ''
+    rows = [(r, how) for r, how in found[:3] if r.get('code') and r.get('duty') not in (None, '') and r.get('desc_ar')]
+    if not rows:
+        return ''
+    day = (today or _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=3))).date()).isoformat()
+    lines = ['وبخصوص الرسم الجمركي (بحث منفصل عن سابر): ' + TARIFF_SOURCE_NOTE.strip()]
+    for row, how in rows:
+        lines.append(f"• {tariff_lookup.format_code(row['code'])} — {str(row['desc_ar'])[:120]} — الرسم: {row['duty']} ({how})")
+    lines.append('الشروط: البند يُعتمد بعد مطابقة الوصف والمادة والاستخدام، ويراجع المخلص البند السعودي الساري لدى زاتكا '
+                 'قبل الاعتماد؛ ضريبة القيمة المضافة والرسوم الأخرى خارج هذا الرقم.')
+    lines.append('تاريخ الاستعلام: ' + day)
+    return '\n'.join(lines)
+
+
 def tariff_result(args):
     from app import tariff_lookup
     try:
@@ -281,6 +314,7 @@ async def reply(question, history=()):
         return None
     saber_needed = needs_saber_search(question)
     mixed_tariff = saber_needed and needs_tariff_search(question)
+    lookup = {'codes': [], 'query': ''}  # filled by the SABER tool call; reused for the separate tariff lookup
     # Keep certificate evidence deterministic while answering an explicit fee
     # part from a separately dated source. Catalogue success never proves cost.
     def saber_reply(answer):
@@ -289,8 +323,12 @@ async def reply(question, history=()):
         if SABER_TRANSPORT_FEE_QUERY.search(str(question)):
             answer += '\n\n' + SABER_TRANSPORT_FEE_NOTE
         if mixed_tariff:
-            answer += ('\n\nوبخصوص البند أو الرسم الجمركي، نتيجة سابر لا تحددهما؛ '
-                       'لم أتحقق هنا من تعرفة هذه البضاعة، ويلزم بحث مستقل ومراجعة البند السعودي الساري قبل الاعتماد.')
+            section = dual_tariff_section(lookup['codes'], lookup['query'])
+            if section:
+                answer += '\n\n' + section
+            else:
+                answer += ('\n\nوبخصوص البند أو الرسم الجمركي، نتيجة سابر لا تحددهما؛ '
+                           'لم أتحقق هنا من تعرفة هذه البضاعة، ويلزم بحث مستقل ومراجعة البند السعودي الساري قبل الاعتماد.')
         return answer
     tariff_needed = needs_tariff_search(question) and not saber_needed
     key = os.getenv('ANTHROPIC_API_KEY', '').strip()
@@ -343,6 +381,9 @@ async def reply(question, history=()):
                             return saber_reply(SABER_UNVERIFIED_REPLY)
                         evidence = await saber_result(use.get('input') or {})
                         saber_checked = True
+                        lookup['query'] = str((use.get('input') or {}).get('query') or '')[:50]
+                        lookup['codes'] = [str(r.get('code')) for r in (evidence.get('results') or [])
+                                           if isinstance(r, dict) and re.fullmatch(r'[0-9]{12}', str(r.get('code', '')))][:3]
                         if evidence.get('status') == 'general_guidance':
                             # No product evidence exists: do not let a second model
                             # turn an empty query into a product-specific assertion.

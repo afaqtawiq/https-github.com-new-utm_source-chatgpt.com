@@ -190,6 +190,8 @@ app.include_router(whatsapp_agent_router)
 register_whatsapp_agent_worker(app)
 from app.whatsapp_takeover_control import register as register_whatsapp_takeover
 register_whatsapp_takeover(app)
+from app import auto_handoff
+auto_handoff.install()
 
 from app.whatsapp_document_review import router as whatsapp_document_review_router
 from app.whatsapp_outgoing_diagnostic import router as whatsapp_outgoing_diagnostic_router
@@ -267,3 +269,6 @@ app.include_router(fasah_docs_router)
 from app.precheck import router as precheck_router, init as init_precheck
 init_precheck()
 app.include_router(precheck_router)
+from app import clearance_card
+clearance_card.install()
+app.include_router(clearance_card.router)

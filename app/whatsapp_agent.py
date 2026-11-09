@@ -524,6 +524,12 @@ async def dispatch(job):
         pass
     await run_in_threadpool(store.finish_send,job['id'],job['send_token'],status=state,
                             provider_message_id=mid,diagnostics={'reason':reason})
+    if state == 'sent':
+        try:
+            from app import auto_handoff
+            await run_in_threadpool(auto_handoff.after_send, job)
+        except Exception as exc:  # hand-off is advisory; never affects the reply already sent
+            print('AUTO_HANDOFF_AFTER_SEND', type(exc).__name__, str(exc)[:120], flush=True)
 
 
 async def tick():

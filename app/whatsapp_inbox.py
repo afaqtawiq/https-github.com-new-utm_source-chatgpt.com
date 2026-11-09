@@ -258,6 +258,14 @@ async def send_draft(token: str, request: Request):
     with database() as c:
         c.execute('''UPDATE whatsapp_inbox_drafts SET state=%s,provider_message_id=%s,updated_at=NOW()
             WHERE token=%s AND state='sending' ''', (state,receipt,token))
+    if state == 'accepted':
+        try:
+            from starlette.concurrency import run_in_threadpool
+            from app import auto_handoff
+            await run_in_threadpool(auto_handoff.staff_sent, item['account_id'], item['conversation_id'],
+                                    z.phone(item['recipient']) or str(item['recipient']), current['user_id'])
+        except Exception as exc:  # advisory; the manual send already happened
+            print('AUTO_HANDOFF_STAFF', type(exc).__name__, str(exc)[:120], flush=True)
     return RedirectResponse('/whatsapp-inbox/drafts/' + token, 303)
 
 
