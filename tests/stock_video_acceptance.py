@@ -72,6 +72,17 @@ def run():
     good = sv.clean_plan({'caption': 'c', 'scenes': [{'text': 'شحنتك في أمان', 'voice': 'نخلص شحنتك باحترافية', 'query': 'port cranes!!'}] * 4}, 'x')
     assert good['scenes'][0]['query'] == 'port cranes' and len(good['scenes']) == 4
 
+    # 1b) Pronunciation: diacritized narration accepted (guards run on the plain text), brand/platform fixes, dialect pick.
+    voiced = sv.clean_plan({'caption': 'c', 'scenes': [{'text': 'شحنتك في أمان', 'voice': 'نُخَلِّصُ شُحْنَتَكَ فِي جَمِيعِ المَنَافِذِ', 'query': 'port'}] * 4}, 'x')
+    assert voiced['scenes'][0]['voice'].startswith('نُخَلِّصُ')
+    assert sv.clean_plan({'scenes': [{'text': 'ا', 'voice': 'نضمن لك الفسح', 'query': 'p'}] * 4}, 'x') == sv.fallback_plan('x')
+    assert sv.clean_plan({'scenes': [{'text': 'ا', 'voice': 'تواصل على WhatsApp', 'query': 'p'}] * 4}, 'x') == sv.fallback_plan('x')
+    said = sv.speakable('«آفاق طويق» تخلص في سابر و #فسح عبر واتساب')
+    assert 'آفَاقْ طُوَيْق' in said and 'سَابِر' in said and 'وَاتْسَاب' in said and '«' not in said and '#' not in said
+    assert sv.dialect_for('فيديو بلهجة سعودية عن النقل') == 'saudi' and sv.dialect_for('فيديو عن جدة') == 'fusha'
+    assert sv.dialect_for('x', 'saudi') == 'saudi' and 'تشكيل كامل' in sv.VOICE_RULES['fusha']
+    assert 'Najdi' in sv.PLAN_PROMPT.format(topic='t', n=4, voice_rule=sv.VOICE_RULES['saudi'])
+
     with patch.dict(os.environ, {'PEXELS_API_KEY': 'test-pexels-key', 'ANTHROPIC_API_KEY': '', 'FREESOUND_API_KEY': ''}), \
          patch.object(sv.httpx, 'Client', fake_client), \
          patch.object(sv, 'narrate', lambda text, path, client: tone(path, 2.5 + len(text) / 40)):
