@@ -43,6 +43,11 @@ weight_tons, vehicle_type, price_sar, payment, loading_date, goods, distance_km:
 visible single-load values or null
 notes: short visible detail
 phones_visible: list of every phone number visible anywhere in the image (e.g. a WhatsApp chat header), [] if none
+A chat screenshot (WhatsApp etc.) where a load is described in the conversation — in a message bubble OR in the
+text typed in the message box, e.g. «من ميناء جدة إلى الرياض» — is still a single load: set origin and destination
+from that text, is_single_load true, document_kind load_listing, and chat_route true. Never invent a route that is
+not written; a route mentioned only as an example or a question about prices is not a load.
+chat_route: true when origin/destination were read from chat text, else false
 confidence: finite number from 0 to 1 for document classification and single-load facts"""
 from app.shipping_docs import FIELDS_HINT as _SHIPPING_HINT
 PROMPT += _SHIPPING_HINT
@@ -117,8 +122,17 @@ def _number(value):
         return None
 
 
-def save_load(fields):
-    if not verified_single_load(fields):
+def chat_route(fields):
+    """A route written in a chat screenshot (bubble or message box): weaker than a load screen, but a real lead."""
+    return (isinstance(fields, dict) and fields.get('document_kind') in ('load_listing', 'other', 'unclear', None)
+            and fields.get('document_kind') != 'rate_table'
+            and len(_text(fields.get('origin'))) >= 2 and len(_text(fields.get('destination'))) >= 2
+            and _text(fields.get('origin')) != _text(fields.get('destination'))
+            and (fields.get('chat_route') is True or fields.get('is_single_load') is True))
+
+
+def save_load(fields, from_chat=False):
+    if not (verified_single_load(fields) or (from_chat and chat_route(fields))):
         return None
     from app.naqliat_connector import NaqliatLoad, _save
     origin, destination = _text(fields.get('origin')), _text(fields.get('destination'))
@@ -135,7 +149,8 @@ def save_load(fields):
                        weight_tons=weight if weight is not None and 0 <= weight <= 1000 else None,
                        vehicle_type=_text(fields.get('vehicle_type'), 200), description=description[:3000],
                        owner_phone=_text(fields.get('owner_phone'), 40),
-                       raw_text=json.dumps(fields, ensure_ascii=False)[:10000], capture_method='whatsapp_image_ai')
+                       raw_text=json.dumps(fields, ensure_ascii=False)[:10000],
+                       capture_method='whatsapp_chat_ai' if from_chat and not verified_single_load(fields) else 'whatsapp_image_ai')
     return _save(load)
 
 
@@ -213,6 +228,34 @@ def phone_screenshot_reply(c, payload, sender, fields):
     return attached or (f'حفظت رقم صاحب الحمولة +{found[0]} ✅ أرسل لقطة تفاصيل الحمولة من نقليات وأربطها به.')
 
 
+def chat_load_reply(c, payload, sender, fields):
+    """Chat screenshot with a written route («من ميناء جدة إلى الرياض») + the owner's number → register the load."""
+    if not chat_route(fields):
+        return None
+    from app import transport_desk
+    transport_desk.init()
+    found = []
+    for value in list(fields.get('phones_visible') or []) + [fields.get('owner_phone')]:
+        for number in transport_desk.phones_in(value):
+            if number not in found:
+                found.append(number)
+    if len(found) == 1:
+        fields['owner_phone'] = '+' + found[0]
+    elif not _text(fields.get('owner_phone')):
+        waiting = transport_desk.waiting_phone(c, sender)
+        if waiting:
+            fields['owner_phone'] = '+' + waiting
+    saved = save_load(fields, from_chat=True)
+    if not saved:
+        return None
+    missing = [k for k, key in (('الوزن', 'weight_tons'), ('نوع الشاحنة', 'vehicle_type'), ('السعر', 'price_sar'),
+                                ('موعد التحميل', 'loading_date')) if not _text(fields.get(key))]
+    note = ('\nمن المحادثة: ' + _text(fields.get('origin')) + ' ← ' + _text(fields.get('destination'))
+            + ('. ناقص: ' + '، '.join(missing) + ' — أسأله عنها أثناء التفاوض.' if missing else ''))
+    return (('' if saved[1] else 'ℹ️ هذه الحمولة مسجلة سابقًا.\n')
+            + transport_desk.offer_negotiation(c, sender, (payload.get('conversation') or {}).get('id'), saved[0]) + note)
+
+
 _SHIPPING_CACHE = {}
 
 
@@ -251,8 +294,11 @@ async def handle_image(c, payload, sender, index):
             reply = invoice_billing_reply(fields, caption)
         elif kind == 'rate_table':
             reply = 'وصلني جدول أسعار النقل كمرجع داخلي لآفاق طويق. سأتعامل مع كل سعر حسب مساره؛ لم أُحدّث قائمة الأسعار المعتمدة في البرنامج.'
-        elif not verified_single_load(fields):
-            reply = phone_screenshot_reply(c, payload, sender, fields)
+        elif not verified_single_load(fields) or fields.get('chat_route') is True:
+            negated = re.search(r'(لا|ما|مو|مش)\s*(ت|ن)?سجل', caption or '')
+            reply = 'تمام، لم أسجل هذه الحمولة.' if negated and chat_route(fields) else chat_load_reply(c, payload, sender, fields)
+            if reply is None:
+                reply = phone_screenshot_reply(c, payload, sender, fields)
             if reply is None:
                 reply = ('وصلني المستند للمراجعة. ' + description + '\n' if description else 'نوع الصورة غير واضح بما يكفي. ')
                 reply += 'ما المطلوب من المستند؟ لم أسجل شحنة من هذه الصورة.'

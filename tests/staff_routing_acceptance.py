@@ -119,6 +119,19 @@ def run_staff_routing(providers, inbound):
             inbound('staff-09b-load-same-image',STAFF,'سجل هذه الحمولة',attachments=attachments)
             assert 'مسجلة سابقًا' in providers.replies['staff-09b-load-same-image']['message']
             assert one("SELECT COUNT(*) n FROM shipments WHERE reference=?",('NQ-'+str(image_saved['id']),))['n']==1
+        # A WhatsApp chat screenshot with the owner's number and a route typed in the chat («من ميناء جدة إلى الرياض»)
+        # is registered as a load with a ready «نفذ» code (Nov 2026: it used to save only the number).
+        chat_fields={'document_kind':'other','is_single_load':False,'chat_route':True,'origin':'ميناء جدة','destination':'الرياض',
+                     'phones_visible':['+966538372324'],'owner_phone':None,'confidence':0.6,'summary':'محادثة واتساب: من ميناء جدة إلى الرياض'}
+        with patch.object(load_vision,'extract',return_value=chat_fields):
+            inbound('staff-09c-chat-route',STAFF,'',attachments=attachments)
+        chat_reply=providers.replies['staff-09c-chat-route']['message']
+        assert 'نفذ' in chat_reply and 'الرياض' in chat_reply and 'ناقص' in chat_reply, chat_reply
+        chat_load=one("SELECT origin,destination,owner_phone FROM naqliat_loads WHERE capture_method='whatsapp_chat_ai' ORDER BY id DESC LIMIT 1")
+        assert chat_load and 'جدة' in chat_load['origin'] and chat_load['owner_phone'].endswith('538372324')
+        with patch.object(load_vision,'extract',return_value={**chat_fields,'origin':None}):
+            inbound('staff-09d-chat-no-route',STAFF,'',attachments=attachments)
+        assert 'حفظت رقم صاحب الحمولة' in providers.replies['staff-09d-chat-no-route']['message']
         # Explicit staff text still registers, without the receiver auto-advancing it.
         inbound('staff-10-text-load',STAFF,'طلب نقل\nمن الرياض إلى جدة\nجوال صاحب الشحنة: '+EXTERNAL+'\nالوزن: 20 طن')
         request=one("SELECT fields FROM zernio_requests WHERE conversation_id=? AND agent='afaaq'",('ci-transport-'+STAFF[1:],))
