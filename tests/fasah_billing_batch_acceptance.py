@@ -66,6 +66,36 @@ def run():
         action = json.loads(c.execute('SELECT command FROM whatsapp_voice_pending ORDER BY expires_at DESC LIMIT 1').fetchone()['command'].partition(':')[2])
         recorded = c.execute('SELECT COUNT(*) n FROM billing_declarations').fetchone()['n']
     assert action['tool'] == 'record_billing' and len(action['items']) == 11 and recorded == 0
+    # 4) Owner rule: every successful FASAH status read prepares سلة accounts by itself — no command, no question.
+    import datetime as dt
+    with db() as c:
+        c.execute("UPDATE runner_tasks SET status='done'")
+        c.execute("DELETE FROM fasah_tracking_state WHERE key='auto_billing_at'")
+        before = c.execute('SELECT COUNT(*) n FROM runner_tasks').fetchone()['n']
+    listing = [{'رقم البيان': '777001', 'التاريخ': '05/11/2026', 'التفاصيل': 'سلة الرحائب تحت المعالجة'}]
+    now = dt.datetime.now(dt.timezone.utc)
+    text = agent_runner.auto_billing(listing, now)
+    with db() as c:
+        auto = [(r['created_by'], json.loads(r['params_json'])) for r in c.execute('SELECT * FROM runner_tasks WHERE id>%s ORDER BY id',
+                (c.execute('SELECT MAX(id) m FROM runner_tasks').fetchone()['m'] - 2,)).fetchall()]
+        after = c.execute('SELECT COUNT(*) n FROM runner_tasks').fetchone()['n']
+    assert text and 'تلقائيًا' in text and after == before + 2, (text, before, after)
+    assert [a[1]['which'] for a in auto] == ['import', 'export'] and all(a[1]['party'] == 'سلة' and a[1]['auto'] and a[1]['pages'] == 20 for a in auto)
+    assert all(a[0].startswith('متابعة تلقائية') for a in auto)
+    assert agent_runner.auto_billing(listing, now + dt.timedelta(hours=1)) is None      # still running / too soon
+    with db() as c:
+        c.execute("UPDATE runner_tasks SET status='done'")
+    assert agent_runner.auto_billing(listing, now + dt.timedelta(hours=3)) is None      # under 6 hours
+    assert agent_runner.auto_billing([], now + dt.timedelta(hours=7)) is None           # nothing unbilled, under a day
+    with db() as c:
+        assert c.execute('SELECT COUNT(*) n FROM runner_tasks').fetchone()['n'] == after
+    assert agent_runner.auto_billing(listing, now + dt.timedelta(hours=7))              # unbilled seen again after 6h
+    with db() as c:
+        c.execute("UPDATE runner_tasks SET status='done'")
+        n = c.execute('SELECT COUNT(*) n FROM runner_tasks').fetchone()['n']
+    assert agent_runner.auto_billing([], now + dt.timedelta(hours=32)) is None          # daily sweep runs quietly
+    with db() as c:
+        assert c.execute('SELECT COUNT(*) n FROM runner_tasks').fetchone()['n'] == n + 2
     chat.stop()
 
 

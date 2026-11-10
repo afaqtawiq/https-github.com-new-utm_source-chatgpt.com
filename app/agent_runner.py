@@ -449,6 +449,50 @@ def unbilled(rows, party_hint='سلة'):
 
 
 MAX_BILLING_BATCH = 60
+AUTO_BILLING_ACTOR = 'متابعة تلقائية — حسابات سلة الرحائب'
+
+
+def billing_since(today=None):
+    first = (today or dt.date.today()).replace(day=1)
+    return (first - dt.timedelta(days=1)).replace(day=1).isoformat()
+
+
+def billing_started(now=None):
+    """A manual «سجل حسابات سلة من فسح» also counts, so the automatic one does not repeat it right after."""
+    with db() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS fasah_tracking_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        c.execute("""INSERT INTO fasah_tracking_state(key,value) VALUES('auto_billing_at',%s)
+            ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value""", ((now or dt.datetime.now(dt.timezone.utc)).isoformat(),))
+
+
+def auto_billing(rows, now=None):
+    """Owner rule (Nov 2026): every time the agent is inside FASAH it prepares سلة الرحائب accounts by itself.
+
+    Called after each successful FASAH status read (manual «افتح فسح» or the 2-hourly one). Starts the same reads as
+    «سجل حسابات سلة من فسح» when the list shows an unbilled سلة declaration, or once a day anyway; never while a
+    billing read is still running, and at most every 6 hours. Recording still needs the manager's ONE «نفذ»."""
+    if os.getenv('FASAH_AUTO_BILLING', '1') == '0':
+        return None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    seen = bool(unbilled(rows, 'سلة'))
+    with db() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS fasah_tracking_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        last = c.execute("SELECT value FROM fasah_tracking_state WHERE key='auto_billing_at' FOR UPDATE").fetchone()
+        age = (now - dt.datetime.fromisoformat(last['value'])).total_seconds() / 3600 if last else None
+        if age is not None and (age < 6 or (not seen and age < 24)):
+            return None
+        busy = c.execute("""SELECT 1 FROM runner_tasks WHERE status IN ('queued','running') AND kind IN ('fasah_declarations','fasah_details')
+            AND (params_json LIKE '%%"batch"%%' OR (params_json LIKE '%%"party"%%' AND params_json NOT LIKE '%%"track"%%')) LIMIT 1""").fetchone()
+        if busy or c.execute('SELECT 1 FROM fasah_billing_batches WHERE NOT notified AND created_at>%s', (now - dt.timedelta(hours=2),)).fetchone():
+            return None
+        c.execute("""INSERT INTO fasah_tracking_state(key,value) VALUES('auto_billing_at',%s)
+            ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value""", (now.isoformat(),))
+    since = billing_since()
+    for which in ('import', 'export'):
+        create_task('fasah_declarations', {'which': which, 'party': 'سلة', 'since': since, 'pages': 20, 'auto': True}, AUTO_BILLING_ACTOR)
+    return ('🧾 فسح مفتوح — بدأت تجهيز حسابات سلة الرحائب تلقائيًا (قراءة فقط): أقرأ بياناتها من ' + since
+            + '، ثم فاتورة ورسوم كل بيان غير مسجل، وأرسل لك كشفًا واحدًا (الياسمين / عمران / نصيب سلة الرحائب) برمز «نفذ» واحد.'
+            if seen else None)
 
 
 def batch_add(bid, number, d, message):
@@ -534,10 +578,17 @@ def after_fasah(tid):
                     fasah_containers.auto_from_list(rows)
                 except Exception as exc:
                     print('FASAH_CONTAINERS_AUTO', tid, type(exc).__name__, str(exc)[:200], flush=True)
-                return  # automatic status reads never prepare billing (the manual reads do)
+                try:
+                    started = auto_billing(rows)
+                    if started:
+                        notify(started)
+                except Exception as exc:
+                    print('FASAH_AUTO_BILLING', tid, type(exc).__name__, str(exc)[:200], flush=True)
+                return
             new = unbilled(rows, 'سلة')
             if not new:
-                notify(f'📋 فسح (#{tid}): كل بيانات سلة الرحائب في القائمة مسجلة في الحسابات.')
+                if not params.get('auto'):
+                    notify(f'📋 فسح (#{tid}): كل بيانات سلة الرحائب في القائمة مسجلة في الحسابات.')
                 return
             exports = [n for n in new if n['kind'] == 'export']
             imports = [n for n in new if n['kind'] == 'import']
