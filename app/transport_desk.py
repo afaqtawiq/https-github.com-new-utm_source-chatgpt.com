@@ -11,6 +11,7 @@
    the other drivers who accepted are told the load was taken.
 Nothing leaves the company without the manager's confirmation code.
 """
+import datetime as dt
 import asyncio
 import json
 import os
@@ -284,9 +285,19 @@ def connector_notice(load_id):
             return None
         load = repair(c, load)
         if load['origin'] in UNKNOWN or load['destination'] in UNKNOWN:
-            # Unreadable screen capture (often not a load screen): stay quiet, keep it for review.
+            # Unreadable screen capture: keep it for review. Tell the manager once every 6 hours (Nov 2026: a phone
+            # with the old text-reading connector sent loads silently because it cannot read the Arabic screen).
+            recent = c.execute('''SELECT 1 FROM naqliat_loads WHERE status='needs_review' AND id<>%s AND notified_at>%s LIMIT 1''',
+                               (load['id'], utcnow() - dt.timedelta(hours=6))).fetchone()
             c.execute("UPDATE naqliat_loads SET status='needs_review' WHERE id=%s", (load['id'],))
-            return None
+            if recent or str(load.get('capture_method') or '').startswith('whatsapp'):
+                return None
+            phone = digits(load.get('owner_phone'))
+            return (f"⚠️ وصلتني حمولة من تطبيق الالتقاط في الجوال (NQ-{load['id']}) لكن بدون مدينة التحميل والتنزيل"
+                    + (f' (قرأت رقم صاحبها فقط: +{phone})' if phone else '') + '.\n'
+                    'السبب: نسخة التطبيق المثبتة قديمة وتقرأ نص الشاشة فقط، وشاشة نقليات العربية ما تنقرأ بهذه الطريقة.\n'
+                    'الحل الآن: صوّر شاشة تفاصيل الحمولة وأرسل الصورة هنا في واتساب، وأقرأها كاملة وأجهز التفاوض.\n'
+                    'والحل الدائم: ثبّت نسخة التطبيق 0.3 (ترسل صورة الشاشة نفسها وأقرأ العربي منها).')
         if chat:
             return offer_negotiation(c, chat[0], chat[1], load_id, minutes=120)
         return describe(load) + f'\n\nللتفاوض مع صاحب الحمولة اكتب للوكيل: فاوض NQ-{load_id}'
