@@ -79,6 +79,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'result': {'type': 'string', 'enum': ['approved', 'rejected']}, 'until': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['result']}},
     {'name': 'detention_claim', 'description': 'Audit a shipping agent detention/demurrage invoice for a container: compares the invoiced amount (and days if given) with the free period incl. extensions, the proven return date and the agent tariff; an overcharge gets an objection email ready to send with the code. e.g. «فاتورة غرامة الحاوية MSKU1234567 من الوكيل 4500 ريال 12 يوم».',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'amount': {'type': 'string'}, 'days': {'type': 'string'}, 'returned_on': {'type': 'string'}}, 'required': ['container', 'amount']}},
+    {'name': 'port_storage', 'description': 'Jeddah port terminal storage (أرضيات الميناء, separate from the shipping line detention): either calculate it for a container — give container (registered) or discharged date (YYYY-MM-DD or dd/mm) and size 20/40, optional until date — or, with topic=operators, return the terminal operators guide (RSGT / DP World Jeddah: portals, contacts, payment and gate-pass steps, port charges). e.g. «كم أرضيات الميناء لحاوية 40 نزلت 1/11», «كيف أدفع لموانئ دبي», «رقم بوابة البحر الأحمر».',
+     'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'discharged': {'type': 'string'}, 'size': {'type': 'string'}, 'until': {'type': 'string'}, 'topic': {'type': 'string', 'enum': ['calc', 'operators']}}}},
     {'name': 'detention_exposure', 'description': 'Summary of demurrage/detention exposure per shipping agent: open containers, overdue, ending soon, estimated cost so far and tomorrow, extension requests. e.g. «كم الغرامات علينا» «وضع الحاويات مع الوكلاء».',
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
@@ -511,6 +513,22 @@ def tool_free_time_result(c, a):
 def tool_detention_claim(c, a):
     from app import line_desk
     return line_desk.audit_claim(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
+
+
+def tool_port_storage(c, a):
+    from app import container_returns, port_terminals
+    cno = container_returns.number(a.get('container'))
+    day, size, label = container_returns.date(a.get('discharged')), a.get('size'), ''
+    if cno and not day:
+        row = c.execute('SELECT arrived_on,size,delivered_on FROM container_returns WHERE container=%s', (cno,)).fetchone()
+        if row and row.get('arrived_on'):
+            day, size, label = row['arrived_on'], size or row.get('size'), cno
+            if row.get('delivered_on') and not a.get('until'):
+                a = dict(a, until=str(row['delivered_on']))
+    if a.get('topic') == 'operators' or not day:
+        return port_terminals.KNOWLEDGE.strip() + ('' if a.get('topic') == 'operators' else
+                                                   '\n\nلحساب الأرضيات اذكر تاريخ نزول الحاوية ومقاسها، مثل: أرضيات الميناء لحاوية 40 نزلت 1/11.')
+    return port_terminals.storage_text(day, size, container_returns.date(a.get('until')), label)
 
 
 def tool_detention_exposure(c, a):

@@ -106,6 +106,17 @@ def run():
     with patch('app.naqliat_connector._session', return_value={}):
         html_page = line_desk.page(None).body.decode()
     assert 'مكتب الحاويات' in html_page and 'MSCU1234567' not in html_page.split('طلبات التمديد')[0] and 'وافق الوكيل' in html_page
+    # 9) Port storage (terminal operator, separate from the line): notice on the 3rd day from discharge, once; tool answers.
+    container_returns.track({'container': 'MSCU8888888'}, 'محمد')
+    with db() as c:
+        c.execute("UPDATE container_returns SET arrived_on=%s,size='40' WHERE container='MSCU8888888'", (today - dt.timedelta(days=2),))
+    notes = [m for m in line_desk.tick(today) if 'أرضيات الميناء' in m]
+    assert len(notes) == 1 and 'MSCU8888888' in notes[0] and '450' in notes[0], notes
+    assert not [m for m in line_desk.tick(today) if 'أرضيات الميناء' in m]
+    with db() as c:
+        assert '4,150' in command_agent.tool_port_storage(c, {'discharged': '2026-11-01', 'size': '40', 'until': '2026-11-12'})
+        assert '920007025' in command_agent.tool_port_storage(c, {'topic': 'operators'})
+        assert 'أرضيات الميناء' in command_agent.tool_port_storage(c, {'container': 'MSCU8888888'})
     chat.stop()
 
 

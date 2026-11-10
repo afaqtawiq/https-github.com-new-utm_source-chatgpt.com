@@ -243,6 +243,9 @@ def card_lines(row):
         with db() as c:
             agent = agent_for(c, row)
             lines = [f"• وكيل الملاحة: {agent['name']}" if agent else '• وكيل الملاحة: غير محدد — «وكيل الحاوية ... هو ...»']
+            if row.get('arrived_on') and row.get('status') == 'open':
+                from app import port_terminals
+                lines.append('• ' + port_terminals.storage_text(row['arrived_on'], row.get('size')) + ' (تاريخ النزول من فسح — تقديري)')
             if row.get('free_until_estimated'):
                 lines.append('• آخر يوم مجاني تقديري (تاريخ الوصول في فسح + أيام السماح للوكيل) — أكده من إشعار الوكيل')
             if row.get('fasah_number'):
@@ -594,6 +597,18 @@ def tick(today=None, now=None):
                     first = fresh[0]['id']
                     c.execute("""INSERT INTO container_return_events(container_id,event,note,actor,created_at)
                         VALUES(%s,'line_desk_notice',%s,'مكتب الحاويات',%s)""", (first, key[:1000], now))
+        # 1b) Port storage: last free day at the terminal (3 days from discharge) for containers still in the port.
+        from app import port_terminals
+        for r in c.execute("""SELECT * FROM container_returns WHERE status='open' AND NOT is_test AND arrived_on=%s""",
+                           (today - dt.timedelta(days=port_terminals.FREE_DAYS - 1),)).fetchall():
+            if c.execute("SELECT 1 FROM container_return_events WHERE container_id=%s AND event='port_storage_notice'", (r['id'],)).fetchone():
+                continue
+            c.execute("""INSERT INTO container_return_events(container_id,event,note,actor,created_at)
+                VALUES(%s,'port_storage_notice','',%s,%s)""", (r['id'], 'مكتب الحاويات', now))
+            rate = port_terminals.IMPORT_TIERS[0][2 if port_terminals.size_key(r.get('size')) == 20 else 3]
+            out.append(f"⚓ الحاوية {r['container']}{' — ' + r['customer'] if r.get('customer') else ''}: اليوم آخر يوم مجاني من أرضيات الميناء "
+                       f"(نزلت {_fmt(r['arrived_on'])} حسب فسح). من الغد {rate} ريال/يوم للمشغل، غير غرامة الوكيل الملاحي. "
+                       'إذا خرجت من الميناء اكتب: «سلمت الحاوية ...».')
         # 2) Sent requests with no answer for 24h → reminder draft (once a day, at most 3).
         for req in c.execute("""SELECT r.*,a.name agent FROM free_time_requests r JOIN shipping_agents a ON a.id=r.agent_id
                 WHERE r.status='sent' AND r.sent_at<%s AND r.reminders<3 AND (r.reminded_at IS NULL OR r.reminded_at<%s)""",

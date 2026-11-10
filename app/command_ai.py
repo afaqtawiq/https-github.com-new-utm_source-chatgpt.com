@@ -274,6 +274,8 @@ def answer_question(question):
     if is_saber_information_question(question):
         return answer_saber_question(question)
     from app.customs_knowledge import KNOWLEDGE
+    from app.port_terminals import KNOWLEDGE as _PORT
+    KNOWLEDGE = KNOWLEDGE + _PORT
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None

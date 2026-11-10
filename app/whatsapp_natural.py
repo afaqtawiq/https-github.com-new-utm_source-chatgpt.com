@@ -336,6 +336,8 @@ async def reply(question, history=()):
     if not key or not re.fullmatch(r'claude-[a-zA-Z0-9._-]{1,100}', name):
         return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)
     from app.customs_knowledge import KNOWLEDGE
+    from app.port_terminals import KNOWLEDGE as _PORT
+    KNOWLEDGE = KNOWLEDGE + _PORT
     case_guidance = guidance_for(question, history)
     try:
         from app.agent_learning import block as learned_block
