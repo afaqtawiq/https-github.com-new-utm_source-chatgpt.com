@@ -252,8 +252,9 @@ app.include_router(line_desk_router)
 from app.video_publish import router as video_publish_router, init as init_video_publish
 init_video_publish()
 app.include_router(video_publish_router)
-from app.agent_runner import router as agent_runner_router, init as init_agent_runner
+from app.agent_runner import router as agent_runner_router, init as init_agent_runner, register_worker as register_runner_watch
 init_agent_runner()
+register_runner_watch(app)
 app.include_router(agent_runner_router)
 from app.fasah_tracking import register_worker as register_fasah_tracking, init as init_fasah_tracking
 init_fasah_tracking()

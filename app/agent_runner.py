@@ -75,6 +75,7 @@ def init():
         c.execute('''CREATE TABLE IF NOT EXISTS runner_steps(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL, ok BOOLEAN NOT NULL,
             text TEXT NOT NULL, screenshot BYTEA, created_at TIMESTAMPTZ NOT NULL)''')
         c.execute('ALTER TABLE runner_steps ADD COLUMN IF NOT EXISTS url TEXT')
+        c.execute('ALTER TABLE runner_tasks ADD COLUMN IF NOT EXISTS offline_alerted BOOLEAN NOT NULL DEFAULT FALSE')
         c.execute('''CREATE TABLE IF NOT EXISTS runner_files(id BIGSERIAL PRIMARY KEY, task_id BIGINT NOT NULL, name TEXT NOT NULL,
             mime TEXT NOT NULL, size BIGINT NOT NULL, sha256 TEXT NOT NULL, verified BOOLEAN NOT NULL, data BYTEA NOT NULL,
             created_at TIMESTAMPTZ NOT NULL)''')
@@ -90,6 +91,57 @@ def init():
 
 
 # ---------- tasks ----------
+
+ONLINE_SECONDS = 45  # the runner asks for work every ~11 seconds
+
+
+def seen_text(seen):
+    if not seen:
+        return 'لم يتصل بعد'
+    return seen.astimezone(dt.timezone(dt.timedelta(hours=3))).strftime('%H:%M')
+
+
+def offline_alerts(now=None):
+    """Queued tasks not picked up within 90 s while the work computer is silent → ONE message per outage."""
+    init()
+    now = now or dt.datetime.now(dt.timezone.utc)
+    with db() as c:
+        seen = c.execute('SELECT MAX(last_seen) s FROM runner_devices WHERE enabled').fetchone()['s']
+        if seen and (now - seen).total_seconds() < ONLINE_SECONDS:
+            return None
+        rows = c.execute('''UPDATE runner_tasks SET offline_alerted=TRUE WHERE status='queued' AND NOT offline_alerted
+            AND created_at<%s AND COALESCE(created_by,'') NOT LIKE 'متابعة تلقائية%%' AND COALESCE(created_by,'')<>'تلقائي'
+            RETURNING id''', (now - dt.timedelta(seconds=90),)).fetchall()
+    if not rows:
+        return None
+    ids = '، '.join('#' + str(r['id']) for r in rows[:5])
+    return (f'⚠️ جهاز العمل لا يستجيب (آخر اتصال {seen_text(seen)})، فالمهمة {ids} لم تبدأ.\n'
+            'على الكمبيوتر: شغّل «جهاز آفاق طويق» من سطح المكتب (إذا كانت نافذته السوداء مفتوحة ومعلقة أغلقها وشغّله من جديد)، '
+            'وتأكد أن الكمبيوتر متصل بالإنترنت وليس في وضع السكون. المهمة تبدأ تلقائيًا بعد التشغيل.')
+
+
+def register_worker(app):
+    import asyncio
+
+    async def loop():
+        from starlette.concurrency import run_in_threadpool
+        from app.owner_briefing import deliver
+        await asyncio.sleep(90)
+        while True:
+            try:
+                text = await run_in_threadpool(offline_alerts)
+                if text:
+                    await deliver(text)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print('RUNNER_OFFLINE_ALERT', type(exc).__name__, str(exc)[:160], flush=True)
+            await asyncio.sleep(60)
+
+    @app.on_event('startup')
+    async def start():
+        app.state.runner_offline_worker = asyncio.create_task(loop())
+
 
 def create_task(kind, params, actor=''):
     init()
@@ -119,8 +171,9 @@ def create_task(kind, params, actor=''):
         tid = c.execute('INSERT INTO runner_tasks(kind,params_json,created_by,created_at) VALUES(%s,%s,%s,%s) RETURNING id',
                         (kind, json.dumps(params, ensure_ascii=False), actor, utcnow())).fetchone()['id']
         seen = c.execute('SELECT MAX(last_seen) s FROM runner_devices WHERE enabled').fetchone()['s']
-    online = seen and (dt.datetime.now(dt.timezone.utc) - seen).total_seconds() < 180
-    return tid, (f'🖥 أنشأت المهمة #{tid}: {KINDS[kind]}.' + ('' if online else '\n⚠️ جهاز العمل غير متصل الآن؛ تبدأ المهمة عند تشغيله.')
+    online = seen and (dt.datetime.now(dt.timezone.utc) - seen).total_seconds() < ONLINE_SECONDS
+    return tid, (f'🖥 أنشأت المهمة #{tid}: {KINDS[kind]}.' + ('' if online else
+                 f'\n⚠️ جهاز العمل غير متصل الآن (آخر اتصال {seen_text(seen)})؛ المهمة لم تبدأ. شغّل «جهاز آفاق طويق» من سطح مكتب الكمبيوتر وتبدأ تلقائيًا.')
                  + f'\nللإيقاف اكتب: أوقف المهمة {tid}')
 
 
@@ -617,7 +670,7 @@ def page(request: Request):
             '<p class="muted">المواقع المسموحة: ' + e('، '.join(allowed_domains())) + '. الإرسال والدفع والحذف وتغيير الإعدادات تحتاج موافقتك لكل عملية.</p>')
     body += '<div class="card"><h2>الأجهزة</h2>'
     for d in devices:
-        online = d['last_seen'] and (dt.datetime.now(dt.timezone.utc) - d['last_seen']).total_seconds() < 180
+        online = d['last_seen'] and (dt.datetime.now(dt.timezone.utc) - d['last_seen']).total_seconds() < ONLINE_SECONDS
         body += (f"<p>{e(d['name'])} — {'مفعل' if d['enabled'] else 'ملغى'} — {'متصل' if online else 'غير متصل'} "
                  + (post(f"/agent-runner/devices/{d['id']}/rotate", 'تغيير الرمز') + ' ' + post(f"/agent-runner/devices/{d['id']}/revoke", 'إلغاء الرمز')
                     if d['enabled'] else '') + '</p>')
