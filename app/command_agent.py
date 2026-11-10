@@ -83,7 +83,7 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
-    {'name': 'fasah_billing', 'description': 'Manager only. Record سلة الرحائب declarations from FASAH in the accounts: the work computer reads the FASAH list (many pages, read-only), then reads the invoice and fees of every unbilled import declaration, and the manager gets ONE statement — invoices from الياسمين go to the الياسمين statement, all others to عمران, plus سلة الرحائب share — with ONE «نفذ» code. Exports are prepared too. Use for «سجل حسابات سلة من فسح» «سجل بيانات سلة الرحائب». since = YYYY-MM-DD optional (default: first day of last month).',
+    {'name': 'fasah_billing', 'description': 'Manager only. Record سلة الرحائب declarations from FASAH in the accounts: the work computer reads the FASAH list (many pages, read-only), then reads the invoice and fees of every unbilled import declaration, and the manager gets ONE statement — invoices from الياسمين go to the الياسمين statement, all others to عمران, plus سلة الرحائب share — with ONE «نفذ» code. Exports are prepared too. Use for «سجل حسابات سلة من فسح» «سجل بيانات سلة الرحائب», and ALSO whenever the manager asks whether سلة الرحائب accounts were recorded/added («هل تم تسجيل حسابات سلة» «هل قاعد تضيف حسابات سلة»): call this tool immediately and report what it started — never answer by asking «هل أبدأ؟». since = YYYY-MM-DD optional (default: first day of last month).',
      'input_schema': {'type': 'object', 'properties': {'since': {'type': 'string'}, 'which': {'type': 'string', 'enum': ['import', 'export', 'both']}}}},
     {'name': 'open_fasah', 'description': 'Manager only. OPEN the FASAH platform on the WORK COMPUTER right now, without asking any question: it opens (or reuses) the FASAH window, waits up to 10 minutes for the manager to sign in himself, then refreshes the live declaration statuses (read-only). Use for «افتح فسح» «افتح لي فسح على الكمبيوتر» «شغل فسح» «ادخل فسح». Optional which=import/export.',
      'input_schema': {'type': 'object', 'properties': {'which': {'type': 'string', 'enum': ['import', 'export']}}}},
@@ -528,6 +528,7 @@ def tool_fasah_billing(c, a):
         first = _dt.date.today().replace(day=1)
         since = (first - _dt.timedelta(days=1)).replace(day=1).isoformat()
     which = a.get('which') if a.get('which') in ('import', 'export') else 'both'
+    agent_runner.billing_started()
     out = []
     for w in (('import', 'export') if which == 'both' else (which,)):
         tid, text = agent_runner.create_task('fasah_declarations', {'which': w, 'party': 'سلة', 'since': since, 'pages': 20},

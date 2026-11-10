@@ -120,7 +120,8 @@ def run():
         c.execute('DELETE FROM runner_tasks WHERE id=%s', (manual,))
     assert 'متابعة فسح متوقفة' in ft.session_notice()
 
-    # 9) The runner hook: an automatic read updates tracking and never prepares billing.
+    # 9) The runner hook: an automatic read updates tracking; it records nothing in the accounts itself (since Nov 2026
+    #    it may START the read-only سلة billing preparation — covered in fasah_billing_batch_acceptance).
     with db() as c:
         tid = c.execute("""INSERT INTO runner_tasks(kind,params_json,status,created_by,created_at)
             VALUES('fasah_declarations',%s,'done',%s,NOW()) RETURNING id""",
@@ -129,7 +130,8 @@ def run():
         c.execute("INSERT INTO runner_files(task_id,name,mime,size,sha256,verified,data,created_at) VALUES(%s,'f.csv','text/csv',1,'x',TRUE,%s,NOW())",
                   (tid, ('﻿' + csv_text).encode()))
     sent = []
-    with patch.object(agent_runner, 'notify', side_effect=sent.append), patch.object(agent_runner, 'unbilled', side_effect=AssertionError('billing')):
+    with patch.object(agent_runner, 'notify', side_effect=sent.append), patch.object(agent_runner, 'prepare_billing', side_effect=AssertionError('billing')), \
+            patch.object(agent_runner, 'auto_billing', return_value=None):
         agent_runner.after_fasah(tid)
     assert len(sent) == 1 and '418901' in sent[0] and 'تم الفسح' in sent[0], sent
     assert ft.session_notice() is None
