@@ -274,9 +274,21 @@ async def ingest_naqliat_screenshot(payload: NaqliatScreenshot, request: Request
         fields = await load_vision.extract(data, mime)
     except Exception as exc:
         return {"ok": False, "message": "تعذر قراءة الصورة: " + str(exc)[:120]}
-    if not load_vision.verified_single_load(fields):
-        return {"ok": False, "message": "الصورة ليست شاشة تفاصيل حمولة واضحة؛ صوّر شاشة تفاصيل الحمولة."}
-    saved = await run_in_threadpool(load_vision.save_load, fields)
+    if not isinstance(fields, dict):
+        fields = {}
+    print("NAQLIAT_SCREENSHOT", fields.get("document_kind"), fields.get("is_single_load"), fields.get("confidence"),
+          repr(str(fields.get("origin"))[:40]), repr(str(fields.get("destination"))[:40]), flush=True)
+    # The connector is used ONLY on Naqliat load screens: a readable origin + destination is enough (Nov 2026: a
+    # clear load screen was refused because the model's confidence was under the WhatsApp threshold).
+    if not load_vision.verified_single_load(fields) and fields.get("document_kind") in ("load_listing", "other", "unclear", None) \
+            and fields.get("document_kind") != "rate_table" and len(str(fields.get("origin") or "").strip()) >= 2 \
+            and len(str(fields.get("destination") or "").strip()) >= 2:
+        fields["chat_route"] = True
+    if not (load_vision.verified_single_load(fields) or load_vision.chat_route(fields)):
+        seen = str(fields.get("summary") or "")[:200]
+        return {"ok": False, "message": "لم أجد مدينة التحميل والتنزيل في الصورة؛ صوّر شاشة تفاصيل الحمولة كاملة."
+                + (" ما قرأته: " + seen if seen else "")}
+    saved = await run_in_threadpool(load_vision.save_load, fields, True)
     if not saved:
         return {"ok": False, "message": "لم أقرأ مدينة التحميل والتنزيل."}
     from app.transport_desk import notify_capture
