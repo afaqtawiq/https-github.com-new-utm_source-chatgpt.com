@@ -261,9 +261,11 @@ def statement(party_text, month):
             AND COALESCE(decl_date,created_at::date)<%s ORDER BY d,number''', (start, end)).fetchall()
         pays = c.execute('SELECT pay_date,amount,ref FROM billing_payments WHERE party=%s ORDER BY pay_date', (party,)).fetchall()
     lines, total = [], 0.0
+    # سلة الرحائب is not billed: its statement is its SHARE (payable) per declaration; الياسمين and عمران are claims.
+    want = 'payable' if party == billing_rules.SALLA else 'claim'
     for r in rows:
         for it in json.loads(r['items_json'] or '[]'):
-            if billing_rules.fold(it.get('party')) == billing_rules.fold(party) and it.get('kind') == 'claim':
+            if billing_rules.fold(it.get('party')) == billing_rules.fold(party) and it.get('kind') == want:
                 amount = float(it['amount'])
                 comps = it.get('components') or {}
                 lines.append({'number': r['number'], 'date': str(r['d']), 'invoice': r['invoice_value'], 'amount': amount,
@@ -280,13 +282,20 @@ def statement(party_text, month):
     paid = sum(float(p['amount']) for p in month_pays)
     all_paid = sum(float(p['amount']) for p in pays)
     return {'party': party, 'month': month, 'lines': lines, 'total': total, 'payments': month_pays, 'paid': paid, 'all_paid': all_paid,
-            'approved': bool(approved), 'rule_total': rule_total}
+            'approved': bool(approved), 'rule_total': rule_total, 'payable': want == 'payable'}
 
 
 def statement_text(party_text, month):
     s = statement(party_text, month)
     if not s['lines']:
-        return f"لا توجد مطالبات مسجلة على {s['party']} في {month}."
+        return (f"لا توجد بيانات مسجلة في الحسابات لـ{s['party']} في {month}. "
+                'التسجيل يتم بعد قراءة فسح واعتمادك للكشف بكلمة «نفذ».')
+    if s.get('payable'):
+        return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}\n• نصيب {s['party']} المستحق: {s['total']:,.2f} ريال"
+                f"\n• المدفوع لها خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
+                f"\n• الباقي لها عن الشهر: {s['total'] - s['paid']:,.2f} ريال"
+                f"\nالكشف التفصيلي للطباعة: https://gulf-logistics-ai-v7-production.up.railway.app/billing/statement?party={s['party']}&month={month}"
+                '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها.')
     return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}\n• إجمالي المطالبة: {s['total']:,.2f} ريال"
             f"\n• السداد خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
             f"\n• صافي مطالبة الشهر بعد سداد الشهر: {s['total'] - s['paid']:,.2f} ريال"
@@ -294,3 +303,16 @@ def statement_text(party_text, month):
             f"\nالكشف التفصيلي للطباعة: https://gulf-logistics-ai-v7-production.up.railway.app/billing/statement?party={s['party']}&month={month}"
             + ('\nالإجمالي من الكشف المعتمد كما رُفع.' + (f" (حساب القاعدة: {s['rule_total']:,.2f})" if abs(s['rule_total'] - s['total']) > 1 else '')
                if s['approved'] else '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها؛ راجعها مع كشفك.'))
+
+
+def all_statements(months=None):
+    """The three agreed statements (الياسمين، عمران، سلة الرحائب) for the given months (default: the current month)."""
+    import datetime as dt
+    from app import billing_rules
+    months = months or [dt.datetime.now(dt.timezone(dt.timedelta(hours=3))).strftime('%Y-%m')]
+    out = []
+    for month in sorted(set(months))[-3:]:
+        for party in (billing_rules.YASMEN, billing_rules.OMRAN, billing_rules.SALLA):
+            if statement(party, month)['lines']:
+                out.append(statement_text(party, month))
+    return '\n\n'.join(out)

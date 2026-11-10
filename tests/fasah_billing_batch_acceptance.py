@@ -66,6 +66,19 @@ def run():
         action = json.loads(c.execute('SELECT command FROM whatsapp_voice_pending ORDER BY expires_at DESC LIMIT 1').fetchone()['command'].partition(':')[2])
         recorded = c.execute('SELECT COUNT(*) n FROM billing_declarations').fetchone()['n']
     assert action['tool'] == 'record_billing' and len(action['items']) == 11 and recorded == 0
+    # 3b) «نفذ» records the drafts AND returns the three statements; سلة الرحائب statement is its share, month defaults to now.
+    from app import statement_import
+    with patch.object(billing_rules, 'create_documents', return_value=[1]):
+        token = ROLE.set({'name': 'محمد', 'manager': True})
+        done = command_agent.execute_confirmed(None, json.dumps(action, ensure_ascii=False))
+        ROLE.reset(token)
+    assert 'كشوفات الحسابات بعد التسجيل' in done and 'كشف الياسمين — 2026-11' in done and 'كشف عمران — 2026-11' in done, done
+    assert 'نصيب سلة الرحائب المستحق' in done, done
+    salla = statement_import.statement('سلة الرحايب', '2026-11')
+    assert salla['payable'] and len(salla['lines']) == 11 and abs(salla['total'] - 11 * 1050.0) < 0.01, salla['total']
+    assert 'لا توجد بيانات مسجلة' in statement_import.statement_text('سلة', '2025-01')
+    with patch('app.statement_import.all_statements', return_value='ALL') as every:
+        assert command_agent.tool_party_statement(None, {}) == 'ALL' and every.call_args[0][0][0].count('-') == 1
     # 4) Owner rule: every successful FASAH status read prepares سلة accounts by itself — no command, no question.
     import datetime as dt
     with db() as c:
