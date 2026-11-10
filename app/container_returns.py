@@ -107,6 +107,8 @@ def track(args, actor=''):
         if fields:
             sets = ','.join(k + '=%s' for k in fields)
             c.execute('UPDATE container_returns SET ' + sets + ',updated_at=%s WHERE id=%s', (*fields.values(), utcnow(), row['id']))
+            if fields.get('free_until') and 'free_until_estimated' in row:
+                c.execute('UPDATE container_returns SET free_until_estimated=FALSE WHERE id=%s', (row['id'],))  # confirmed by the team
         if fields.get('delivered_on') and row['status'] == 'open':
             c.execute("UPDATE container_returns SET status='delivered' WHERE id=%s", (row['id'],))
             event(c, row['id'], 'delivered', str(fields['delivered_on']), actor)

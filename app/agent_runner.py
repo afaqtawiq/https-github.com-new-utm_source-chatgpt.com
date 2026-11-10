@@ -337,6 +337,15 @@ async def finish(tid: int, request: Request):
         pass
     if status != 'done' and task['kind'] == 'fasah_details':
         params = json.loads(task['params_json'] or '{}')
+        if params.get('purpose') == 'containers':
+            import threading
+
+            def _failed(p=params):
+                from app import fasah_containers
+                summary = fasah_containers.details_failed(p)
+                if summary:
+                    notify(summary)
+            threading.Thread(target=_failed, daemon=True).start()
         if params.get('batch'):  # a failed read must not leave the batch summary waiting forever
             import threading
             threading.Thread(target=batch_add, args=(int(params['batch']), str(params.get('number')), None,
@@ -462,7 +471,16 @@ def after_fasah(tid):
                     notify(changed)
             except Exception as exc:
                 print('FASAH_TRACKING', tid, type(exc).__name__, str(exc)[:200], flush=True)
+            if params.get('purpose') == 'containers':
+                from app import fasah_containers
+                notify(fasah_containers.after_list(task, rows))
+                return
             if params.get('track'):
+                try:
+                    from app import fasah_containers
+                    fasah_containers.auto_from_list(rows)
+                except Exception as exc:
+                    print('FASAH_CONTAINERS_AUTO', tid, type(exc).__name__, str(exc)[:200], flush=True)
                 return  # automatic status reads never prepare billing (the manual reads do)
             new = unbilled(rows, 'سلة')
             if not new:
@@ -488,6 +506,11 @@ def after_fasah(tid):
                              'ما يُسجل على الياسمين وما يُسجل على عمران ونصيب سلة الرحائب، برمز «نفذ» واحد.'
                              + (f'\n  (باقي {len(imports) - len(todo)} بيان؛ أعد الأمر بعد التسجيل.)' if len(imports) > len(todo) else ''))
             notify('\n'.join(lines))
+        elif params.get('purpose') == 'containers':
+            from app import fasah_containers
+            summary = fasah_containers.after_details(task, params, bytes(f['data']).decode('utf-8', 'replace')[:60000])
+            if summary:
+                notify(summary)
         elif task['kind'] == 'fasah_release_notice' or params.get('purpose') == 'duties':
             from app import fasah_docs
             message = fasah_docs.after_task(task, params, f)

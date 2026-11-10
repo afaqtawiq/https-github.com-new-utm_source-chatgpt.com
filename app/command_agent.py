@@ -69,8 +69,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'container_line', 'description': 'Set the shipping agent (line) and size (20/40/45) of a container or of all open containers of a bill. e.g. «وكيل الحاوية MSCU1234567 هو MSC مقاس 40», «حاويات البوليصة MEDU12345 وكيلها MSC». The agent is usually detected from the container prefix automatically.',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'bill': {'type': 'string'}, 'agent': {'type': 'string'}, 'size': {'type': 'string'}}}},
-    {'name': 'line_tariff', 'description': 'Record a shipping agent detention/demurrage tariff AFTER the free days, as tiers «days:SAR per day», e.g. «تعرفة MSC 40 قدم: 1-5:150، 6-10:300، 11+:450». size optional (20/40/45; empty = all sizes).',
-     'input_schema': {'type': 'object', 'properties': {'agent': {'type': 'string'}, 'size': {'type': 'string'}, 'tiers': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['agent', 'tiers']}},
+    {'name': 'line_tariff', 'description': 'Record a shipping agent detention/demurrage tariff AFTER the free days, as tiers «days:SAR per day», e.g. «تعرفة MSC 40 قدم: 1-5:150، 6-10:300، 11+:450», and/or the agent free days counted from arrival (free_days), e.g. «أيام السماح MSC 14». size optional (20/40/45; empty = all sizes).',
+     'input_schema': {'type': 'object', 'properties': {'agent': {'type': 'string'}, 'size': {'type': 'string'}, 'tiers': {'type': 'string'}, 'free_days': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['agent']}},
+    {'name': 'fasah_containers', 'description': 'Manager only. Pull the containers of the Jeddah IMPORT declarations from FASAH on the WORK COMPUTER (read-only): reads the declarations list, opens the details of every declaration not read yet, extracts bill of lading, container numbers, shipping agent and arrival date, and registers every container in the container desk (return follow-up, free-time extension, detention). Use for «اسحب الحاويات من فسح» «سجل حاويات بيانات جدة» «استخرج البوالص من فسح». since YYYY-MM-DD optional (default 30 days ago), pages 1-20 (default 5).',
+     'input_schema': {'type': 'object', 'properties': {'since': {'type': 'string'}, 'pages': {'type': 'string'}}}},
     {'name': 'free_time_extension', 'description': 'Prepare a FREE TIME (demurrage/detention) EXTENSION request email to the shipping agent for containers (or all open containers of a bill). It is sent from the official mailbox only after the manager confirms with the code. days default 7. e.g. «اطلب تمديد المدة المجانية للحاوية MSKU1234567 7 أيام», «اطلب مهلة سماح لحاويات البوليصة ...».',
      'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'days': {'type': 'string'}, 'reason': {'type': 'string'}}}},
     {'name': 'free_time_result', 'description': 'Record the agent answer to a free time extension: result approved (with the NEW last free day until, YYYY-MM-DD or dd/mm) or rejected. e.g. «تم تمديد MSKU1234567 حتى 20/11», «رفض الوكيل تمديد حاويات البوليصة ...».',
@@ -478,6 +480,22 @@ def tool_container_line(c, a):
 def tool_line_tariff(c, a):
     from app import line_desk
     return line_desk.set_tariff(a, _member().get('name') or '')
+
+
+def tool_fasah_containers(c, a):
+    import datetime as _dt
+    from app import agent_runner
+    if not _member().get('manager'):
+        return 'سحب الحاويات من فسح للمدير فقط.'
+    since = str(a.get('since') or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', since):
+        since = (_dt.date.today() - _dt.timedelta(days=30)).isoformat()
+    tid, text = agent_runner.create_task('fasah_declarations', {'which': 'import', 'since': since, 'pages': a.get('pages') or 5,
+                                                                'purpose': 'containers'}, _member().get('name') or '')
+    if not tid:
+        return text
+    return (text + f'\n🚢 أقرأ بيانات الاستيراد من {since} (قراءة فقط)، ثم أفتح تفاصيل كل بيان وأستخرج البوليصة والحاويات والوكيل '
+            'الملاحي وتاريخ الوصول، وأسجل الحاويات في مكتب الحاويات. يوصلك ملخص واحد بعد آخر بيان. ما يُرسل شيء لأي جهة.')
 
 
 def tool_free_time_extension(c, a):
