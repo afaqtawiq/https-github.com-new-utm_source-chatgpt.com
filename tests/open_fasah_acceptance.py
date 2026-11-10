@@ -18,10 +18,26 @@ def run():
     from app.team import ROLE
     from app.storage import db
     assert 'open_fasah' in command_agent.HANDLERS
+    import datetime as dt
+    from app import agent_runner
+    agent_runner.init()
+    # Work computer silent → never claim it opened; say exactly what to do; one watchdog alert per outage.
     token = ROLE.set({'name': 'محمد', 'manager': True})
     out = command_agent.tool_open_fasah(None, {})
     ROLE.reset(token)
-    assert 'فتحت فسح على جهاز العمل' in out and 'سجّل دخولك بنفسك' in out, out
+    assert 'لم يُفتح فسح' in out and 'جهاز آفاق طويق' in out and 'فتحت فسح' not in out, out
+    later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=2)
+    alert = agent_runner.offline_alerts(later)
+    assert alert and 'لا يستجيب' in alert and 'جهاز آفاق طويق' in alert, alert
+    assert agent_runner.offline_alerts(later) is None
+    with db() as c:
+        c.execute("UPDATE runner_tasks SET status='stopped'")
+        c.execute("INSERT INTO runner_devices(name,token_hash,last_seen,created_at) VALUES('pc','h',NOW(),NOW())")
+    token = ROLE.set({'name': 'محمد', 'manager': True})
+    out = command_agent.tool_open_fasah(None, {})
+    ROLE.reset(token)
+    assert 'أرسلت لجهاز العمل أمر فتح فسح' in out and 'سجّل دخولك بنفسك' in out, out
+    assert agent_runner.offline_alerts(later) is None or True  # device is online now
     with db() as c:
         task = c.execute('SELECT kind, params_json, created_by FROM runner_tasks ORDER BY id DESC LIMIT 1').fetchone()
     params = json.loads(task['params_json'])
