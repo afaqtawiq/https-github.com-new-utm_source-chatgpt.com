@@ -245,6 +245,8 @@ register_container_returns(app)
 app.include_router(container_returns_router)
 from app.line_desk import router as line_desk_router, register_worker as register_line_desk, init as init_line_desk
 init_line_desk()
+from app.fasah_containers import init as init_fasah_containers
+init_fasah_containers()
 register_line_desk(app)
 app.include_router(line_desk_router)
 from app.video_publish import router as video_publish_router, init as init_video_publish

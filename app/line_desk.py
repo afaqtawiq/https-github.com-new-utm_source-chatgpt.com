@@ -59,10 +59,13 @@ def init():
     from app import container_returns
     container_returns.init()
     with db() as c:
-        for col in ('agent_id BIGINT', 'size TEXT', 'original_free_until DATE', 'returned_on DATE'):
+        for col in ('agent_id BIGINT', 'size TEXT', 'original_free_until DATE', 'returned_on DATE', 'arrived_on DATE',
+                    'fasah_number TEXT', 'free_until_estimated BOOLEAN NOT NULL DEFAULT FALSE'):
             c.execute('ALTER TABLE container_returns ADD COLUMN IF NOT EXISTS ' + col)
         c.execute('''CREATE TABLE IF NOT EXISTS line_tariffs(id BIGSERIAL PRIMARY KEY, agent_id BIGINT NOT NULL, size TEXT NOT NULL,
             tiers_json TEXT NOT NULL, note TEXT, created_by TEXT, created_at TIMESTAMPTZ NOT NULL, UNIQUE(agent_id,size))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS line_free_days(agent_id BIGINT PRIMARY KEY, days INTEGER NOT NULL, created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS free_time_requests(id BIGSERIAL PRIMARY KEY, agent_id BIGINT NOT NULL,
             bill TEXT, containers_json TEXT NOT NULL, days INTEGER NOT NULL, recipient TEXT, subject TEXT, body TEXT,
             status TEXT NOT NULL DEFAULT 'draft', new_until DATE, sent_at TIMESTAMPTZ, decided_at TIMESTAMPTZ,
@@ -166,16 +169,34 @@ def set_tariff(args, actor=''):
         agent = agent_by_name(c, args.get('agent'))
         if not agent:
             return 'لم أتعرف على الوكيل؛ اكتب اسمه كما في صفحة وكلاء الملاحة (مثل Maersk Line، MSC، ONE Line).'
+        free = int(re.sub(r'\D', '', str(args.get('free_days') or '').translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))) or 0)
+        note = ''
+        if free:
+            if not 1 <= free <= 60:
+                return 'أيام السماح بين 1 و60.'
+            c.execute('''INSERT INTO line_free_days(agent_id,days,created_by,created_at) VALUES(%s,%s,%s,%s)
+                ON CONFLICT(agent_id) DO UPDATE SET days=EXCLUDED.days,created_by=EXCLUDED.created_by,created_at=EXCLUDED.created_at''',
+                      (agent['id'], free, actor, utcnow()))
+            note = f"✅ أيام السماح عند {agent['name']}: {free} يوم من تاريخ الوصول (تُستخدم لتقدير آخر يوم مجاني للحاويات المسحوبة من فسح)."
+            if not args.get('tiers'):
+                return note
         size = size_of(args.get('size')) or 'any'
         try:
             tiers = parse_tiers(args.get('tiers'))
         except ValueError as exc:
-            return str(exc)
+            return (note + '\n' if note else '') + str(exc)
         c.execute('''INSERT INTO line_tariffs(agent_id,size,tiers_json,note,created_by,created_at) VALUES(%s,%s,%s,%s,%s,%s)
             ON CONFLICT(agent_id,size) DO UPDATE SET tiers_json=EXCLUDED.tiers_json,note=EXCLUDED.note,created_by=EXCLUDED.created_by,
             created_at=EXCLUDED.created_at''', (agent['id'], size, json.dumps(tiers), str(args.get('note') or '')[:300], actor, utcnow()))
     shown = '، '.join(f"{lo}-{hi}: {rate:,.0f}" if hi else f"{lo}+: {rate:,.0f}" for lo, hi, rate in tiers)
-    return f"✅ تعرفة تأخير {agent['name']} ({'كل المقاسات' if size == 'any' else size + ' قدم'}) بعد المدة المجانية — ريال/يوم: {shown}"
+    return (note + '\n' if note else '') + f"✅ تعرفة تأخير {agent['name']} ({'كل المقاسات' if size == 'any' else size + ' قدم'}) بعد المدة المجانية — ريال/يوم: {shown}"
+
+
+def free_days_for(c, agent_id):
+    if not agent_id:
+        return None
+    row = c.execute('SELECT days FROM line_free_days WHERE agent_id=%s', (agent_id,)).fetchone()
+    return row['days'] if row else None
 
 
 def tiers_for(c, agent_id, size):
@@ -222,6 +243,10 @@ def card_lines(row):
         with db() as c:
             agent = agent_for(c, row)
             lines = [f"• وكيل الملاحة: {agent['name']}" if agent else '• وكيل الملاحة: غير محدد — «وكيل الحاوية ... هو ...»']
+            if row.get('free_until_estimated'):
+                lines.append('• آخر يوم مجاني تقديري (تاريخ الوصول في فسح + أيام السماح للوكيل) — أكده من إشعار الوكيل')
+            if row.get('fasah_number'):
+                lines.append(f"• من بيان فسح {row['fasah_number']}")
             if row.get('original_free_until') and row.get('free_until') != row['original_free_until']:
                 lines.append(f"• مُدّدت المدة المجانية من {row['original_free_until']} إلى {row['free_until']}")
             req = c.execute('''SELECT status FROM free_time_requests WHERE containers_json LIKE %s ORDER BY id DESC LIMIT 1''',
@@ -556,7 +581,9 @@ def tick(today=None, now=None):
             made, problems = prepare_extension(c, fresh, DEFAULT_EXTENSION_DAYS, '', 'مكتب الحاويات')
             for rid, text in made:
                 code = token({'tool': 'agent_email_send', 'kind': 'extension', 'id': rid}) if token else ''
+                est = any(r.get('free_until_estimated') and r['container'] in text for r in fresh)
                 out.append('⏳ المدة المجانية تنتهي قريبًا — جهزت طلب تمديد للوكيل.\n' + text
+                           + ('\n⚠️ آخر يوم مجاني تقديري من فسح؛ تأكد منه قبل الإرسال.' if est else '')
                            + (f'\nللإرسال اكتب: نفذ {code}' if code else '\nأرسله من صفحة مكتب الحاويات.'))
             unknown = [p for p in problems if 'الوكيل غير محدد' in p or 'بريد' in p]
             if unknown:
