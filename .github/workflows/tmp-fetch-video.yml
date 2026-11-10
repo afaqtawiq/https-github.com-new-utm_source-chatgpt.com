@@ -4,15 +4,20 @@ on:
     branches: [tmp/fetch-jeddah-video]
 permissions:
   contents: write
+  actions: read
 jobs:
   fetch:
-    if: "!contains(github.event.head_commit.message, 'videos added')"
+    if: "!contains(github.event.head_commit.message, 'apk added')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Afaaq-Naqliat-Connector
+          run-id: 41607287049
+          github-token: ${{ github.token }}
+          path: tmpapk
       - run: |
-          mkdir -p tmpvid
-          curl -fsSL -o tmpvid/jeddah-vertical.mp4 https://gulf-logistics-ai-v7-production.up.railway.app/media-exports/91d96bc2b1ce1fd2d8f4efb0b2ac08bf111a8216f5703bfc.mp4
-          curl -fsSL -o tmpvid/jeddah-horizontal.mp4 https://gulf-logistics-ai-v7-production.up.railway.app/media-exports/09edb21cbc3261c6b957b3193f3532cc071c825d197b2c81.mp4
+          ls -la tmpapk
           git config user.name bot && git config user.email bot@users.noreply.github.com
-          git add tmpvid && git commit -m "videos added" && git push
+          git add tmpapk && git commit -m "apk added" && git push
