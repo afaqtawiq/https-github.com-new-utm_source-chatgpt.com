@@ -132,6 +132,14 @@ def run_staff_routing(providers, inbound):
         with patch.object(load_vision,'extract',return_value={**chat_fields,'origin':None}):
             inbound('staff-09d-chat-no-route',STAFF,'',attachments=attachments)
         assert 'حفظت رقم صاحب الحمولة' in providers.replies['staff-09d-chat-no-route']['message']
+        # The old phone connector sends unreadable text (no route): the manager is told once per 6 hours how to fix it.
+        from app import naqliat_connector, transport_desk
+        junk=[naqliat_connector._save(naqliat_connector.NaqliatLoad(origin='غير محدد',destination='غير محدد',
+              owner_phone='+966538372324',raw_text=f'vo Ii. I.\n#{i}\n+966 53 837 2324',description='x',capture_method='accessibility'))[0] for i in (1,2)]
+        with patch.object(transport_desk,'ai_extract',return_value={}):
+            first=transport_desk.connector_notice(junk[0]); second=transport_desk.connector_notice(junk[1])
+        assert first and 'نسخة التطبيق' in first and 'أرسل الصورة هنا في واتساب' in first and '538372324' in first, first
+        assert second is None
         # Explicit staff text still registers, without the receiver auto-advancing it.
         inbound('staff-10-text-load',STAFF,'طلب نقل\nمن الرياض إلى جدة\nجوال صاحب الشحنة: '+EXTERNAL+'\nالوزن: 20 طن')
         request=one("SELECT fields FROM zernio_requests WHERE conversation_id=? AND agent='afaaq'",('ci-transport-'+STAFF[1:],))
