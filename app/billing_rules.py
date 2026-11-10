@@ -287,7 +287,7 @@ def statement_page(request: Request, party: str = '', month: str = ''):
     pays = ''.join(f"<tr><td>{e(p['pay_date'])}</td><td>{float(p['amount']):,.2f}</td><td>{e(p['ref'])}</td></tr>" for p in s['payments'])
     body = (f"<h1>كشف حساب {e(s['party'])} — {e(month)}</h1><p>مؤسسة آفاق طويق للتخليص الجمركي — ترخيص 2513</p>"
             '<table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr><th>#</th><th>رقم البيان</th><th>التاريخ</th>'
-            '<th>قيمة الفاتورة</th><th>السجل التجاري</th><th>الضريبة 15%</th><th>المطالبة</th></tr>' + rows +
+            '<th>قيمة الفاتورة</th><th>السجل التجاري</th><th>الضريبة 15%</th><th>' + ('النصيب' if s.get('payable') else 'المطالبة') + '</th></tr>' + rows +
             f"<tr><th colspan=6>الإجمالي</th><th>{s['total']:,.2f}</th></tr></table>"
             '<h2>السداد خلال الشهر</h2><table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr><th>التاريخ</th><th>المبلغ</th><th>المرجع</th></tr>'
             + pays + f"<tr><th>الإجمالي</th><th>{s['paid']:,.2f}</th><th></th></tr></table>"

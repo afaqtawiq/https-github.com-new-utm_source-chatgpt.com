@@ -83,8 +83,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'discharged': {'type': 'string'}, 'size': {'type': 'string'}, 'until': {'type': 'string'}, 'topic': {'type': 'string', 'enum': ['calc', 'operators']}}}},
     {'name': 'detention_exposure', 'description': 'Summary of demurrage/detention exposure per shipping agent: open containers, overdue, ending soon, estimated cost so far and tomorrow, extension requests. e.g. «كم الغرامات علينا» «وضع الحاويات مع الوكلاء».',
      'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
-     'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
+    {'name': 'party_statement', 'description': 'Monthly account statement from recorded declarations: الياسمين and عمران/إقبال = claims; سلة الرحائب = its share. Count, total, payments, net, printable link. month = YYYY-MM; when the manager names no month use the CURRENT month — never ask which month. party empty or «كل الكشوفات» = all three statements. e.g. «كشف عمران لشهر اكتوبر», «ارسل لي كشف حساب سلة الرحائب», «ارسل الكشوفات».',
+     'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': []}},
     {'name': 'fasah_billing', 'description': 'Manager only. Record سلة الرحائب declarations from FASAH in the accounts: the work computer reads the FASAH list (many pages, read-only), then reads the invoice and fees of every unbilled import declaration, and the manager gets ONE statement — invoices from الياسمين go to the الياسمين statement, all others to عمران, plus سلة الرحائب share — with ONE «نفذ» code. Exports are prepared too. Use for «سجل حسابات سلة من فسح» «سجل بيانات سلة الرحائب», and ALSO whenever the manager asks whether سلة الرحائب accounts were recorded/added («هل تم تسجيل حسابات سلة» «هل قاعد تضيف حسابات سلة»): call this tool immediately and report what it started — never answer by asking «هل أبدأ؟». since = YYYY-MM-DD optional (default: first day of last month).',
      'input_schema': {'type': 'object', 'properties': {'since': {'type': 'string'}, 'which': {'type': 'string', 'enum': ['import', 'export', 'both']}}}},
     {'name': 'open_fasah', 'description': 'Manager only. OPEN the FASAH platform on the WORK COMPUTER right now, without asking any question: it opens (or reuses) the FASAH window, waits up to 10 minutes for the manager to sign in himself, then refreshes the live declaration statuses (read-only). Use for «افتح فسح» «افتح لي فسح على الكمبيوتر» «شغل فسح» «ادخل فسح». Optional which=import/export.',
@@ -468,10 +468,13 @@ def tool_customer_care(c, a):
 
 def tool_party_statement(c, a):
     from app import statement_import
+    import datetime as _dt
     m = re.search(r'(\d{4})-(\d{1,2})', str(a.get('month') or ''))
-    if not m:
-        return 'اذكر الشهر، مثل 2026-10.'
-    return statement_import.statement_text(a.get('party') or '', f'{m.group(1)}-{int(m.group(2)):02d}')
+    month = f'{m.group(1)}-{int(m.group(2)):02d}' if m else _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=3))).strftime('%Y-%m')
+    if not statement_import.party_from(a.get('party') or ''):
+        return statement_import.all_statements([month]) or (f'لا توجد بيانات مسجلة في الحسابات لشهر {month}. '
+                                                              'التسجيل يتم بعد قراءة فسح واعتمادك للكشف بكلمة «نفذ».')
+    return statement_import.statement_text(a.get('party') or '', month)
 
 
 def tool_container_line(c, a):
@@ -755,7 +758,16 @@ def execute_confirmed(c, payload):
                 out.append('• ' + billing_rules.record(d, system_user())[2].split('\n')[0] + (' — ' + str(d.get('number')) if d.get('number') else ''))
             except Exception as exc:
                 out.append('• ' + str(d.get('number')) + ': ' + str(exc)[:100])
-        return '✅ ' + str(action.get('label') or 'التسجيل') + '\n' + '\n'.join(out) + '\nالقيود مسودات في صفحة المالية بانتظار ترحيلك.'
+        text = '✅ ' + str(action.get('label') or 'التسجيل') + '\n' + '\n'.join(out) + '\nالقيود مسودات في صفحة المالية بانتظار ترحيلك.'
+        try:  # owner request: after recording, send the account statements right away
+            from app import statement_import
+            months = {str(d.get('date'))[:7] for d in action.get('items') or [] if re.fullmatch(r'\d{4}-\d{2}', str(d.get('date'))[:7])}
+            statements = statement_import.all_statements(sorted(months) or None)
+            if statements:
+                text += '\n\n— كشوفات الحسابات بعد التسجيل —\n' + statements
+        except Exception as exc:
+            print('BILLING_STATEMENTS', type(exc).__name__, str(exc)[:160], flush=True)
+        return text
     if action.get('tool') == 'runner_approve':
         from app import agent_runner
         return agent_runner.decide(action['approval_id'], True, member.get('name') or 'المدير')
