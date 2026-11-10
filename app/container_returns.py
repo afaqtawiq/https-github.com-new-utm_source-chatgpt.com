@@ -111,6 +111,11 @@ def track(args, actor=''):
             c.execute("UPDATE container_returns SET status='delivered' WHERE id=%s", (row['id'],))
             event(c, row['id'], 'delivered', str(fields['delivered_on']), actor)
         row = c.execute('SELECT * FROM container_returns WHERE id=%s', (row['id'],)).fetchone()
+        try:
+            from app import line_desk
+            line_desk.autolink(c, row)
+        except Exception as exc:
+            print('LINE_DESK_AUTOLINK', type(exc).__name__, str(exc)[:120], flush=True)
     missing = [label for key, label in (('free_until', 'آخر يوم مجاني'), ('return_place', 'مكان الإرجاع'),
                                         ('customer_phone', 'رقم العميل'), ('driver_phone', 'رقم السائق')) if not row.get(key)]
     return card(row) + ('\nناقص: ' + '، '.join(missing) if missing else '')
@@ -126,6 +131,8 @@ def card(row):
             lines.append(f'• {label}: {row[key]}' + (when if key == 'free_until' else ''))
     if row.get('daily_cost') and days is not None and days < 0:
         lines.append(f'• التكلفة حتى الآن: {float(row["daily_cost"]) * -days:,.0f} ريال')
+    from app import line_desk
+    lines += line_desk.card_lines(row)
     return '\n'.join(lines)
 
 

@@ -67,6 +67,18 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'event': {'type': 'string', 'enum': ['delivered', 'driver_returned', 'returned']}, 'note': {'type': 'string'}, 'date': {'type': 'string'}}, 'required': ['container', 'event']}},
     {'name': 'containers_status', 'description': 'Open containers not yet returned, with days left / overdue and cost so far. Optional filter (container or customer).',
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
+    {'name': 'container_line', 'description': 'Set the shipping agent (line) and size (20/40/45) of a container or of all open containers of a bill. e.g. «وكيل الحاوية MSCU1234567 هو MSC مقاس 40», «حاويات البوليصة MEDU12345 وكيلها MSC». The agent is usually detected from the container prefix automatically.',
+     'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'bill': {'type': 'string'}, 'agent': {'type': 'string'}, 'size': {'type': 'string'}}}},
+    {'name': 'line_tariff', 'description': 'Record a shipping agent detention/demurrage tariff AFTER the free days, as tiers «days:SAR per day», e.g. «تعرفة MSC 40 قدم: 1-5:150، 6-10:300، 11+:450». size optional (20/40/45; empty = all sizes).',
+     'input_schema': {'type': 'object', 'properties': {'agent': {'type': 'string'}, 'size': {'type': 'string'}, 'tiers': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['agent', 'tiers']}},
+    {'name': 'free_time_extension', 'description': 'Prepare a FREE TIME (demurrage/detention) EXTENSION request email to the shipping agent for containers (or all open containers of a bill). It is sent from the official mailbox only after the manager confirms with the code. days default 7. e.g. «اطلب تمديد المدة المجانية للحاوية MSKU1234567 7 أيام», «اطلب مهلة سماح لحاويات البوليصة ...».',
+     'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'days': {'type': 'string'}, 'reason': {'type': 'string'}}}},
+    {'name': 'free_time_result', 'description': 'Record the agent answer to a free time extension: result approved (with the NEW last free day until, YYYY-MM-DD or dd/mm) or rejected. e.g. «تم تمديد MSKU1234567 حتى 20/11», «رفض الوكيل تمديد حاويات البوليصة ...».',
+     'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'result': {'type': 'string', 'enum': ['approved', 'rejected']}, 'until': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['result']}},
+    {'name': 'detention_claim', 'description': 'Audit a shipping agent detention/demurrage invoice for a container: compares the invoiced amount (and days if given) with the free period incl. extensions, the proven return date and the agent tariff; an overcharge gets an objection email ready to send with the code. e.g. «فاتورة غرامة الحاوية MSKU1234567 من الوكيل 4500 ريال 12 يوم».',
+     'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'amount': {'type': 'string'}, 'days': {'type': 'string'}, 'returned_on': {'type': 'string'}}, 'required': ['container', 'amount']}},
+    {'name': 'detention_exposure', 'description': 'Summary of demurrage/detention exposure per shipping agent: open containers, overdue, ending soon, estimated cost so far and tomorrow, extension requests. e.g. «كم الغرامات علينا» «وضع الحاويات مع الوكلاء».',
+     'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'party_statement', 'description': 'Monthly account statement of a client (عمران/إقبال، الياسمين، سلة الرحائب) from recorded declaration claims: count, total claim, payments, net, printable link. month = YYYY-MM. e.g. «كشف عمران لشهر اكتوبر».',
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party', 'month']}},
     {'name': 'fasah_billing', 'description': 'Manager only. Record سلة الرحائب declarations from FASAH in the accounts: the work computer reads the FASAH list (many pages, read-only), then reads the invoice and fees of every unbilled import declaration, and the manager gets ONE statement — invoices from الياسمين go to the الياسمين statement, all others to عمران, plus سلة الرحائب share — with ONE «نفذ» code. Exports are prepared too. Use for «سجل حسابات سلة من فسح» «سجل بيانات سلة الرحائب». since = YYYY-MM-DD optional (default: first day of last month).',
@@ -458,6 +470,36 @@ def tool_party_statement(c, a):
     return statement_import.statement_text(a.get('party') or '', f'{m.group(1)}-{int(m.group(2)):02d}')
 
 
+def tool_container_line(c, a):
+    from app import line_desk
+    return line_desk.set_container(a, _member().get('name') or '')
+
+
+def tool_line_tariff(c, a):
+    from app import line_desk
+    return line_desk.set_tariff(a, _member().get('name') or '')
+
+
+def tool_free_time_extension(c, a):
+    from app import line_desk
+    return line_desk.request_extension(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
+
+
+def tool_free_time_result(c, a):
+    from app import line_desk
+    return line_desk.record_result(a, _member().get('name') or '')
+
+
+def tool_detention_claim(c, a):
+    from app import line_desk
+    return line_desk.audit_claim(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
+
+
+def tool_detention_exposure(c, a):
+    from app import line_desk
+    return line_desk.exposure_text()
+
+
 def tool_fasah_billing(c, a):
     import datetime as _dt
     from app import agent_runner
@@ -615,7 +657,7 @@ def tool_send_email(c, a):
 
 HANDLERS = {t['name']: globals()['tool_' + t['name']] for t in TOOLS}
 INTERNAL_WRITE = {'add_driver', 'add_shipment', 'add_customer', 'update_declaration', 'approve_prospects'}
-EXTERNAL = {'send_whatsapp', 'send_email', 'add_employee', 'remove_employee'}
+EXTERNAL = {'send_whatsapp', 'send_email', 'add_employee', 'remove_employee', 'agent_email_send'}
 
 
 def execute_confirmed(c, payload):
@@ -686,6 +728,9 @@ def execute_confirmed(c, payload):
     if action.get('tool') == 'broadcast_load':
         from app import load_broadcast
         return load_broadcast.start(action, member.get('name') or '')
+    if action.get('tool') == 'agent_email_send':
+        from app import line_desk
+        return line_desk.send(action['kind'], action['id'], member.get('name') or '')
     if action.get('tool') == 'send_email':
         from app import spacemail
         user = c.execute('''SELECT s.user_id FROM spacemail_connections s JOIN users u ON u.id=s.user_id
