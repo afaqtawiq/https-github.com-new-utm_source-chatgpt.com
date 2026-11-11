@@ -256,7 +256,7 @@ def statement(party_text, month):
     start = dt.date(year, mon, 1)
     end = dt.date(year + (mon == 12), mon % 12 + 1, 1)
     with db() as c:
-        rows = c.execute('''SELECT number,kind,invoice_value,supplier,items_json,status,COALESCE(decl_date,created_at::date) d
+        rows = c.execute('''SELECT number,kind,invoice_no,invoice_value,supplier,items_json,status,COALESCE(decl_date,created_at::date) d
             FROM billing_declarations WHERE status IN ('drafted','recording','failed') AND COALESCE(decl_date,created_at::date)>=%s
             AND COALESCE(decl_date,created_at::date)<%s ORDER BY d,number''', (start, end)).fetchall()
         pays = c.execute('SELECT pay_date,amount,ref FROM billing_payments WHERE party=%s ORDER BY pay_date', (party,)).fetchall()
@@ -268,7 +268,10 @@ def statement(party_text, month):
             if billing_rules.fold(it.get('party')) == billing_rules.fold(party) and it.get('kind') == want:
                 amount = float(it['amount'])
                 comps = it.get('components') or {}
+                fees = sum(float(comps.get(k) or 0) for k in ('customs_duty', 'customs_other'))
                 lines.append({'number': r['number'], 'date': str(r['d']), 'invoice': r['invoice_value'], 'amount': amount,
+                              'invoice_no': r.get('invoice_no') or '', 'fees': fees or '', 'clearance': comps.get('clearance'),
+                              'saber': comps.get('saber'), 'zakat': comps.get('zakat'),
                               'registry': comps.get('registry'), 'tax': comps.get('tax')})
                 total += amount
     with db() as c:
@@ -285,6 +288,12 @@ def statement(party_text, month):
             'approved': bool(approved), 'rule_total': rule_total, 'payable': want == 'payable'}
 
 
+def statement_link(party, month):
+    # The party name has a space (سلة الرحائب): encode it or WhatsApp cuts the link and the month is lost.
+    from urllib.parse import quote
+    return f'https://gulf-logistics-ai-v7-production.up.railway.app/billing/statement?month={month}&party={quote(party)}'
+
+
 def statement_text(party_text, month):
     s = statement(party_text, month)
     if not s['lines']:
@@ -294,13 +303,13 @@ def statement_text(party_text, month):
         return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}\n• نصيب {s['party']} المستحق: {s['total']:,.2f} ريال"
                 f"\n• المدفوع لها خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
                 f"\n• الباقي لها عن الشهر: {s['total'] - s['paid']:,.2f} ريال"
-                f"\nالكشف التفصيلي للطباعة: https://gulf-logistics-ai-v7-production.up.railway.app/billing/statement?party={s['party']}&month={month}"
+                f"\nالكشف التفصيلي للطباعة: {statement_link(s['party'], month)}"
                 '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها.')
     return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}\n• إجمالي المطالبة: {s['total']:,.2f} ريال"
             f"\n• السداد خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
             f"\n• صافي مطالبة الشهر بعد سداد الشهر: {s['total'] - s['paid']:,.2f} ريال"
             f"\n(كل السدادات المسجلة: {s['all_paid']:,.2f} ريال)"
-            f"\nالكشف التفصيلي للطباعة: https://gulf-logistics-ai-v7-production.up.railway.app/billing/statement?party={s['party']}&month={month}"
+            f"\nالكشف التفصيلي للطباعة: {statement_link(s['party'], month)}"
             + ('\nالإجمالي من الكشف المعتمد كما رُفع.' + (f" (حساب القاعدة: {s['rule_total']:,.2f})" if abs(s['rule_total'] - s['total']) > 1 else '')
                if s['approved'] else '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها؛ راجعها مع كشفك.'))
 
