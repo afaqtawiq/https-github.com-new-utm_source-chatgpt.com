@@ -488,6 +488,61 @@ class Task:
         self.step(f'قرأت {len(rows)} بيان (قراءة فقط)')
         return self.upload(path, page.url)
 
+    DETAIL_SECTIONS = ('معلومات البيان الأساسية', 'الفواتير', 'تفاصيل فاتورة البيان الجمركي',
+                       'الفواتير المصدرة على البيان الجمركي من جميع الجهات', 'الأصناف')
+
+    def open_details(self, page, row, number):
+        """Click «إظهار التفاصيل» of one row (read-only). Some rows keep it inside the row's actions menu."""
+        target = row.get_by_text('إظهار التفاصيل')
+        for attempt in range(4):
+            try:
+                row.scroll_into_view_if_needed(timeout=5000)
+                if attempt == 1:  # hidden inside the row menu: open the menu first
+                    for toggle in (row.get_by_text('الإجراءات', exact=True), row.locator('[aria-haspopup], .dropdown-toggle, [data-toggle="dropdown"]')):
+                        if toggle.count():
+                            toggle.first.click(timeout=4000)
+                            self.wait(page, 1)
+                            break
+                if attempt == 3:  # still hidden: fire the same click on the element itself
+                    target.first.dispatch_event('click')
+                else:
+                    target.first.click(timeout=8000)
+                self.wait(page, 4)
+                if page.get_by_text('تفاصيل الطلب', exact=True).count() or page.get_by_text('ملخص الطلب', exact=True).count():
+                    return
+            except Stop:
+                raise
+            except Exception:
+                page.keyboard.press('Escape')
+                self.wait(page, 2)
+        try:
+            seen = ' '.join(row.inner_text().split())[:200] + ' | ' + row.inner_html()[:500]
+        except Exception:
+            seen = ''
+        raise ValueError('تعذر فتح تفاصيل البيان ' + number + ': ' + seen)
+
+    def expand_details(self, page):
+        """The details screen shows collapsed sections; open the invoice sections so their text can be read (read-only).
+        Only these exact section titles are clicked — never «تقديم الطلب», «إلغاء البيان» or «إنشاء نسخة»."""
+        before = len(page.locator('body').inner_text())
+        scope = page  # stay inside the details window: the site menu may have links with the same words
+        for css in ('[role="dialog"]', '.modal-content', '.modal', 'main'):
+            box = page.locator(css).filter(has_text='معلومات البيان الأساسية')
+            if box.count():
+                scope = box.last
+                break
+        for title in self.DETAIL_SECTIONS:
+            try:
+                head = scope.get_by_text(title, exact=True)
+                if head.count() and head.first.is_visible():
+                    head.first.click(timeout=5000)
+                    self.wait(page, 2)
+            except Stop:
+                raise
+            except Exception:
+                continue
+        return len(page.locator('body').inner_text()) - before
+
     def do_fasah_details(self):
         """Open ONE declaration's details and save its text (read-only), for billing."""
         which, number = self.params.get('which', 'import'), str(self.params.get('number') or '')
@@ -501,25 +556,14 @@ class Task:
                 break
             row = page.locator('tr', has_text=number)
             if row.count():
-                for attempt in range(3):  # the button is sometimes covered while the list is still loading
-                    try:
-                        row.first.scroll_into_view_if_needed(timeout=5000)
-                        row.first.get_by_text('إظهار التفاصيل').first.click(timeout=8000)
-                        break
-                    except Stop:
-                        raise
-                    except Exception:
-                        if attempt == 2:
-                            raise
-                        page.keyboard.press('Escape')
-                        self.wait(page, 3)
-                self.wait(page, 4)
+                self.open_details(page, row.last, number)  # .last = the innermost row when tables are nested
                 tab = page.get_by_text('تفاصيل الطلب', exact=True)
                 if tab.count():
                     tab.first.click(timeout=8000)
                     self.wait(page, 4)
+                grown = self.expand_details(page)
                 text = page.locator('body').inner_text()
-                self.step('فتحت تفاصيل البيان ' + number, page=page)
+                self.step(f'فتحت تفاصيل البيان {number} وأقسام الفواتير (+{max(grown, 0)} حرف)', page=page)
                 close = page.get_by_text('إغلاق', exact=True)
                 if close.count():
                     close.first.click(timeout=5000)
