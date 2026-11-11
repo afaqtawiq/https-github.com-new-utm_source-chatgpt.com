@@ -97,6 +97,23 @@ def agent_by_name(c, text):
     return hits[0] if len(hits) == 1 else None
 
 
+def agent_from_document(c, line_name='', bill=''):
+    """The agent named on a shipping document: by name, by known carrier markers (Mediterranean Shipping → MSC), or by
+    the bill prefix (MEDU…). None when nothing matches."""
+    found = agent_by_name(c, line_name)
+    if found:
+        return found
+    try:
+        from app.shipping_agents import identify_agent
+        agent, score, _ = identify_agent(str(line_name or ''))
+        if agent and score >= 0.6:
+            return {'id': agent['id'], 'name': agent['name']}
+    except Exception as exc:
+        print('LINE_DESK_IDENTIFY', type(exc).__name__, str(exc)[:120], flush=True)
+    name = PREFIX_AGENT.get(re.sub(r'[^A-Z]', '', str(bill or '').upper())[:4])
+    return agent_by_name(c, name) if name else None
+
+
 def agent_for(c, row):
     if row.get('agent_id'):
         found = c.execute('SELECT id,name FROM shipping_agents WHERE id=%s', (row['agent_id'],)).fetchone() if _has(c, 'shipping_agents') else None

@@ -40,7 +40,33 @@ def run():
             patch('app.staff_intake.audit', side_effect=lambda c, p, s, reply, cmd: reply):
         with db() as c:
             out = asyncio.run(load_vision.handle_image(c, payload, '966500000001', 0))
-    assert 'CMAU2222222' in out and 'متابعة الإرجاع' in out, out
+    assert 'CMAU2222222' in out and 'مكتب الحاويات' in out, out
+    # A bill of lading like the owner's (11 Nov 2026): leasing-prefix containers, carrier written in full, no dates.
+    from app import line_desk
+    bl = {'container_numbers': ['CAIU6195811', 'MEDU6178435', 'TGBU3513450'], 'bill_no': 'MEDUAIV05291',
+          'shipping_line': 'Mediterranean Shipping Company S.A. (MSC)', 'vessel': 'MSC MOSS III - YM641A',
+          'consignee': 'Imar Overseas Saudi Arabia Co. W.L.L', 'container_size': '40'}
+    out = shipping_docs.register(bl)
+    assert 'سجلت 3 حاوية جديدة' in out and 'الوكيل الملاحي: MSC' in out and 'sau-ex-cs.localwest@msc.com' in out, out
+    assert 'أيام السماح MSC 14' in out and 'MEDUAIV05291' in out, out
+    with db() as c:
+        msc = c.execute("SELECT id FROM shipping_agents WHERE name='MSC'").fetchone()['id']
+        got = c.execute("SELECT agent_id,size FROM container_returns WHERE container IN ('CAIU6195811','TGBU3513450')").fetchall()
+    assert all(r['agent_id'] == msc and r['size'] == '40' for r in got), got
+    # Same document again → no duplicate wording; with the agent's free days and an arrival date the day is estimated.
+    assert 'مسجلة سابقًا' in shipping_docs.register(bl)
+    line_desk.set_tariff({'agent': 'MSC', 'free_days': '14'})
+    out = shipping_docs.register(dict(bl, eta='2026-11-12'))
+    assert '2026-11-25' in out and 'تقديري' in out and 'أرضيات الميناء: 14/11' in out, out
+    from app import command_agent
+    with db() as c:
+        done = command_agent.tool_track_container(c, {'bill': 'MEDUAIV05291', 'free_until': '2026-11-25'})
+    assert 'حدّثت 3 حاوية' in done, done
+    with db() as c:
+        assert not c.execute("SELECT free_until_estimated e FROM container_returns WHERE container='TGBU3513450'").fetchone()['e']
+        c.execute("UPDATE container_returns SET free_until_estimated=TRUE WHERE bill='MEDUAIV05291'")
+        r = c.execute("SELECT free_until,free_until_estimated,arrived_on FROM container_returns WHERE container='CAIU6195811'").fetchone()
+    assert r['free_until'] == dt.date(2026, 11, 25) and r['free_until_estimated'] and r['arrived_on'] == dt.date(2026, 11, 12)
 
 
 def main():
