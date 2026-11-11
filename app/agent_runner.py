@@ -605,7 +605,8 @@ def after_fasah(tid):
             if params.get('track'):
                 try:
                     from app import fasah_containers
-                    fasah_containers.auto_from_list(rows)
+                    if params.get('which', 'import') == 'import':  # export numbers were queued as import reads and never found
+                        fasah_containers.auto_from_list(rows)
                 except Exception as exc:
                     print('FASAH_CONTAINERS_AUTO', tid, type(exc).__name__, str(exc)[:200], flush=True)
                 try:
