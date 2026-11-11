@@ -61,8 +61,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'driver_phone': {'type': 'string'}}, 'required': ['ref']}},
     {'name': 'load_acceptances', 'description': 'Which drivers accepted a broadcast load (e.g. «مين وافق على AFT-7»).',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}, 'required': ['ref']}},
-    {'name': 'track_container', 'description': 'Register or update a container to follow until it is RETURNED EMPTY: last free day (free_until, YYYY-MM-DD), delivery date, return place (depot/yard), customer and driver phones, bill, confirmed daily cost. test=true for a trial container. e.g. «سجل الحاوية MSKU1234567 العميل الحياة آخر يوم مجاني 10/11 الإرجاع ساحة جدة سائق 0551234567».',
-     'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'customer': {'type': 'string'}, 'customer_phone': {'type': 'string'}, 'driver_phone': {'type': 'string'}, 'bill': {'type': 'string'}, 'free_until': {'type': 'string'}, 'delivered_on': {'type': 'string'}, 'return_place': {'type': 'string'}, 'daily_cost': {'type': 'string'}, 'test': {'type': 'boolean'}}, 'required': ['container']}},
+    {'name': 'track_container', 'description': 'Register or update a container to follow until it is RETURNED EMPTY (or, with bill and no container, update ALL open containers of that bill, e.g. «آخر يوم مجاني لحاويات البوليصة MEDUAIV05291 15/11»): last free day (free_until, YYYY-MM-DD), delivery date, return place (depot/yard), customer and driver phones, bill, confirmed daily cost. test=true for a trial container. e.g. «سجل الحاوية MSKU1234567 العميل الحياة آخر يوم مجاني 10/11 الإرجاع ساحة جدة سائق 0551234567».',
+     'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'customer': {'type': 'string'}, 'customer_phone': {'type': 'string'}, 'driver_phone': {'type': 'string'}, 'bill': {'type': 'string'}, 'free_until': {'type': 'string'}, 'delivered_on': {'type': 'string'}, 'return_place': {'type': 'string'}, 'daily_cost': {'type': 'string'}, 'test': {'type': 'boolean'}}, 'required': []}},
     {'name': 'container_update', 'description': 'Container status: delivered (to customer), driver_returned (driver SAYS it was returned — stays open), returned (ONLY with proof: EIR/receipt number or who confirmed, put it in note).',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'event': {'type': 'string', 'enum': ['delivered', 'driver_returned', 'returned']}, 'note': {'type': 'string'}, 'date': {'type': 'string'}}, 'required': ['container', 'event']}},
     {'name': 'containers_status', 'description': 'Open containers not yet returned, with days left / overdue and cost so far. Optional filter (container or customer).',
@@ -378,6 +378,16 @@ def tool_load_acceptances(c, a):
 
 def tool_track_container(c, a):
     from app import container_returns
+    if not container_returns.number(a.get('container')) and str(a.get('bill') or '').strip():
+        # «آخر يوم مجاني لحاويات البوليصة X 15/11»: apply to every open container of that bill
+        rows = c.execute("SELECT container FROM container_returns WHERE bill=%s AND status IN ('open','delivered','driver_reported')",
+                         (str(a['bill']).strip(),)).fetchall()
+        if not rows:
+            return 'لا توجد حاويات مفتوحة مسجلة على هذه البوليصة.'
+        for r in rows:
+            container_returns.track(dict(a, container=r['container']), _member().get('name') or '')
+        return (f"✅ حدّثت {len(rows)} حاوية على البوليصة {a['bill']}: " + '، '.join(r['container'] for r in rows)
+                + (f"\nآخر يوم مجاني: {container_returns.date(a.get('free_until'))}" if a.get('free_until') else ''))
     return container_returns.track(a, _member().get('name') or '')
 
 
