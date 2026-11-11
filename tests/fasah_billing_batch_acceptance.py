@@ -79,6 +79,48 @@ def run():
     assert 'لا توجد بيانات مسجلة' in statement_import.statement_text('سلة', '2025-01')
     with patch('app.statement_import.all_statements', return_value='ALL') as every:
         assert command_agent.tool_party_statement(None, {}) == 'ALL' and every.call_args[0][0][0].count('-') == 1
+    # 3c) The printable الياسمين statement shows every component of the claim; the WhatsApp link survives the space in «سلة الرحائب».
+    with patch.object(billing_rules, 'admin_session', return_value={}):
+        page = billing_rules.statement_page(None, 'الياسمين', '2026-11').body.decode()
+    for head in ('رسوم جمركية', 'تخليص', 'سابر', 'زكاة', 'سجل تجاري', 'ضريبة القيمة المضافة', 'رقم الفاتورة'):
+        assert head in page, head
+    assert '1,450.00' in page and '300.00' in page and '250.00' in page and '500.00' in page and 'INV0' in page, page[:600]
+    link = statement_import.statement_link('سلة الرحائب', '2026-11')
+    assert ' ' not in link and link.index('month=2026-11') < link.index('party=')
+    # 3d) A failed details read is retried twice before it is reported in the batch; the reason reaches the summary.
+    from fastapi.testclient import TestClient
+    from app.bootstrap import app
+    client = TestClient(app)
+    with db() as c:
+        c.execute("UPDATE runner_tasks SET status='done'")
+        did = c.execute("INSERT INTO runner_devices(name,token_hash,created_at) VALUES('pc',%s,NOW()) RETURNING id",
+                        (agent_runner.token_hash('tok'),)).fetchone()['id']
+        bid = c.execute('INSERT INTO fasah_billing_batches(expected,created_at) VALUES(1,NOW()) RETURNING id').fetchone()['id']
+        tid = c.execute("""INSERT INTO runner_tasks(kind,params_json,status,device_id,created_by,created_at,started_at)
+            VALUES('fasah_details',%s,'running',%s,'تلقائي',NOW(),NOW()) RETURNING id""",
+                        (json.dumps({'which': 'import', 'number': '555001', 'batch': bid}), did)).fetchone()['id']
+    seen = []
+    with patch.object(agent_runner, 'notify', side_effect=seen.append):
+        for attempt in range(3):
+            r = client.post(f'/api/runner/tasks/{tid}/finish', json={'status': 'failed', 'result': {'error': 'لم أجد البيان 555001 في القائمة'}},
+                            headers={'X-Runner-Token': 'tok'})
+            assert r.status_code == 200, r.text
+            with db() as c:
+                nxt = c.execute("SELECT id,params_json FROM runner_tasks WHERE status='queued' AND kind='fasah_details' ORDER BY id DESC LIMIT 1").fetchone()
+            if attempt < 2:
+                assert nxt and json.loads(nxt['params_json'])['retry'] == attempt + 1, (attempt, nxt)
+                with db() as c:
+                    c.execute("UPDATE runner_tasks SET status='running',device_id=%s,started_at=NOW() WHERE id=%s", (did, nxt['id']))
+                tid = nxt['id']
+            else:
+                assert not nxt
+        import time
+        for _ in range(40):
+            if seen:
+                break
+            time.sleep(0.1)
+    assert seen and 'لم أجد البيان 555001' in seen[-1], seen
+    assert any('555001' in line and 'لم أجد البيان' in line for line in agent_runner.recent_failures())
     # 4) Owner rule: every successful FASAH status read prepares سلة accounts by itself — no command, no question.
     import datetime as dt
     with db() as c:

@@ -282,13 +282,29 @@ def statement_page(request: Request, party: str = '', month: str = ''):
         return HTMLResponse('اذكر الشهر بصيغة 2026-10', status_code=400)
     s = statement_import.statement(party, month)
     e = lambda v: _h.escape(str(v if v is not None else ''))
-    rows = ''.join(f"<tr><td>{i + 1}</td><td>{e(l['number'])}</td><td>{e(l['date'])}</td><td>{e(l['invoice'])}</td>"
-                   f"<td>{e(l['registry'])}</td><td>{e(l['tax'])}</td><td>{l['amount']:,.2f}</td></tr>" for i, l in enumerate(s['lines']))
+    def shown(v):
+        try:
+            return float(str(v).replace(',', '')) != 0
+        except (TypeError, ValueError):
+            return bool(v)
+    # Every component of the claim is a column (owner sheet: fees, clearance, Saber, zakat, registry, VAT); empty ones are hidden.
+    cols = [(k, t) for k, t in (('invoice_no', 'رقم الفاتورة'), ('invoice', 'قيمة الفاتورة'), ('fees', 'رسوم جمركية'), ('clearance', 'تخليص'),
+                                ('saber', 'سابر'), ('zakat', 'زكاة'), ('registry', 'سجل تجاري'), ('tax', 'ضريبة القيمة المضافة 15%'))
+            if any(shown(l.get(k)) for l in s['lines'])]
+
+    def cell(v):
+        try:
+            return f"{float(str(v).replace(',', '')):,.2f}"
+        except (TypeError, ValueError):
+            return e(v)
+    rows = ''.join(f"<tr><td>{i + 1}</td><td>{e(l['number'])}</td><td>{e(l['date'])}</td>"
+                   + ''.join(f"<td>{e(l.get(k)) if k == 'invoice_no' else (cell(l.get(k)) if shown(l.get(k)) else '')}</td>" for k, _ in cols)
+                   + f"<td>{l['amount']:,.2f}</td></tr>" for i, l in enumerate(s['lines']))
     pays = ''.join(f"<tr><td>{e(p['pay_date'])}</td><td>{float(p['amount']):,.2f}</td><td>{e(p['ref'])}</td></tr>" for p in s['payments'])
     body = (f"<h1>كشف حساب {e(s['party'])} — {e(month)}</h1><p>مؤسسة آفاق طويق للتخليص الجمركي — ترخيص 2513</p>"
             '<table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr><th>#</th><th>رقم البيان</th><th>التاريخ</th>'
-            '<th>قيمة الفاتورة</th><th>السجل التجاري</th><th>الضريبة 15%</th><th>' + ('النصيب' if s.get('payable') else 'المطالبة') + '</th></tr>' + rows +
-            f"<tr><th colspan=6>الإجمالي</th><th>{s['total']:,.2f}</th></tr></table>"
+            + ''.join(f'<th>{t}</th>' for _, t in cols) + '<th>' + ('النصيب' if s.get('payable') else 'الإجمالي') + '</th></tr>' + rows +
+            f"<tr><th colspan={3 + len(cols)}>الإجمالي</th><th>{s['total']:,.2f}</th></tr></table>"
             '<h2>السداد خلال الشهر</h2><table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr><th>التاريخ</th><th>المبلغ</th><th>المرجع</th></tr>'
             + pays + f"<tr><th>الإجمالي</th><th>{s['paid']:,.2f}</th><th></th></tr></table>"
             f"<h2>الصافي المستحق عن الشهر: {s['total'] - s['paid']:,.2f} ريال</h2>"
