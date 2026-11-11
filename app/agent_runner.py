@@ -161,7 +161,20 @@ def register_worker(app):
     async def start():
         app.state.runner_offline_worker = asyncio.create_task(loop())
         try:
-            for line in recent_failures():
+            # One-off diagnosis (11 Nov 2026): what the FASAH details screen text looks like when no invoice value is found.
+            with db() as c:
+                seen = set()
+                for f in c.execute("""SELECT f.task_id,f.size,f.data FROM runner_files f JOIN runner_tasks t ON t.id=f.task_id
+                        WHERE t.kind='fasah_details' AND f.name LIKE 'fasah-%%.txt' ORDER BY f.id DESC LIMIT 12""").fetchall():
+                    bucket = f['size'] // 300
+                    if bucket in seen or len(seen) >= 3:
+                        continue
+                    seen.add(bucket)
+                    print('RUNNER_DETAILS_SAMPLE', f['task_id'], f['size'], repr(bytes(f['data']).decode('utf-8', 'replace')[:1500]), flush=True)
+        except Exception as exc:
+            print('RUNNER_DETAILS_SAMPLE', type(exc).__name__, str(exc)[:120], flush=True)
+        try:
+            for line in recent_failures(3):
                 print('RUNNER_RECENT_FAILURE', line, flush=True)
         except Exception as exc:
             print('RUNNER_RECENT_FAILURE', type(exc).__name__, str(exc)[:120], flush=True)

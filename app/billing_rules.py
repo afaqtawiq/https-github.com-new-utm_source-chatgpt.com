@@ -288,7 +288,7 @@ def statement_page(request: Request, party: str = '', month: str = ''):
         except (TypeError, ValueError):
             return bool(v)
     # Every component of the claim is a column (owner sheet: fees, clearance, Saber, zakat, registry, VAT); empty ones are hidden.
-    cols = [(k, t) for k, t in (('invoice_no', 'رقم الفاتورة'), ('invoice', 'قيمة الفاتورة'), ('fees', 'رسوم جمركية'), ('clearance', 'تخليص'),
+    cols = [(k, t) for k, t in (('type', 'نوع البيان'), ('invoice_no', 'رقم الفاتورة'), ('invoice', 'قيمة الفاتورة'), ('fees', 'رسوم جمركية'), ('clearance', 'تخليص'),
                                 ('saber', 'سابر'), ('zakat', 'زكاة'), ('registry', 'سجل تجاري'), ('tax', 'ضريبة القيمة المضافة 15%'))
             if any(shown(l.get(k)) for l in s['lines'])]
 
@@ -298,7 +298,7 @@ def statement_page(request: Request, party: str = '', month: str = ''):
         except (TypeError, ValueError):
             return e(v)
     rows = ''.join(f"<tr><td>{i + 1}</td><td>{e(l['number'])}</td><td>{e(l['date'])}</td>"
-                   + ''.join(f"<td>{e(l.get(k)) if k == 'invoice_no' else (cell(l.get(k)) if shown(l.get(k)) else '')}</td>" for k, _ in cols)
+                   + ''.join(f"<td>{e(l.get(k)) if k in ('invoice_no', 'type') else (cell(l.get(k)) if shown(l.get(k)) else '')}</td>" for k, _ in cols)
                    + f"<td>{l['amount']:,.2f}</td></tr>" for i, l in enumerate(s['lines']))
     pays = ''.join(f"<tr><td>{e(p['pay_date'])}</td><td>{float(p['amount']):,.2f}</td><td>{e(p['ref'])}</td></tr>" for p in s['payments'])
     body = (f"<h1>كشف حساب {e(s['party'])} — {e(month)}</h1><p>مؤسسة آفاق طويق للتخليص الجمركي — ترخيص 2513</p>"

@@ -82,7 +82,7 @@ def run():
     # 3c) The printable الياسمين statement shows every component of the claim; the WhatsApp link survives the space in «سلة الرحائب».
     with patch.object(billing_rules, 'admin_session', return_value={}):
         page = billing_rules.statement_page(None, 'الياسمين', '2026-11').body.decode()
-    for head in ('رسوم جمركية', 'تخليص', 'سابر', 'زكاة', 'سجل تجاري', 'ضريبة القيمة المضافة', 'رقم الفاتورة'):
+    for head in ('نوع البيان', 'استيراد', 'رسوم جمركية', 'تخليص', 'سابر', 'زكاة', 'سجل تجاري', 'ضريبة القيمة المضافة', 'رقم الفاتورة'):
         assert head in page, head
     assert '1,450.00' in page and '300.00' in page and '250.00' in page and '500.00' in page and 'INV0' in page, page[:600]
     link = statement_import.statement_link('سلة الرحائب', '2026-11')
