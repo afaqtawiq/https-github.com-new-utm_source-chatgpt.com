@@ -270,6 +270,7 @@ def statement(party_text, month):
                 comps = it.get('components') or {}
                 fees = sum(float(comps.get(k) or 0) for k in ('customs_duty', 'customs_other'))
                 lines.append({'number': r['number'], 'date': str(r['d']), 'invoice': r['invoice_value'], 'amount': amount,
+                              'type': 'تصدير / إعادة تصدير' if r['kind'] == 'export' else 'استيراد',
                               'invoice_no': r.get('invoice_no') or '', 'fees': fees or '', 'clearance': comps.get('clearance'),
                               'saber': comps.get('saber'), 'zakat': comps.get('zakat'),
                               'registry': comps.get('registry'), 'tax': comps.get('tax')})
@@ -299,13 +300,15 @@ def statement_text(party_text, month):
     if not s['lines']:
         return (f"لا توجد بيانات مسجلة في الحسابات لـ{s['party']} في {month}. "
                 'التسجيل يتم بعد قراءة فسح واعتمادك للكشف بكلمة «نفذ».')
+    imports = sum(1 for l in s['lines'] if l.get('type') == 'استيراد')
+    kinds = f" (استيراد {imports}، تصدير/إعادة تصدير {len(s['lines']) - imports})" if any(l.get('type') for l in s['lines']) else ''
     if s.get('payable'):
-        return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}\n• نصيب {s['party']} المستحق: {s['total']:,.2f} ريال"
+        return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}{kinds}\n• نصيب {s['party']} المستحق: {s['total']:,.2f} ريال"
                 f"\n• المدفوع لها خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
                 f"\n• الباقي لها عن الشهر: {s['total'] - s['paid']:,.2f} ريال"
                 f"\nالكشف التفصيلي للطباعة: {statement_link(s['party'], month)}"
                 '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها.')
-    return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}\n• إجمالي المطالبة: {s['total']:,.2f} ريال"
+    return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}{kinds}\n• إجمالي المطالبة: {s['total']:,.2f} ريال"
             f"\n• السداد خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
             f"\n• صافي مطالبة الشهر بعد سداد الشهر: {s['total'] - s['paid']:,.2f} ريال"
             f"\n(كل السدادات المسجلة: {s['all_paid']:,.2f} ريال)"
