@@ -78,15 +78,25 @@ class Api:
     def __init__(self, base, token):
         self.base, self.headers = base.rstrip('/'), {'X-Runner-Token': token}
 
+    def _send(self, method, path, payload, timeout, tries):
+        # The system can answer slowly while it reads a declaration: wait longer and try again instead of failing the task.
+        last = None
+        for attempt in range(tries):
+            try:
+                r = requests.request(method, self.base + path, json=payload, headers=self.headers, timeout=timeout)
+                r.raise_for_status()
+                return r.json()
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last = exc
+                time.sleep(3 + 4 * attempt)
+        raise last
+
     def post(self, path, payload=None):
-        r = requests.post(self.base + path, json=payload or {}, headers=self.headers, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        # «claim» is not repeated here (a lost answer could leave a claimed task behind); the main loop asks again.
+        return self._send('POST', path, payload or {}, 90, 1 if path.endswith('/claim') else 3)
 
     def get(self, path):
-        r = requests.get(self.base + path, headers=self.headers, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        return self._send('GET', path, None, 60, 3)
 
 
 # ---------- checks ----------
@@ -362,9 +372,18 @@ class Task:
                 decline.first.click(timeout=5000)
         except Exception:
             pass
-        for _ in range(8):  # the home page keeps loading for a while after sign-in
+        for attempt in range(10):  # the home page keeps loading for a while after sign-in
             self.poll()
             try:
+                if attempt in (3, 6):
+                    # Left on a details window or another screen by the previous task: close it and reload FASAH home.
+                    for name in ('إغلاق', 'اغلاق'):
+                        close = page.get_by_text(name, exact=True)
+                        if close.count() and close.first.is_visible():
+                            close.first.click(timeout=5000)
+                    page.keyboard.press('Escape')
+                    page.goto(FASAH, wait_until='domcontentloaded', timeout=60000)
+                    self.wait(page, 5)
                 link = page.get_by_role('link', name=label, exact=True)
                 if not (link.count() and link.first.is_visible()):
                     menu = page.get_by_text('البيان الجمركي و الفسح', exact=True)
@@ -477,12 +496,23 @@ class Task:
         page = self.fasah_list(which)
         if self.params.get('party'):
             self.filter_party(page, self.params['party'], which)
-        for p in range(1, 11):
+        for p in range(1, 31):
             if p > 1 and not self.next_page(page, p):
                 break
             row = page.locator('tr', has_text=number)
             if row.count():
-                row.first.get_by_text('إظهار التفاصيل').first.click(timeout=8000)
+                for attempt in range(3):  # the button is sometimes covered while the list is still loading
+                    try:
+                        row.first.scroll_into_view_if_needed(timeout=5000)
+                        row.first.get_by_text('إظهار التفاصيل').first.click(timeout=8000)
+                        break
+                    except Stop:
+                        raise
+                    except Exception:
+                        if attempt == 2:
+                            raise
+                        page.keyboard.press('Escape')
+                        self.wait(page, 3)
                 self.wait(page, 4)
                 tab = page.get_by_text('تفاصيل الطلب', exact=True)
                 if tab.count():
@@ -502,7 +532,7 @@ class Task:
     def find_row(self, page, number, which):
         if self.params.get('party'):
             self.filter_party(page, self.params['party'], which)
-        for p in range(1, 11):
+        for p in range(1, 31):
             if p > 1 and not self.next_page(page, p):
                 break
             row = page.locator('tr', has_text=number)

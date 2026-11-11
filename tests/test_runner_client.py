@@ -42,3 +42,26 @@ def test_token_lives_in_vault_not_files(tmp_path, monkeypatch):
 def test_secret_fields_and_sensitive_words():
     assert rn.SECRET_FIELD.search('كلمة المرور') and rn.SECRET_FIELD.search('OTP code') and rn.SECRET_FIELD.search('رقم البطاقة')
     assert not rn.SECRET_FIELD.search('اسم العميل')
+
+
+def test_api_retries_slow_system_but_never_repeats_claim(monkeypatch):
+    calls = []
+
+    class Ok:
+        def raise_for_status(self): pass
+        def json(self): return {'ok': True}
+
+    def fake(method, url, json=None, headers=None, timeout=None):
+        calls.append((method, url, timeout))
+        if len(calls) < 3 and not url.endswith('/claim'):
+            raise rn.requests.Timeout('slow')
+        if url.endswith('/claim'):
+            raise rn.requests.Timeout('slow')
+        return Ok()
+    monkeypatch.setattr(rn.requests, 'request', fake)
+    monkeypatch.setattr(rn.time, 'sleep', lambda s: None)
+    api = rn.Api('https://x.example', 't')
+    assert api.post('/api/runner/tasks/1/step', {'text': 'a'}) == {'ok': True} and len(calls) == 3 and calls[0][2] == 90
+    with pytest.raises(rn.requests.Timeout):
+        api.post('/api/runner/claim')
+    assert len(calls) == 4
