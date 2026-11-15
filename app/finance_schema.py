@@ -15,7 +15,7 @@ def init_storage():
         c.execute('''CREATE TABLE IF NOT EXISTS finance_documents(
             id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES finance_parties(id),
             counterparty_id BIGINT NOT NULL REFERENCES finance_parties(id),
-            kind TEXT NOT NULL CHECK(kind IN ('opening_receivable','opening_payable','claim','payable','expense','receipt','payment','receivable_adjustment','payable_adjustment')),
+            kind TEXT NOT NULL CHECK(kind IN ('opening_receivable','opening_payable','claim','payable','expense','receipt','payment','receivable_adjustment','payable_adjustment','receivable_reconciliation')),
             currency TEXT NOT NULL DEFAULT '', source_amount NUMERIC(20,8) NOT NULL CHECK(source_amount>0),
             source_amount_raw TEXT NOT NULL, amount_minor BIGINT, document_date DATE,
             source_ref TEXT NOT NULL, source_locator TEXT NOT NULL, economic_ref TEXT NOT NULL,
@@ -39,7 +39,7 @@ def init_storage():
         c.execute("ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS opening_confirmation_ref TEXT NOT NULL DEFAULT ''")
         c.execute("ALTER TABLE finance_documents ADD COLUMN IF NOT EXISTS opening_review_ack BOOLEAN NOT NULL DEFAULT FALSE")
         c.execute('ALTER TABLE finance_documents DROP CONSTRAINT IF EXISTS finance_documents_kind_check')
-        c.execute("ALTER TABLE finance_documents ADD CONSTRAINT finance_documents_kind_check CHECK(kind IN ('opening_receivable','opening_payable','claim','payable','expense','receipt','payment','receivable_adjustment','payable_adjustment'))")
+        c.execute("ALTER TABLE finance_documents ADD CONSTRAINT finance_documents_kind_check CHECK(kind IN ('opening_receivable','opening_payable','claim','payable','expense','receipt','payment','receivable_adjustment','payable_adjustment','receivable_reconciliation'))")
         # Find only the original automatically named status/source CHECK, or its
         # named replacement on subsequent initializations.
         c.execute('''DO $$ DECLARE constraint_row record; BEGIN
@@ -53,7 +53,9 @@ def init_storage():
         c.execute('''ALTER TABLE finance_documents ADD CONSTRAINT finance_document_postable CHECK(
           status NOT IN ('reviewed','posted','reversed') OR
           (currency<>'' AND document_date IS NOT NULL AND amount_minor>0 AND
-            ((kind NOT IN ('opening_receivable','opening_payable') AND source_role='detail') OR
+            ((kind NOT IN ('opening_receivable','opening_payable','receivable_reconciliation') AND source_role='detail') OR
+             (kind='receivable_reconciliation' AND source_role='summary' AND amount_basis='net'
+              AND invoice_ref='' AND customs_ref='' AND shipment_id IS NULL) OR
              (kind IN ('opening_receivable','opening_payable') AND source_role='summary' AND amount_basis='net'
               AND opening_cutoff IS NOT NULL AND opening_cutoff=document_date
               AND length(trim(opening_confirmation_ref))>0 AND opening_review_ack
@@ -64,6 +66,14 @@ def init_storage():
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS finance_active_opening ON finance_documents(owner_id,counterparty_id,currency) WHERE kind='opening_receivable' AND status='posted'")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS finance_active_opening_payable ON finance_documents(owner_id,counterparty_id,currency) WHERE kind='opening_payable' AND status='posted'")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS finance_active_source ON finance_documents(owner_id,source_ref,source_locator,kind) WHERE status NOT IN ('void','reversed')")
+        c.execute('''CREATE TABLE IF NOT EXISTS finance_reconciliation_evidence(
+            document_id BIGINT PRIMARY KEY REFERENCES finance_documents(id),
+            cutoff DATE NOT NULL, target_minor BIGINT NOT NULL CHECK(target_minor>0),
+            prior_minor BIGINT NOT NULL, later_minor BIGINT NOT NULL,
+            delta_minor BIGINT NOT NULL CHECK(delta_minor>0 AND target_minor-prior_minor=delta_minor),
+            snapshot_hash TEXT NOT NULL CHECK(length(snapshot_hash)=64),
+            authorization_ref TEXT NOT NULL CHECK(length(trim(authorization_ref))>0))''')
+        c.execute("CREATE INDEX IF NOT EXISTS finance_active_reconciliation ON finance_documents(owner_id,counterparty_id,currency,document_date) WHERE kind='receivable_reconciliation' AND status='posted'")
         # Reversed/void evidence may be superseded, retaining the original source locator. Active duplicates cannot post.
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS finance_active_event ON finance_documents(owner_id,counterparty_id,kind,economic_ref) WHERE status='posted'")
         c.execute('''CREATE TABLE IF NOT EXISTS finance_entries(
@@ -143,7 +153,7 @@ def init_storage():
         c.execute('CREATE INDEX IF NOT EXISTS finance_entity_audit ON finance_audit(entity_type,entity_id,id DESC)')
         c.execute('''CREATE OR REPLACE FUNCTION finance_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN RAISE EXCEPTION 'Finance evidence and entries are immutable'; END; $$''')
-        for table in ('finance_entries', 'finance_audit', 'finance_parties', 'finance_entitlement_rules', 'finance_owner_name_changes', 'finance_claim_details', 'finance_closing_inputs', 'finance_closing_reviews'):
+        for table in ('finance_entries', 'finance_audit', 'finance_parties', 'finance_entitlement_rules', 'finance_owner_name_changes', 'finance_claim_details', 'finance_closing_inputs', 'finance_closing_reviews', 'finance_reconciliation_evidence'):
             c.execute('DROP TRIGGER IF EXISTS immutable_finance_row ON '+table)
             c.execute('CREATE TRIGGER immutable_finance_row BEFORE UPDATE OR DELETE ON '+table+' FOR EACH ROW EXECUTE FUNCTION finance_immutable()')
         c.execute('''CREATE OR REPLACE FUNCTION finance_preserve_document() RETURNS trigger LANGUAGE plpgsql AS $$
