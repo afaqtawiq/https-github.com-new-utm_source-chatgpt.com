@@ -132,7 +132,7 @@ def content_for(data, mime):
 def record_all(items, actor, default_supplier=''):
     import datetime as dt
     from app import billing_rules
-    done, dup, failed, no_supplier = [], [], [], []
+    done, dup, failed, incomplete, no_supplier = [], [], [], [], []
     for item in items:
         date = None
         try:
@@ -152,6 +152,8 @@ def record_all(items, actor, default_supplier=''):
             continue
         if 'مسجل مسبقًا' in message:
             dup.append(d['number'])
+        elif message.startswith(billing_rules.INCOMPLETE_PREFIX):
+            incomplete.append(d['number'])
         elif ids:
             done.append(d['number'])
         else:
@@ -161,6 +163,8 @@ def record_all(items, actor, default_supplier=''):
         lines.append(f'↩️ مسجل مسبقًا ولم يتكرر: {len(dup)} ({"، ".join(dup[:15])})')
     if failed:
         lines.append(f'❌ لم يُسجل: {len(failed)}\n' + '\n'.join('• ' + f for f in failed[:15]))
+    if incomplete:
+        lines.append(f'⚠️ فوترة غير مكتملة: {len(incomplete)} ({"، ".join(incomplete[:15])}) — راجع صفحة الفوترة، ولا تُعد تسجيلها.')
     if no_supplier:
         lines.append(f'⚠️ بيانات استيراد بدون جهة إصدار الفاتورة (سُجلت على عمران حسب القاعدة): {"، ".join(no_supplier[:20])} — '
                      'إذا كانت من الياسمين أرسل «الياسمين» مع رقم البيان وأصححها.')
@@ -257,15 +261,18 @@ def statement(party_text, month):
     end = dt.date(year + (mon == 12), mon % 12 + 1, 1)
     with db() as c:
         rows = c.execute('''SELECT number,kind,invoice_no,invoice_value,supplier,items_json,status,COALESCE(decl_date,created_at::date) d
-            FROM billing_declarations WHERE status IN ('drafted','recording','failed') AND COALESCE(decl_date,created_at::date)>=%s
+            FROM billing_declarations WHERE status IN ('drafted','recording','failed','drafting','incomplete') AND COALESCE(decl_date,created_at::date)>=%s
             AND COALESCE(decl_date,created_at::date)<%s ORDER BY d,number''', (start, end)).fetchall()
         pays = c.execute('SELECT pay_date,amount,ref FROM billing_payments WHERE party=%s ORDER BY pay_date', (party,)).fetchall()
-    lines, total = [], 0.0
+    lines, total, incomplete = [], 0.0, set()
     # سلة الرحائب is not billed: its statement is its SHARE (payable) per declaration; الياسمين and عمران are claims.
     want = 'payable' if party == billing_rules.SALLA else 'claim'
     for r in rows:
         for it in json.loads(r['items_json'] or '[]'):
             if billing_rules.fold(it.get('party')) == billing_rules.fold(party) and it.get('kind') == want:
+                if r['status'] in ('drafting', 'incomplete'):
+                    incomplete.add((r['number'], r['kind']))
+                    continue
                 amount = float(it['amount'])
                 comps = it.get('components') or {}
                 fees = sum(float(comps.get(k) or 0) for k in ('customs_duty', 'customs_other'))
@@ -286,7 +293,7 @@ def statement(party_text, month):
     paid = sum(float(p['amount']) for p in month_pays)
     all_paid = sum(float(p['amount']) for p in pays)
     return {'party': party, 'month': month, 'lines': lines, 'total': total, 'payments': month_pays, 'paid': paid, 'all_paid': all_paid,
-            'approved': bool(approved), 'rule_total': rule_total, 'payable': want == 'payable'}
+            'approved': bool(approved), 'rule_total': rule_total, 'payable': want == 'payable', 'incomplete_count': len(incomplete)}
 
 
 def statement_link(party, month):
@@ -295,11 +302,18 @@ def statement_link(party, month):
     return f'https://gulf-logistics-ai-v7-production.up.railway.app/billing/statement?month={month}&party={quote(party)}'
 
 
+def incomplete_statement_notice(s):
+    count = s.get('incomplete_count', 0)
+    return f'⚠️ {count} بيان لم يتأكد اكتمال فوترة مسوداته؛ لم يدخل في حساب القاعدة، وراجع صفحة الفوترة.' if count else ''
+
+
 def statement_text(party_text, month):
     s = statement(party_text, month)
+    notice = incomplete_statement_notice(s)
+    warning = '\n' + notice if notice else ''
     if not s['lines']:
         return (f"لا توجد بيانات مسجلة في الحسابات لـ{s['party']} في {month}. "
-                'التسجيل يتم بعد قراءة فسح واعتمادك للكشف بكلمة «نفذ».')
+                'التسجيل يتم بعد قراءة فسح واعتمادك للكشف بكلمة «نفذ».' + warning)
     imports = sum(1 for l in s['lines'] if l.get('type') == 'استيراد')
     kinds = f" (استيراد {imports}، تصدير/إعادة تصدير {len(s['lines']) - imports})" if any(l.get('type') for l in s['lines']) else ''
     if s.get('payable'):
@@ -307,14 +321,14 @@ def statement_text(party_text, month):
                 f"\n• المدفوع لها خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
                 f"\n• الباقي لها عن الشهر: {s['total'] - s['paid']:,.2f} ريال"
                 f"\nالكشف التفصيلي للطباعة: {statement_link(s['party'], month)}"
-                '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها.')
+                '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها.' + warning)
     return (f"📄 كشف {s['party']} — {month}\n• عدد البيانات: {len(s['lines'])}{kinds}\n• إجمالي المطالبة: {s['total']:,.2f} ريال"
             f"\n• السداد خلال الشهر: {s['paid']:,.2f} ريال ({len(s['payments'])} دفعة)"
             f"\n• صافي مطالبة الشهر بعد سداد الشهر: {s['total'] - s['paid']:,.2f} ريال"
             f"\n(كل السدادات المسجلة: {s['all_paid']:,.2f} ريال)"
             f"\nالكشف التفصيلي للطباعة: {statement_link(s['party'], month)}"
             + ('\nالإجمالي من الكشف المعتمد كما رُفع.' + (f" (حساب القاعدة: {s['rule_total']:,.2f})" if abs(s['rule_total'] - s['total']) > 1 else '')
-               if s['approved'] else '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها؛ راجعها مع كشفك.'))
+               if s['approved'] else '\nالأرقام من القيود المسجلة (مسودات) قبل ترحيلها؛ راجعها مع كشفك.') + warning)
 
 
 def all_statements(months=None):
@@ -325,6 +339,7 @@ def all_statements(months=None):
     out = []
     for month in sorted(set(months))[-3:]:
         for party in (billing_rules.YASMEN, billing_rules.OMRAN, billing_rules.SALLA):
-            if statement(party, month)['lines']:
+            data = statement(party, month)
+            if data['lines'] or data.get('incomplete_count'):
                 out.append(statement_text(party, month))
     return '\n\n'.join(out)

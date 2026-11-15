@@ -206,6 +206,93 @@ def run():
     assert '910001' in {r['number'] for r in statement_import.statement(billing_rules.SALLA, '2026-10')['lines']}
     nov_numbers = {r['number'] for r in statement_import.statement(billing_rules.SALLA, '2026-11')['lines']}
     assert '910002' in nov_numbers and '910001' not in nov_numbers
+    # A real first draft must remain linked if the second finance write fails.
+    from app import finance_service
+    from app.prospect_autopilot import system_user
+    actor = system_user()
+    finance_service.create_party({'name': 'Fixture owner', 'identity_ref': 'fixture-billing-owner',
+                                  'kind': 'owner', 'confirmed': '1'}, actor)
+    real_create = finance_service.create_document
+    action = {'tool': 'record_billing', 'label': 'اختبار إنشاء المسودات', 'items': [
+        {'number': '910010', 'kind': 'import', 'party': billing_rules.SALLA,
+         'date': '2026-11-14', 'supplier': 'Fixture manufacturer', 'invoice_value': '10000'}
+    ]}
+
+    def fail_second(form, actor):
+        if form['kind'] == 'payable':
+            raise RuntimeError('fixture raw provider error')
+        return real_create(form, actor)
+
+    token = ROLE.set({'name': 'محمد', 'manager': True})
+    try:
+        payload = json.dumps(action, ensure_ascii=False)
+        with patch.object(finance_service, 'create_document', side_effect=fail_second) as creator:
+            failed = command_agent.execute_confirmed(None, payload)
+            assert 'لم يكتمل تسجيل أي بيان' in failed and 'المسودات التي أُنشئت: 1' in failed, failed
+            assert 'fixture raw provider error' not in failed and 'كشوفات الحسابات بعد التسجيل' not in failed
+            assert creator.call_count == 2
+            repeated = command_agent.execute_confirmed(None, payload)
+            assert 'لم يكتمل تسجيل أي بيان' in repeated and creator.call_count == 2, repeated
+        uploaded = statement_import.record_all(action['items'], actor)
+        assert 'فوترة غير مكتملة: 1' in uploaded and 'مسجل مسبقًا ولم يتكرر' not in uploaded, uploaded
+    finally:
+        ROLE.reset(token)
+    with db() as c:
+        billing = c.execute("SELECT * FROM billing_declarations WHERE number='910010'").fetchone()
+        finance = c.execute("SELECT id,kind,status FROM finance_documents WHERE customs_ref='910010'").fetchall()
+        assert [(r['kind'], r['status']) for r in finance] == [('claim', 'draft')]
+        assert billing['status'] == 'incomplete' and json.loads(billing['finance_ids']) == [finance[0]['id']]
+        assert 'fixture raw provider error' not in billing['error']
+        assert not c.execute('SELECT 1 FROM finance_entries WHERE document_id=%s', (finance[0]['id'],)).fetchone()
+    try:
+        billing_rules.void(billing['id'], actor)
+        raise AssertionError('Incomplete declaration unexpectedly cleared for replay')
+    except ValueError as exc:
+        assert 'غير المكتمل' in str(exc)
+    with patch.object(billing_rules, 'admin_session'):
+        page = billing_rules.page(None).body.decode()
+        printable = billing_rules.statement_page(None, billing_rules.SALLA, '2026-11').body.decode()
+    assert 'مبالغ محسوبة لم يكتمل تسجيلها' in page and 'fixture raw provider error' not in page
+    assert f'/finance/documents/{finance[0]["id"]}' in page and f'/billing/{billing["id"]}/void' not in page
+    assert 'لم يدخل في حساب القاعدة' in printable
+    for party in (billing_rules.SALLA, billing_rules.OMRAN):
+        statement = statement_import.statement(party, '2026-11')
+        assert statement['incomplete_count'] == 1 and '910010' not in {l['number'] for l in statement['lines']}
+    assert statement_import.statement(billing_rules.YASMEN, '2026-11')['incomplete_count'] == 0
+
+    # An unhandled interruption before the final status leaves a visible, non-replayed drafting row.
+    interrupted = {**action['items'][0], 'number': '910011', 'date': dt.date(2026, 11, 14)}
+    class SimulatedInterruption(BaseException):
+        pass
+    def interrupt_second(form, actor):
+        if form['kind'] == 'payable':
+            raise SimulatedInterruption()
+        return real_create(form, actor)
+    try:
+        with patch.object(finance_service, 'create_document', side_effect=interrupt_second):
+            billing_rules.record(interrupted, actor)
+        raise AssertionError('Interruption was not simulated')
+    except SimulatedInterruption:
+        pass
+    with db() as c:
+        stale = c.execute("SELECT status,finance_ids FROM billing_declarations WHERE number='910011'").fetchone()
+        assert stale['status'] == 'drafting' and len(json.loads(stale['finance_ids'])) == 1
+        tid = c.execute("""INSERT INTO runner_tasks(kind,params_json,status,created_by,created_at)
+            VALUES('fasah_declarations',%s,'done','Fixture',NOW()) RETURNING id""",
+            (json.dumps({'which': 'import', 'party': 'سلة'}),)).fetchone()['id']
+        review_csv = ('رقم المرجع,رقم البيان,التاريخ,التفاصيل\n'
+                      '202612120001,910010,14/11/2026,سلة الرحائب تحت المعالجة\n'
+                      '202612120002,910011,14/11/2026,سلة الرحائب تحت المعالجة\n').encode()
+        c.execute("""INSERT INTO runner_files(task_id,name,mime,size,sha256,verified,data,created_at)
+            VALUES(%s,'review.csv','text/csv',1,'test-incomplete',TRUE,%s,NOW())""", (tid, review_csv))
+    with patch.object(agent_runner, 'notify') as notice, patch('app.fasah_tracking.after_read', return_value=[]):
+        with patch.object(agent_runner, 'prepare_billing') as prepare, patch.object(agent_runner, 'create_task') as enqueue:
+            agent_runner.after_fasah(tid)
+            prepare.assert_not_called()
+            enqueue.assert_not_called()
+        preview = notice.call_args.args[0]
+    assert '910010' in preview and '910011' in preview and 'لم تُعد المحاولة تلقائيًا' in preview, preview
+    assert 'كل بيانات' not in preview and 'نفذ' not in preview, preview
     chat.stop()
 
 

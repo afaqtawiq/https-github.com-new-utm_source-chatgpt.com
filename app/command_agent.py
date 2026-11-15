@@ -755,6 +755,7 @@ def execute_confirmed(c, payload):
         out = []
         accepted_months = set()
         recorded = False
+        incomplete = False
         for d in action.get('items') or []:
             d = dict(d)
             if d.get('date') and isinstance(d['date'], str):
@@ -771,6 +772,7 @@ def execute_confirmed(c, payload):
                 continue
             try:
                 _, finance_ids, result = billing_rules.record(d, system_user())
+                incomplete = incomplete or result.startswith(billing_rules.INCOMPLETE_PREFIX)
                 if finance_ids:
                     recorded = True
                     if isinstance(d.get('date'), _dt.date):
@@ -778,9 +780,9 @@ def execute_confirmed(c, payload):
                 out.append('• ' + result.split('\n')[0] + (' — ' + str(d.get('number')) if d.get('number') else ''))
             except Exception as exc:
                 out.append('• ' + str(d.get('number')) + ': ' + str(exc)[:100])
-        text = ('✅ ' if recorded else '⚠️ ') + str(action.get('label') or 'التسجيل') + '\n' + '\n'.join(out)
+        text = ('✅ ' if recorded and not incomplete else '⚠️ ') + str(action.get('label') or 'التسجيل') + '\n' + '\n'.join(out)
         if not recorded:
-            return text + '\nلم تُنشأ مسودات جديدة.'
+            return text + ('\nلم يكتمل تسجيل أي بيان.' if incomplete else '\nلم تُنشأ مسودات جديدة.')
         text += '\nالقيود مسودات في صفحة المالية بانتظار ترحيلك.'
         try:  # owner request: after recording, send the account statements right away
             from app import statement_import

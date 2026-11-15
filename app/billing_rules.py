@@ -27,6 +27,8 @@ from app.storage import db, log, utcnow
 router = APIRouter()
 YASMEN, OMRAN, SALLA = 'الياسمين', 'عمران', 'سلة الرحائب'
 CENT = Decimal('0.01')
+INCOMPLETE_PREFIX = 'لم يكتمل تسجيل مسودات البيان'
+REVIEW_STATUSES = ('drafting', 'incomplete', 'recording', 'failed')
 
 
 def money(value):
@@ -126,7 +128,7 @@ def owner_id(c):
     return row['id']
 
 
-def create_documents(d, items, actor):
+def create_documents(d, items, actor, *, on_created=None):
     from app import finance_service as service
     ids = []
     with db() as c:
@@ -149,6 +151,8 @@ def create_documents(d, items, actor):
                                                   str(d.get('kind')) + ':' + it['party'] + ':' + str(parties[it['party']])))}
         doc_id = service.create_document(form, actor)
         ids.append(doc_id)
+        if on_created is not None:
+            on_created(doc_id)
         if it['kind'] == 'claim':
             details = {k: format(v, 'f') if v else '0' for k, v in it['components'].items()}
             details.update({'goods_amount': format(money(d['invoice_value']), 'f'), 'goods_currency': 'AED', 'exchange_rate': '1',
@@ -163,7 +167,7 @@ def create_documents(d, items, actor):
 
 
 def record(d, actor):
-    """Record one declaration once and create its finance drafts. Returns (items, finance_ids, message)."""
+    """Record one declaration once and create its finance drafts. Returns (items, finance_ids, message); returned IDs mean the set completed."""
     init()
     d = dict(d)
     d['number'] = re.sub(r'\D', '', str(d.get('number') or ''))
@@ -177,26 +181,49 @@ def record(d, actor):
         return [], [], 'لا توجد قاعدة فوترة تنطبق على هذا البيان.'
     with db() as c:
         claimed = c.execute('''INSERT INTO billing_declarations(number,kind,party,invoice_no,invoice_value,supplier,duty,other,decl_date,
-            items_json,status,created_by,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'recording',%s,%s)
+            items_json,status,created_by,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'drafting',%s,%s)
             ON CONFLICT(number,kind) DO NOTHING RETURNING id''',
             (d['number'], d['kind'], str(d.get('party') or ''), str(d.get('invoice_no') or ''), str(d.get('invoice_value') or ''),
              str(d.get('supplier') or ''), str(d.get('duty') or '0'), str(d.get('other') or '0'), d.get('date'),
              json.dumps([{**i, 'amount': str(i['amount']), 'components': {k: str(v) for k, v in i['components'].items()}} for i in items], ensure_ascii=False),
              actor, utcnow())).fetchone()
     if not claimed:
+        with db() as c:
+            prior = c.execute('SELECT status, finance_ids FROM billing_declarations WHERE number=%s AND kind=%s',
+                              (d['number'], d['kind'])).fetchone()
+        if prior and prior['status'] == 'incomplete':
+            return items, [], incomplete_message(json.loads(prior['finance_ids']))
+        if prior and prior['status'] in REVIEW_STATUSES:
+            return items, [], INCOMPLETE_PREFIX + '؛ يحتاج تحققًا في صفحة الفوترة. لم تُعد المحاولة.'
         return items, [], 'هذا البيان مسجل مسبقًا في الحسابات؛ لم يتكرر القيد.'
+
+    created = []
+
+    def save_progress(doc_id):
+        # Finance creates each draft in its own transaction. Checkpoint its link before the next attempt.
+        created.append(doc_id)
+        with db() as c:
+            c.execute('UPDATE billing_declarations SET finance_ids=%s WHERE id=%s',
+                      (json.dumps(created), claimed['id']))
+
     try:
-        ids = create_documents({**d, 'row_id': claimed['id']}, items, actor)
+        ids = create_documents({**d, 'row_id': claimed['id']}, items, actor, on_created=save_progress)
         status, error = 'drafted', None
     except Exception as exc:
-        ids, status, error = [], 'failed', str(getattr(exc, 'detail', exc))[:300]
+        ids, status, error = created, 'incomplete', incomplete_message(created)
+        print('BILLING_DRAFTS_INCOMPLETE', claimed['id'], type(exc).__name__, flush=True)
     with db() as c:
         c.execute('UPDATE billing_declarations SET finance_ids=%s,status=%s,error=%s WHERE id=%s',
                   (json.dumps(ids), status, error, claimed['id']))
     log(actor, 'billing_declaration_recorded', 'billing_declaration', claimed['id'], d['number'] + ' ' + status)
     if error:
-        return items, ids, 'تعذر إنشاء القيود: ' + error
+        return items, [], error
     return items, ids, summary(d, items) + '\nسُجّلت مسودات في المالية بانتظار مراجعتك وترحيلها.'
+
+
+def incomplete_message(ids):
+    return (f'{INCOMPLETE_PREFIX}؛ المسودات التي أُنشئت: {len(ids)}. '
+            'راجع البيان وروابط المسودات في صفحة الفوترة. لا تُعد التسجيل قبل المراجعة.')
 
 
 # ---------- page ----------
@@ -226,11 +253,20 @@ def page(request: Request):
     for r in rows:
         items = json.loads(r['items_json'] or '[]')
         cells = '<br>'.join(e(i['label']) + ': ' + e(i['amount']) for i in items)
-        links = ' '.join('<a href="/finance/documents/' + str(x) + '">#' + str(x) + '</a>' for x in json.loads(r['finance_ids'] or '[]'))
+        status = r['status']
+        draft_ids = json.loads(r['finance_ids'] or '[]')
+        links = ' '.join('<a href="/finance/documents/' + str(x) + '">#' + str(x) + '</a>' for x in draft_ids)
+        detail = (incomplete_message(draft_ids) if status == 'incomplete' else
+                  'لم يتأكد اكتمال المسودات؛ راجعها قبل أي إجراء.' if status in ('drafting', 'recording') else r['error'] or '')
+        action = ('<form method="post" action="/billing/' + str(r['id']) +
+                  '/void"><button class="btn danger">إلغاء المسودات لإعادة التسجيل</button></form>'
+                  if status not in ('incomplete', 'drafting', 'recording') else '')
+        if status == 'incomplete':
+            cells = '<b>مبالغ محسوبة لم يكتمل تسجيلها</b><br>' + cells
         body += ('<tr><td>' + e(r['number']) + '</td><td>' + ('تصدير' if r['kind'] == 'export' else 'استيراد') + '</td><td>' + e(r['party']) +
                  '</td><td>' + e(r['invoice_no']) + ' · ' + e(r['invoice_value']) + '</td><td>' + cells + '<br>' + links +
-                 '</td><td><span class="pill">' + e(r['status']) + '</span> ' + e(r['error'] or '') +
-                 '<form method="post" action="/billing/' + str(r['id']) + '/void"><button class="btn danger">إلغاء المسودات لإعادة التسجيل</button></form></td></tr>')
+                 '</td><td><span class="pill">' + e('غير مكتمل' if status == 'incomplete' else status) +
+                 '</span> ' + e(detail) + action + '</td></tr>')
     body += '</table></div>'
     return HTMLResponse(layout(body), headers={'Cache-Control': 'no-store'})
 
@@ -256,6 +292,8 @@ def void(row_id, actor):
         row = c.execute('SELECT * FROM billing_declarations WHERE id=%s', (row_id,)).fetchone()
     if not row:
         raise ValueError('السجل غير موجود')
+    if row['status'] in ('incomplete', 'drafting', 'recording'):
+        raise ValueError('تحقق من جميع مسودات البيان في المالية أولًا؛ لا يُتاح مسح التسجيل غير المكتمل.')
     for doc_id in json.loads(row['finance_ids'] or '[]'):
         service.void_document(doc_id, actor, {'reason': 'إلغاء مسودة فوترة البيان ' + row['number'] + ' لإعادة التسجيل بالبيانات الصحيحة'})
     with db() as c:
@@ -301,7 +339,9 @@ def statement_page(request: Request, party: str = '', month: str = ''):
                    + ''.join(f"<td>{e(l.get(k)) if k in ('invoice_no', 'type') else (cell(l.get(k)) if shown(l.get(k)) else '')}</td>" for k, _ in cols)
                    + f"<td>{l['amount']:,.2f}</td></tr>" for i, l in enumerate(s['lines']))
     pays = ''.join(f"<tr><td>{e(p['pay_date'])}</td><td>{float(p['amount']):,.2f}</td><td>{e(p['ref'])}</td></tr>" for p in s['payments'])
+    notice = statement_import.incomplete_statement_notice(s)
     body = (f"<h1>كشف حساب {e(s['party'])} — {e(month)}</h1><p>مؤسسة آفاق طويق للتخليص الجمركي — ترخيص 2513</p>"
+            + (f'<p>{e(notice)}</p>' if notice else '') +
             '<table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr><th>#</th><th>رقم البيان</th><th>التاريخ</th>'
             + ''.join(f'<th>{t}</th>' for _, t in cols) + '<th>' + ('النصيب' if s.get('payable') else 'الإجمالي') + '</th></tr>' + rows +
             f"<tr><th colspan={3 + len(cols)}>الإجمالي</th><th>{s['total']:,.2f}</th></tr></table>"

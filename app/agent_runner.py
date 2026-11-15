@@ -461,21 +461,28 @@ def prepare_billing(items, label):
 
 
 def unbilled(rows, party_hint='سلة'):
-    # Rows of the client (default سلة الرحائب) whose declaration is not yet in billing_declarations.
-    import csv as _csv
+    return billing_listing(rows, party_hint)[0]
+
+
+def billing_listing(rows, party_hint='سلة'):
+    # Existing incomplete attempts are review-only, never eligible for retry or a confirmation code.
     from app import billing_rules
     billing_rules.init()
-    out = []
+    out, review = [], {}
     with db() as c:
         for r in rows:
             number, date, details = r.get('رقم البيان', ''), r.get('التاريخ', ''), r.get('التفاصيل', '')
             if not number or party_hint not in details:
                 continue
             kind = 'export' if 'تصدير' in details or 'صادر' in details else 'import'
-            if c.execute('SELECT 1 FROM billing_declarations WHERE number=%s AND kind=%s', (number, kind)).fetchone():
+            prior = c.execute('SELECT status FROM billing_declarations WHERE number=%s AND kind=%s',
+                              (number, kind)).fetchone()
+            if prior:
+                if prior['status'] in billing_rules.REVIEW_STATUSES:
+                    review[(number, kind)] = f"{number} ({'صادر' if kind == 'export' else 'وارد'})"
                 continue
             out.append({'number': number, 'kind': kind, 'date': date, 'details': details})
-    return out
+    return out, list(review.values())
 
 
 MAX_BILLING_BATCH = 60
@@ -641,14 +648,17 @@ def after_fasah(tid):
                 except Exception as exc:
                     print('FASAH_AUTO_BILLING', tid, type(exc).__name__, str(exc)[:200], flush=True)
                 return
-            new = unbilled(rows, 'سلة')
-            if not new:
+            new, incomplete = billing_listing(rows, 'سلة')
+            if not new and not incomplete:
                 if not params.get('auto'):
                     notify(f'📋 فسح (#{tid}): كل بيانات سلة الرحائب في القائمة مسجلة في الحسابات.')
                 return
             exports = [n for n in new if n['kind'] == 'export']
             imports = [n for n in new if n['kind'] == 'import']
-            lines = [f'📋 فسح (#{tid}): {len(new)} بيان لسلة الرحائب غير مسجل في الحسابات.']
+            lines = [f'📋 فسح (#{tid}): {len(new)} بيان جديد لسلة الرحائب لم تبدأ فوترة مسوداته.']
+            if incomplete:
+                lines.append(f'⚠️ {len(incomplete)} بيان لم يتأكد اكتمال مسوداته: ' + '، '.join(incomplete[:20])
+                             + ' — راجع صفحة الفوترة؛ لم تُعد المحاولة تلقائيًا.')
             if exports:
                 items, review = prepare_export_billing(exports)
                 if items:
