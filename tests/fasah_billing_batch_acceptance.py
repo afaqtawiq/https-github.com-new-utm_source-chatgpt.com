@@ -151,6 +151,61 @@ def run():
     assert agent_runner.auto_billing([], now + dt.timedelta(hours=32)) is None          # daily sweep runs quietly
     with db() as c:
         assert c.execute('SELECT COUNT(*) n FROM runner_tasks').fetchone()['n'] == n + 2
+    # FASAH export dates must survive both list entry points and confirmation.
+    export_rows = [
+        ('910001', '31/10/2026'), ('910002', '02/11/2026'),
+        ('910003', ''), ('910004', '31/11/2026'),
+        ('910005', '02/11/2026'), ('910005', '03/11/2026'),
+        ('910001', '31/10/2026'),
+    ]
+    export_csv = ('رقم المرجع,رقم البيان,التاريخ,التفاصيل\n' + ''.join(
+        f'2026121000{i:04d},{number},{day},إعادة تصدير سلة الرحائب\n'
+        for i, (number, day) in enumerate(export_rows))).encode()
+    for auto in (False, True):
+        with db() as c:
+            export_tid = c.execute("""INSERT INTO runner_tasks(kind,params_json,status,created_by,created_at)
+                VALUES('fasah_declarations',%s,'done','محمد',NOW()) RETURNING id""",
+                (json.dumps({'which': 'export', 'party': 'سلة', 'auto': auto}),)).fetchone()['id']
+            c.execute("""INSERT INTO runner_files(task_id,name,mime,size,sha256,verified,data,created_at)
+                VALUES(%s,'export.csv','text/csv',1,'test-export',TRUE,%s,NOW())""", (export_tid, export_csv))
+        with patch.object(agent_runner, 'notify') as export_notice, patch('app.fasah_tracking.after_read', return_value=[]):
+            agent_runner.after_fasah(export_tid)
+        preview = export_notice.call_args.args[0]
+        assert preview.count('نفذ ') == 1 and 'لم يُجهّز للتسجيل' in preview, preview
+        assert all(number in preview for number in ('910003', '910004', '910005')), preview
+        pending_token = preview.split('نفذ ', 1)[1].splitlines()[0].strip()
+        with db() as c:
+            pending = c.execute('SELECT command FROM whatsapp_voice_pending WHERE token=%s', (pending_token,)).fetchone()
+            assert c.execute("SELECT COUNT(*) n FROM billing_declarations WHERE kind='export'").fetchone()['n'] == 0
+        export_action = json.loads(pending['command'].partition(':')[2])
+        assert [(d['number'], d['date']) for d in export_action['items']] == [
+            ('910001', '2026-10-31'), ('910002', '2026-11-02')], export_action
+    token = ROLE.set({'name': 'محمد', 'manager': True})
+    try:
+        # A code prepared by the old version without a valid export date must not book.
+        stale_action = {'tool': 'record_billing', 'items': [
+            {'kind': 'export', 'party': 'سلة الرحائب', 'number': '910006'},
+            {'kind': 'export', 'party': 'سلة الرحائب', 'number': '910007', 'date': '30/02/2026'},
+        ]}
+        with patch.object(billing_rules, 'create_documents', return_value=[1]) as drafts:
+            rejected = command_agent.execute_confirmed(None, json.dumps(stale_action, ensure_ascii=False))
+            drafts.assert_not_called()
+            assert 'لم تُنشأ مسودات جديدة' in rejected, rejected
+            done = command_agent.execute_confirmed(None, json.dumps(export_action, ensure_ascii=False))
+            assert 'كشف سلة الرحائب — 2026-10' in done and 'كشف سلة الرحائب — 2026-11' in done, done
+            assert [call.args[0]['date'] for call in drafts.call_args_list] == [
+                dt.date(2026, 10, 31), dt.date(2026, 11, 2)]
+            repeated = command_agent.execute_confirmed(None, json.dumps(export_action, ensure_ascii=False))
+            assert drafts.call_count == 2 and 'لم تُنشأ مسودات جديدة' in repeated, repeated
+    finally:
+        ROLE.reset(token)
+    with db() as c:
+        exports = c.execute("SELECT number,decl_date FROM billing_declarations WHERE kind='export' ORDER BY number").fetchall()
+    assert [(r['number'], r['decl_date']) for r in exports] == [
+        ('910001', dt.date(2026, 10, 31)), ('910002', dt.date(2026, 11, 2))]
+    assert '910001' in {r['number'] for r in statement_import.statement('سلة', '2026-10')['lines']}
+    nov_numbers = {r['number'] for r in statement_import.statement('سلة', '2026-11')['lines']}
+    assert '910002' in nov_numbers and '910001' not in nov_numbers
     chat.stop()
 
 

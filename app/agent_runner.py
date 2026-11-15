@@ -576,6 +576,31 @@ def batch_summary(rows):
     return '\n'.join(lines)
 
 
+def prepare_export_billing(rows):
+    """Prepare only exports with a single verified declaration date from FASAH."""
+    dates_by_number = {}
+    for row in rows:
+        number = row['number']
+        raw_date = str(row.get('date') or '').strip()
+        for fmt in ('%d/%m/%Y', '%Y-%m-%d'):
+            try:
+                date = dt.datetime.strptime(raw_date, fmt).date().isoformat()
+                break
+            except ValueError:
+                continue
+        else:
+            date = None
+        dates_by_number.setdefault(number, set()).add(date)
+    items, review = [], []
+    for number, dates in dates_by_number.items():
+        if len(dates) != 1 or None in dates:
+            review.append(number)
+            continue
+        items.append({'number': number, 'kind': 'export', 'party': 'سلة الرحائب',
+                      'date': next(iter(dates))})
+    return items, review
+
+
 def after_fasah(tid):
     import csv as _csv
     import io as _io
@@ -625,10 +650,13 @@ def after_fasah(tid):
             imports = [n for n in new if n['kind'] == 'import']
             lines = [f'📋 فسح (#{tid}): {len(new)} بيان لسلة الرحائب غير مسجل في الحسابات.']
             if exports:
-                items = [{'number': n['number'], 'kind': 'export', 'party': 'سلة الرحائب'} for n in exports]
-                token = prepare_billing(items, 'تصدير سلة الرحائب')
-                lines.append('• تصدير (100 ريال لكل بيان لسلة الرحائب): ' + '، '.join(n['number'] for n in exports)
-                             + (f'\n  للتسجيل اكتب: نفذ {token}' if token else ''))
+                items, review = prepare_export_billing(exports)
+                if items:
+                    token = prepare_billing(items, 'تصدير سلة الرحائب')
+                    lines.append('• تصدير (100 ريال لكل بيان لسلة الرحائب): ' + '، '.join(d['number'] for d in items)
+                                 + (f'\n  للتسجيل اكتب: نفذ {token}' if token else ''))
+                if review:
+                    lines.append('⚠️ تصدير يحتاج مراجعة تاريخ البيان من فسح، ولم يُجهّز للتسجيل: ' + '، '.join(review))
             if imports:
                 todo = imports[:MAX_BILLING_BATCH]
                 with db() as c:
