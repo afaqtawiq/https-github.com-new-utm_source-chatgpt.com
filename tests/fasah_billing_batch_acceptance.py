@@ -203,8 +203,8 @@ def run():
         exports = c.execute("SELECT number,decl_date FROM billing_declarations WHERE kind='export' ORDER BY number").fetchall()
     assert [(r['number'], r['decl_date']) for r in exports] == [
         ('910001', dt.date(2026, 10, 31)), ('910002', dt.date(2026, 11, 2))]
-    assert '910001' in {r['number'] for r in statement_import.statement('سلة', '2026-10')['lines']}
-    nov_numbers = {r['number'] for r in statement_import.statement('سلة', '2026-11')['lines']}
+    assert '910001' in {r['number'] for r in statement_import.statement(billing_rules.SALLA, '2026-10')['lines']}
+    nov_numbers = {r['number'] for r in statement_import.statement(billing_rules.SALLA, '2026-11')['lines']}
     assert '910002' in nov_numbers and '910001' not in nov_numbers
     chat.stop()
 
