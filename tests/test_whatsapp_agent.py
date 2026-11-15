@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import sqlite3
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -85,6 +86,62 @@ def payload(number,text='',pdf=False,**changes):
 
 
 def tick():return asyncio.run(agent.tick())
+
+
+def test_customer_status_requires_operations_verification_without_lookup(setup, monkeypatch):
+    state = setup
+    def no_lookup(*args, **kwargs):
+        pytest.fail('Customer status must not query declarations, tracking, or chat context')
+    import app
+    for name, stub in (('storage', SimpleNamespace(rows=no_lookup)),
+                       ('fasah_tracking', SimpleNamespace(customer_lines=no_lookup)),
+                       ('auto_handoff', SimpleNamespace(after_send=lambda job: None))):
+        monkeypatch.setitem(sys.modules, 'app.' + name, stub)
+        monkeypatch.setattr(app, name, stub, raising=False)
+    monkeypatch.setattr(store, 'recent_context', no_lookup)
+    monkeypatch.setattr(store, 'recent_exchanges', no_lookup)
+    for i, question in enumerate(('وين شحنتي', 'Where is my shipment?'), 80):
+        accepted = agent.accept_inbound(payload(i, question))
+        before = store.get_job(accepted['job_id'])
+        assert before['payload']['question_reason'] == 'live_status_unavailable'
+        assert tick()
+        after = store.get_job(accepted['job_id'])
+        assert after['status'] == 'sent'
+        assert after['diagnostics']['model_reason'] == 'status_requires_operations_review'
+        assert after['diagnostics']['model_attempted'] is False
+        assert after['reply_text'] == agent.CUSTOMER_STATUS_REVIEW_REPLY
+    assert not state['provider_reads'] and not state['model_calls']
+    assert [s[1] for s in state['sends']] == [agent.CUSTOMER_STATUS_REVIEW_REPLY] * 2
+    assert 'فريق عمليات' in agent.CUSTOMER_STATUS_REVIEW_REPLY
+    assert not any(c.isdigit() for c in agent.CUSTOMER_STATUS_REVIEW_REPLY)
+    assert 'تم إبلاغ' not in agent.CUSTOMER_STATUS_REVIEW_REPLY
+
+
+def test_dispatch_blocks_only_tagged_legacy_status_reply(setup, monkeypatch):
+    import app
+    state = setup
+    handoff = SimpleNamespace(after_send=lambda job: None)
+    monkeypatch.setitem(sys.modules, 'app.auto_handoff', handoff)
+    monkeypatch.setattr(app, 'auto_handoff', handoff, raising=False)
+    examples = (
+        ('وين شحنتي', 'declaration_status', 'synthetic legacy reply', 'blocked'),
+        ('شكرا', None, 'ordinary untagged reply', 'sent'),
+        ('شكرا', 'declaration_status_extra', 'ordinary differently tagged reply', 'sent'),
+    )
+    for i, (question, tag, body, expected) in enumerate(examples, 85):
+        accepted = agent.accept_inbound(payload(i, question))
+        job = store.claim_job(account_id=ACCOUNT)
+        assert job['id'] == accepted['job_id']
+        store.prepare_reply(job['id'], job['lease_token'], reply_text=body,
+                            diagnostics={'model_reason':tag} if tag else {})
+        assert tick()
+        after = store.get_job(job['id'])
+        assert after['status'] == expected
+        if expected == 'blocked':
+            assert after['diagnostics']['reason'] == 'legacy_declaration_status_not_authorized'
+        assert agent.accept_inbound(payload(i, question))['duplicate']
+    assert [s[1] for s in state['sends']] == [e[2] for e in examples[1:]]
+    assert not state['provider_reads'] and not state['model_calls'] and not tick()
 
 
 def test_actual_pdf_and_correlated_followup_no_webhook_network(setup):
