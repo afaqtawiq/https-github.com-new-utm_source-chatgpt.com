@@ -11,7 +11,8 @@ _MOVEMENTS = {
     'transit': ('ترانزيت', 'عبور', 'transit'),
 }
 _PORTS = {
-    'ميناء جدة الإسلامي': ('ميناء جده', 'ميناء جده الاسلامي', 'jeddah islamic port', 'jeddah port'),
+    'ميناء جدة الإسلامي': ('ميناء جده الاسلامي', 'jeddah islamic port'),
+    'ميناء جدة': ('ميناء جده', 'jeddah port'),
     'ميناء الملك عبدالعزيز بالدمام': ('ميناء الدمام', 'ميناء الملك عبدالعزيز', 'ميناء الملك عبد العزيز', 'dammam port', 'king abdulaziz port'),
     'ميناء الملك عبدالله': ('ميناء الملك عبدالله', 'ميناء الملك عبد الله', 'king abdullah port'),
     'ميناء الجبيل': ('ميناء الجبيل', 'jubail port'),
@@ -43,6 +44,9 @@ _NEW = re.compile(r'\b(?:شحنه جديده|شحنه اخري|طلب جديد|�
 _UNCERTAIN = re.compile(r'\b(?:هل|كم|كيف|ليس|ليست|مو|مش|بدون|غير محدد|يمكن|ربما|او|maybe|not|instead|or)\b|[?؟]')
 _CORRECTION = re.compile(r'^(?:تصحيح|اقصد|الصحيح|correction|i mean)\b[:،,\s]*')
 _OTHER_TOPIC = re.compile(r'^(?:كيف|هل|وين|اين|كم|استفسار عن|where|how|what|when)\b')
+_DRIVER_CONTACT = re.compile(
+    r'\b(?:رقم\s+(?:الجوال|جوال|هاتف)\s+(?:السائق|السايق)|رقم\s+(?:السائق|السايق)|'
+    r'(?:السائق|السايق)\s+(?:ما\s+عندي\s+رقمه|رقمه)|(?:driver|courier).{0,15}(?:phone|mobile|contact))\b')
 _AGE = timedelta(hours=72)
 
 
@@ -74,24 +78,34 @@ def build(messages, participant, phone, *, now=None):
     incoming = []
     for m in messages[:40]:
         if (m.get('direction') != 'incoming' or not participant
-                or phone(m.get('senderId')) != participant or m.get('attachments')):
+                or phone(m.get('senderId')) != participant):
             continue
         when = _time(m.get('createdAt'))
         value = m.get('message')
-        if (when is None or not now - _AGE <= when <= now + timedelta(minutes=5)
-                or not isinstance(value, str) or not 0 < len(value) <= 800):
+        if when is None or not now - _AGE <= when <= now + timedelta(minutes=5):
             continue
-        # Ignore long or opaque submissions, and never inspect quoted/provider metadata.
-        incoming.append((when, _fold(value)))
+        if m.get('attachments'):
+            # Do not infer from a caption, file name, or attachment content.
+            incoming.append((when, None))
+        elif isinstance(value, str) and 0 < len(value) <= 800:
+            incoming.append((when, _fold(value)))
     incoming.sort(key=lambda item: item[0])  # stable; reject ambiguous equal-time anchors below
     if not incoming:
         return None
     active = False
+    attachment_needs_review = False
     known = {key: set() for key in ('movement', 'port', 'goods', 'entry', 'exit')}
     for index, (when, value) in enumerate(incoming):
+        if value is None:
+            attachment_needs_review = attachment_needs_review or active
+            continue
         starts_request = bool(_REQUEST.search(value))
+        if _DRIVER_CONTACT.search(value):
+            active = False
+            continue
         if _NEW.search(value) or starts_request:
             active = starts_request
+            attachment_needs_review = False
             known = {key: set() for key in known}
         elif _OTHER_TOPIC.search(value):
             active = False
@@ -122,6 +136,9 @@ def build(messages, participant, phone, *, now=None):
                         known[key].update(matches)
     if not active:
         return None
+    for key in ('port', 'entry', 'exit'):
+        if 'ميناء جدة الإسلامي' in known[key]:
+            known[key].discard('ميناء جدة')
     movement = next(iter(known['movement'])) if len(known['movement']) == 1 else ''
     # Two names alone do not establish entry/exit direction for transit.
     entry = next(iter(known['entry'])) if len(known['entry']) == 1 else ''
@@ -142,13 +159,14 @@ def build(messages, participant, phone, *, now=None):
          else 'ما اسم المنفذ الجمركي لهذه الشحنة؟'),
         (not goods, 'ما نوع البضاعة؟'),
     )
-    return values, next((prompt for missing, prompt in questions if missing), '')
+    question = next((prompt for missing, prompt in questions if missing), '')
+    return values, question, bool(question and attachment_needs_review)
 
 
 def panel(summary):
     if summary is None:
         return ''
-    values, question = summary
+    values, question, attachment_needs_review = summary
     detail = ''.join('<dt>' + escape(key) + '</dt><dd>' +
                      escape(value or 'غير واضح في الرسائل') + '</dd>' for key, value in values.items())
     step = ('<p><strong>الخطوة التالية:</strong> تأكد أن المعلومة لم ترد في مرفق أو رسالة أقدم، '
@@ -156,6 +174,9 @@ def panel(summary):
             + escape(question) + '</textarea></label>' if question else
             '<p><strong>الخطوة التالية:</strong> راجع ملخص الطلب مع موظف التخليص لتحديد المستند التالي. '
             'اكتمال المعلومات الأولية لا يعني جاهزية المعاملة أو صدور عرض سعر.</p>')
+    if attachment_needs_review:
+        step = ('<p><strong>الخطوة التالية:</strong> راجع المرفق قبل سؤال العميل؛ '
+                'قد تجد فيه التفاصيل الناقصة. لم يقرأ الملخص محتوى المرفق.</p>')
     return ('<article aria-labelledby="clearance-intake-title"><h3 id="clearance-intake-title">ملخص طلب التخليص</h3>'
             '<small>اقتراح داخلي من رسائل العميل النصية الحديثة، وليس تحققًا من مستنداته. '
             'لا يحفظ أو يرسل شيئًا.</small><dl>' + detail + '</dl>' + step + '</article>')

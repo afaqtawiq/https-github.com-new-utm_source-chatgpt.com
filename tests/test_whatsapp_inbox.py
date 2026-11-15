@@ -999,6 +999,16 @@ def test_clearance_intake_observes_only_current_customer_text_and_suggests_one_s
     assert 'ما نوع البضاعة؟' not in summary
     assert all(text not in summary for text in ('الدمام', 'الملك خالد', '0501111111'))
     assert 'ملخص طلب التخليص' not in client.get('/whatsapp-inbox?conversation=c1&cursor=older').text
+    provider['messages'].insert(0, line('', 0, attachments=[{'type': 'document', 'filename': 'bill.pdf'}]))
+    with_attachment = client.get('/whatsapp-inbox?conversation=c1').text
+    attached_summary = with_attachment.split('id="clearance-intake-title"', 1)[1].split('</article>', 1)[0]
+    assert 'راجع المرفق قبل سؤال العميل' in attached_summary and 'ما اسم المنفذ الجمركي' not in attached_summary
+    assert 'bill.pdf' not in attached_summary
+    provider['messages'].insert(0, line('المنفذ ميناء جدة', -1))
+    filled = client.get('/whatsapp-inbox?conversation=c1').text
+    filled_summary = filled.split('id="clearance-intake-title"', 1)[1].split('</article>', 1)[0]
+    assert '<dd>ميناء جدة</dd>' in filled_summary and 'الإسلامي' not in filled_summary
+    assert 'راجع ملخص الطلب مع موظف التخليص' in filled_summary and 'راجع المرفق قبل سؤال العميل' not in filled_summary
     assert not provider['posts']
     assert not conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
 
@@ -1024,6 +1034,9 @@ def test_clearance_intake_readiness_and_topic_resets():
     assert run('أحتاج تخليص، استيراد، ميناء جدة', 'موضوع جديد، أثاث') is None
     assert run('أحتاج تخليص، استيراد، ميناء جدة', 'وين شحنتي؟') is None
     assert run('كيف تخليص الشحنات؟', 'مواد غذائية') is None
+    assert run('أحتاج تخليص، استيراد، ميناء جدة، ملابس', 'باقي رقم جوال السائق') is None
+    assert run('باقي رقم جوال السائق، البضاعة ملابس') is None
+    assert run('أحتاج تخليص، استيراد، ميناء جدة، ملابس')[0]['المنفذ'] == 'ميناء جدة'
     uncertain = run('أحتاج تخليص، استيراد أو تصدير؟', 'يمكن ميناء جدة', 'البضاعة ملابس')
     assert not uncertain[0]['الإجراء'] and not uncertain[0]['المنفذ'] and uncertain[1].startswith('هل الطلب')
     assert 'ما منفذ الخروج' in run('أحتاج تخليص، ترانزيت، دخول من منفذ البطحاء، ملابس')[1]
