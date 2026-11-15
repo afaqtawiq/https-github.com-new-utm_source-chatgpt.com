@@ -976,3 +976,68 @@ def test_media_inspection_rejects_unverified_identity_without_request(media_id):
             return await inbox.inspect_media_response(c,media_id,'account-test')
     with pytest.raises(HTTPException) as caught: asyncio.run(check())
     assert caught.value.status_code==404
+
+def test_clearance_intake_observes_only_current_customer_text_and_suggests_one_step(setup):
+    from datetime import datetime, timedelta, timezone
+    client, current, provider, conn = setup
+    now = datetime.now(timezone.utc)
+    base = provider['messages'][0]
+    def line(text, age, **changes):
+        return {**base, 'id': str(age), 'createdAt': (now-timedelta(minutes=age)).isoformat(),
+                'message': text, **changes}
+    provider['messages'] = [
+        line('البضاعة مواد غذائية، هاتف 0501111111', 1),
+        line('مطار الملك خالد', 2, direction='outgoing'),
+        line('المنفذ ميناء الدمام', 3, senderId='966599999999'),
+        line('أحتاج تخليص، استيراد', 4),
+    ]
+    response = client.get('/whatsapp-inbox?conversation=c1')
+    assert response.status_code == 200
+    summary = response.text.split('id="clearance-intake-title"', 1)[1].split('</article>', 1)[0]
+    assert '<dd>استيراد</dd>' in summary and '<dd>مواد غذائية</dd>' in summary
+    assert 'ما اسم المنفذ الجمركي لهذه الشحنة؟' in summary
+    assert 'ما نوع البضاعة؟' not in summary
+    assert all(text not in summary for text in ('الدمام', 'الملك خالد', '0501111111'))
+    assert 'ملخص طلب التخليص' not in client.get('/whatsapp-inbox?conversation=c1&cursor=older').text
+    assert not provider['posts']
+    assert not conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+
+
+def test_clearance_intake_readiness_and_topic_resets():
+    from datetime import datetime, timedelta, timezone
+    from app.clearance_intake_summary import build, panel
+    now = datetime.now(timezone.utc)
+    def run(*texts):
+        rows = [{'direction': 'incoming', 'senderId': '966500000001',
+                 'createdAt': (now-timedelta(minutes=len(texts)-index)).isoformat(), 'message': text}
+                for index, text in enumerate(texts)]
+        return build(list(reversed(rows)), '966500000001', z.phone, now=now)
+    ready = run('أحتاج إلى تخليص، استيراد', 'المنفذ ميناء جدة الإسلامي', 'البضاعة ملابس')
+    assert ready[0] == {'الإجراء': 'استيراد', 'المنفذ': 'ميناء جدة الإسلامي', 'البضاعة': 'ملابس'}
+    assert not ready[1] and 'راجع ملخص الطلب مع موظف التخليص' in panel(ready)
+    conflict = run('أحتاج تخليص، استيراد', 'المنفذ ميناء جدة', 'المنفذ ميناء الدمام', 'البضاعة ملابس')
+    assert not conflict[0]['المنفذ'] and 'المنفذ الجمركي' in conflict[1]
+    corrected = run('أحتاج تخليص، استيراد', 'المنفذ ميناء جدة', 'تصحيح: ميناء الدمام', 'البضاعة ملابس')
+    assert corrected[0]['المنفذ'] == 'ميناء الملك عبدالعزيز بالدمام' and not corrected[1]
+    reset = run('أحتاج تخليص، استيراد، ميناء جدة، البضاعة ملابس', 'شحنة جديدة أحتاج تخليص، تصدير')
+    assert reset[0] == {'الإجراء': 'تصدير', 'المنفذ': '', 'البضاعة': ''}
+    assert run('أحتاج تخليص، استيراد، ميناء جدة', 'موضوع جديد، أثاث') is None
+    assert run('أحتاج تخليص، استيراد، ميناء جدة', 'وين شحنتي؟') is None
+    assert run('كيف تخليص الشحنات؟', 'مواد غذائية') is None
+    uncertain = run('أحتاج تخليص، استيراد أو تصدير؟', 'يمكن ميناء جدة', 'البضاعة ملابس')
+    assert not uncertain[0]['الإجراء'] and not uncertain[0]['المنفذ'] and uncertain[1].startswith('هل الطلب')
+    assert 'ما منفذ الخروج' in run('أحتاج تخليص، ترانزيت، دخول من منفذ البطحاء، ملابس')[1]
+    transit = run('أحتاج تخليص، ترانزيت، دخول من منفذ البطحاء، خروج من منفذ سلوى، ملابس')
+    assert not transit[1] and 'دخول: منفذ البطحاء، خروج: منفذ سلوى' in transit[0]['المنفذ']
+
+
+def test_clearance_intake_does_not_use_old_or_attachment_text():
+    from datetime import datetime, timedelta, timezone
+    from app.clearance_intake_summary import build
+    now = datetime.now(timezone.utc)
+    base = {'direction': 'incoming', 'senderId': '966500000001'}
+    old = {**base, 'createdAt': (now-timedelta(days=5)).isoformat(),
+           'message': 'أحتاج تخليص، استيراد، ميناء جدة، ملابس'}
+    attachment = {**base, 'createdAt': now.isoformat(), 'message': 'أحتاج تخليص، استيراد، أثاث',
+                  'attachments': [{'type': 'document'}]}
+    assert build([attachment, old], '966500000001', z.phone, now=now) is None
