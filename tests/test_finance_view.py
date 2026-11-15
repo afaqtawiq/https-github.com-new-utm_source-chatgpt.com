@@ -268,7 +268,8 @@ def test_summary_is_read_only_and_retains_all_existing_actions(role):
 def test_dashboard_role_gates(role):
     actions = {f['action'] for f in Page(dashboard(session(role))).posts}
     if role == 'admin':
-        assert actions == {'/finance/documents', '/finance/parties', '/finance/rules', '/finance/owners/1/display-name'}
+        assert actions == {'/finance/documents', '/finance/parties', '/finance/rules',
+                           '/finance/owners/1/display-name', '/finance/reconciliations'}
     elif role == 'finance':
         assert actions == {'/finance/documents'}
     else:
