@@ -753,6 +753,8 @@ def execute_confirmed(c, payload):
         from app import billing_rules
         from app.prospect_autopilot import system_user
         out = []
+        accepted_months = set()
+        recorded = False
         for d in action.get('items') or []:
             d = dict(d)
             if d.get('date') and isinstance(d['date'], str):
@@ -764,15 +766,25 @@ def execute_confirmed(c, payload):
                         continue
                 else:
                     d['date'] = None
+            if d.get('kind') == 'export' and not isinstance(d.get('date'), _dt.date):
+                out.append('• ' + str(d.get('number') or '') + ': تاريخ بيان فسح غير مؤكد؛ لم يُسجّل.')
+                continue
             try:
-                out.append('• ' + billing_rules.record(d, system_user())[2].split('\n')[0] + (' — ' + str(d.get('number')) if d.get('number') else ''))
+                _, finance_ids, result = billing_rules.record(d, system_user())
+                if finance_ids:
+                    recorded = True
+                    if isinstance(d.get('date'), _dt.date):
+                        accepted_months.add(d['date'].isoformat()[:7])
+                out.append('• ' + result.split('\n')[0] + (' — ' + str(d.get('number')) if d.get('number') else ''))
             except Exception as exc:
                 out.append('• ' + str(d.get('number')) + ': ' + str(exc)[:100])
-        text = '✅ ' + str(action.get('label') or 'التسجيل') + '\n' + '\n'.join(out) + '\nالقيود مسودات في صفحة المالية بانتظار ترحيلك.'
+        text = ('✅ ' if recorded else '⚠️ ') + str(action.get('label') or 'التسجيل') + '\n' + '\n'.join(out)
+        if not recorded:
+            return text + '\nلم تُنشأ مسودات جديدة.'
+        text += '\nالقيود مسودات في صفحة المالية بانتظار ترحيلك.'
         try:  # owner request: after recording, send the account statements right away
             from app import statement_import
-            months = {str(d.get('date'))[:7] for d in action.get('items') or [] if re.fullmatch(r'\d{4}-\d{2}', str(d.get('date'))[:7])}
-            statements = statement_import.all_statements(sorted(months) or None)
+            statements = statement_import.all_statements(sorted(accepted_months) or None)
             if statements:
                 text += '\n\n— كشوفات الحسابات بعد التسجيل —\n' + statements
         except Exception as exc:
