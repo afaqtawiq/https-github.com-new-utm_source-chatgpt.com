@@ -10,6 +10,7 @@ import json
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 from app.finance_claim_view import itemization_section
+from app.finance_core import RECONCILIATION_KIND, reconciliation_writes_enabled
 
 KINDS = {
     'claim': 'مطالبة مالية',
@@ -288,7 +289,7 @@ def render_dashboard(session, parties, documents, summary, audit, rules, totals=
     body += '</section>'
     if can_write:
         body += _document_form(session, parties)
-    if _can_approve(session):
+    if _can_approve(session) and reconciliation_writes_enabled():
         body += _reconciliation_form(session,parties)
     body += '<section class="card" id="parties"><div class="section-head"><div><h2>الهويات المالية</h2><p>هوية صريحة لصاحب الحساب والجهة المقابلة قبل الاعتماد</p></div></div>'
     if parties:
@@ -323,6 +324,8 @@ def _review_controls(session, document):
         if document.get('rounding_required'):
             body += '<label class="check"><input type="checkbox" name="rounding_ack" value="1" required><span>راجعت الفرق بين المبلغ الأصلي والمبلغ المقرب المعروض، وأقر التقريب وفق دقة العملة.</span></label>'
         body += reconcile_ack+'<button class="btn" type="submit">تسجيل المراجعة</button><p class="hint">المراجعة لا ترحّل المستند ولا تنفذ أي دفع</p></form>'
+    elif status == 'reviewed' and document.get('kind') == RECONCILIATION_KIND and not reconciliation_writes_enabled():
+        body += '<div class="notice neutral">ترحيل تصحيحات صافي الذمم متوقف مؤقتًا. الدليل والرصيد المرحّل ما زالا متاحين.</div>'
     elif status == 'reviewed' and _can_approve(session):
         body += '<form method="post" action="/finance/documents/'+doc_id+'/post">'+_tokens(session)+_field('reason','سبب الاعتماد',kind='textarea',required=True)+'<label class="check"><input type="checkbox" name="confirmation" value="1" required><span>أعتمد ترحيل هذا المستند بالمبلغ والعملة والجهتين المعروضين. سيؤثر في سجل الذمم، ولا ينفذ تحويلًا ماليًا.</span></label>'
         if document.get('kind') in OPENING_KINDS:

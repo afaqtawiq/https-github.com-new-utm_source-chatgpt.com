@@ -265,15 +265,28 @@ def test_summary_is_read_only_and_retains_all_existing_actions(role):
 
 
 @pytest.mark.parametrize('role', ['admin', 'finance', 'transport', 'viewer'])
-def test_dashboard_role_gates(role):
+def test_dashboard_role_gates(role, monkeypatch):
+    monkeypatch.delenv('FINANCE_RECEIVABLE_RECONCILIATION_ENABLED', raising=False)
     actions = {f['action'] for f in Page(dashboard(session(role))).posts}
     if role == 'admin':
-        assert actions == {'/finance/documents', '/finance/parties', '/finance/rules',
-                           '/finance/owners/1/display-name', '/finance/reconciliations'}
+        assert actions == {'/finance/documents', '/finance/parties', '/finance/rules', '/finance/owners/1/display-name'}
     elif role == 'finance':
         assert actions == {'/finance/documents'}
     else:
         assert not actions
+
+
+def test_reconciliation_form_requires_admin_and_explicit_opt_in(monkeypatch):
+    flag = 'FINANCE_RECEIVABLE_RECONCILIATION_ENABLED'
+    route = '/finance/reconciliations'
+    monkeypatch.delenv(flag, raising=False)
+    assert route not in {f['action'] for f in Page(dashboard(session('admin'))).posts}
+    # Fail closed on an ambiguous, noncanonical value.
+    monkeypatch.setenv(flag, 'true')
+    assert route not in {f['action'] for f in Page(dashboard(session('admin'))).posts}
+    monkeypatch.setenv(flag, '1')
+    assert route in {f['action'] for f in Page(dashboard(session('admin'))).posts}
+    assert route not in {f['action'] for f in Page(dashboard(session('finance'))).posts}
 
 
 @pytest.mark.parametrize('status', ['draft', 'reviewed', 'posted', 'reversed', 'void'])

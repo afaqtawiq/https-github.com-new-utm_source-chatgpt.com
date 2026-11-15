@@ -214,6 +214,8 @@ def reconciliation_snapshot(c, owner_id, counterparty_id, currency, cutoff):
 
 def create_receivable_reconciliation(form, actor):
     """Draft only; an explicitly reviewed net statement is not a new claim."""
+    if not core.reconciliation_writes_enabled():
+        fail('إنشاء تصحيحات صافي الذمم متوقف مؤقتًا', 503)
     allowed = {'csrf','idempotency_key','owner_id','counterparty_id','currency','cutoff',
                'target','source_ref','source_locator','authorization_ref'}
     if set(form) - allowed:
@@ -342,6 +344,8 @@ def post_document(doc_id, actor, form):
                 return
             if item['status'] != 'reviewed':
                 fail('راجع الحركة قبل الترحيل', 409)
+            if item['kind'] == core.RECONCILIATION_KIND and not core.reconciliation_writes_enabled():
+                fail('ترحيل تصحيحات صافي الذمم متوقف مؤقتًا', 503)
             identity(c, item['owner_id'], item['counterparty_id'])
             issues = core.validation_issues(item)
             if issues:

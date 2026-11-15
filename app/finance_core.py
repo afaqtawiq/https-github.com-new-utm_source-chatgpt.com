@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 import csv
 import io
+import os
 import re
 
 CURRENCIES = {'SAR': 2, 'AED': 2, 'QAR': 2, 'USD': 2, 'EUR': 2, 'GBP': 2,
@@ -15,6 +16,14 @@ KINDS = {'opening_receivable': ('receivable', 1), 'opening_payable': ('payable',
          'receipt': ('receivable', -1), 'payment': ('payable', -1),
          'receivable_adjustment': ('receivable', -1), 'payable_adjustment': ('payable', -1)}
 MAX_AMOUNT = Decimal('999999999999.99999999')
+
+
+RECONCILIATION_FLAG_ENV = 'FINANCE_RECEIVABLE_RECONCILIATION_ENABLED'
+
+
+def reconciliation_writes_enabled():
+    """Compatibility releases always read existing entries; writes require opt-in."""
+    return os.getenv(RECONCILIATION_FLAG_ENV) == '1'
 
 
 def clean(value, limit=500, required=False):

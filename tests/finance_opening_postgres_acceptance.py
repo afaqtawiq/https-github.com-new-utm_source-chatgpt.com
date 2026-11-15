@@ -751,68 +751,81 @@ def run():
                            cutoff=cutoff_day, target=target, source_ref='synthetic-net.xlsx',
                            source_locator='Totals!'+currency, authorization_ref=auth_ref)
             for currency, target in (('SAR', '129.50'), ('AED', '165.00'))}
-    assert request(None, 'POST', route, data=data['SAR']).status_code in (401, 303)
-    post(route, dict(data['SAR'], csrf=sessions['finance']['csrf']), 'finance', 403)
-    post(route, dict(data['SAR'], csrf='invalid-csrf'), code=403)
-    ancestor_claim, claim_payload = draft('claim', '1.00', counterparty_id=cp, document_date=cutoff_day)
-    post('/finance/documents', dict(claim_payload, kind=kind, idempotency_key=str(uuid.uuid4())),
-         'finance', 400)
-    recon = {}
-    for currency in ('SAR', 'AED'):
-        location = post(route, data[currency]).headers['location']
-        ident = recon[currency] = int(location.rsplit('/', 1)[1])
-        assert post(route, data[currency]).headers['location'] == location
-        assert one('SELECT status FROM finance_documents WHERE id=%s', (ident,))['status'] == 'draft'
-        assert service.statement_data(owner, cp, currency, 'receivable')[3] == '100.00'
-        review(ident, code=400)
-        review(ident, reconciliation_ack='1')
-        post_doc(ident, code=403, role='finance', reconciliation_ack='1')
-        post_doc(ident, code=400)
-        post_doc(ident, reconciliation_ack='1')
-        post_doc(ident, reconciliation_ack='1')
-        assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (ident,))['n'] == 1
-    assert len(set(r['economic_ref'] for r in rows(
-        'SELECT economic_ref FROM finance_documents WHERE id IN (%s,%s)', tuple(recon.values())))) == 2
-    post(route, dict(data['SAR'], idempotency_key=str(uuid.uuid4()), target='150.00',
-                     source_locator='Totals!SAR-duplicate'), code=409)
-    review(ancestor_claim, code=409)
-    receipt = posted('receipt', '7.25', counterparty_id=cp, currency='SAR', document_date='2025-04-02')
-    assert service.statement_data(owner, cp, 'SAR', 'receivable')[3] == '122.25'
-    assert service.statement_data(owner, cp, 'AED', 'receivable')[3] == '165.00'
-    report = monthly.statement_data(owner, cp, 'SAR', '2025-03-01', '2025-03-31')
-    assert (report['claims_minor'], report['receipts_minor'], report['adjustments_minor'],
-            report['closing_minor']) == (10000, 0, 2950, 12950)
-    report = monthly.statement_data(owner, cp, 'SAR', '2025-04-01', '2025-04-30')
-    assert (report['opening_minor'], report['claims_minor'], report['receipts_minor'],
-            report['closing_minor']) == (12950, 0, 725, 12225)
-    statement = f'/finance/monthly-statement?owner_id={owner}&counterparty_id={cp}&currency=SAR&start=2025-03-01&end=2025-03-31'
+    # Flag is explicitly unset in the isolated runner, regardless of the host.
+    assert route not in request('admin', 'GET', '/finance').text
+    post(route, data['SAR'], code=503)
+    with patch.dict(os.environ, {core.RECONCILIATION_FLAG_ENV: '1'}):
+        assert route in request('admin', 'GET', '/finance').text
+        assert request(None, 'POST', route, data=data['SAR']).status_code in (401, 303)
+        post(route, dict(data['SAR'], csrf=sessions['finance']['csrf']), 'finance', 403)
+        post(route, dict(data['SAR'], csrf='invalid-csrf'), code=403)
+        ancestor_claim, claim_payload = draft('claim', '1.00', counterparty_id=cp, document_date=cutoff_day)
+        post('/finance/documents', dict(claim_payload, kind=kind, idempotency_key=str(uuid.uuid4())),
+             'finance', 400)
+        recon = {}
+        for currency in ('SAR', 'AED'):
+            location = post(route, data[currency]).headers['location']
+            ident = recon[currency] = int(location.rsplit('/', 1)[1])
+            assert post(route, data[currency]).headers['location'] == location
+            assert one('SELECT status FROM finance_documents WHERE id=%s', (ident,))['status'] == 'draft'
+            assert service.statement_data(owner, cp, currency, 'receivable')[3] == '100.00'
+            review(ident, code=400)
+            review(ident, reconciliation_ack='1')
+            post_doc(ident, code=403, role='finance', reconciliation_ack='1')
+            post_doc(ident, code=400)
+            post_doc(ident, reconciliation_ack='1')
+            post_doc(ident, reconciliation_ack='1')
+            assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (ident,))['n'] == 1
+        assert len(set(r['economic_ref'] for r in rows(
+            'SELECT economic_ref FROM finance_documents WHERE id IN (%s,%s)', tuple(recon.values())))) == 2
+        post(route, dict(data['SAR'], idempotency_key=str(uuid.uuid4()), target='150.00',
+                         source_locator='Totals!SAR-duplicate'), code=409)
+        review(ancestor_claim, code=409)
+        receipt = posted('receipt', '7.25', counterparty_id=cp, currency='SAR', document_date='2025-04-02')
+        assert service.statement_data(owner, cp, 'SAR', 'receivable')[3] == '122.25'
+        assert service.statement_data(owner, cp, 'AED', 'receivable')[3] == '165.00'
+        report = monthly.statement_data(owner, cp, 'SAR', '2025-03-01', '2025-03-31')
+        assert (report['claims_minor'], report['receipts_minor'], report['adjustments_minor'],
+                report['closing_minor']) == (10000, 0, 2950, 12950)
+        report = monthly.statement_data(owner, cp, 'SAR', '2025-04-01', '2025-04-30')
+        assert (report['opening_minor'], report['claims_minor'], report['receipts_minor'],
+                report['closing_minor']) == (12950, 0, 725, 12225)
+        statement = f'/finance/monthly-statement?owner_id={owner}&counterparty_id={cp}&currency=SAR&start=2025-03-01&end=2025-03-31'
+        assert request('finance', 'GET', statement).status_code == 200
+        pdf = request('finance', 'GET', statement.replace('statement?', 'statement.pdf?'))
+        assert pdf.status_code == 200 and pdf.content.startswith(b'%PDF')
+        with db() as c:
+            ev = c.execute('SELECT * FROM finance_reconciliation_evidence WHERE document_id=%s',
+                           (recon['SAR'],)).fetchone()
+        assert (ev['prior_minor'], ev['target_minor'], ev['delta_minor'], ev['authorization_ref']) == (10000, 12950, 2950, auth_ref)
+        for sql in ('UPDATE finance_reconciliation_evidence SET authorization_ref=\'synthetic tamper\' WHERE document_id=%s',
+                    'DELETE FROM finance_reconciliation_evidence WHERE document_id=%s'):
+            try:
+                with db() as c:
+                    c.execute(sql, (recon['SAR'],))
+                raise AssertionError('Correction evidence was mutable')
+            except RaiseException:
+                pass
+        # A receipt after a new cutoff invalidates that review snapshot without
+        # creating a correction entry, even though it does not alter the cutoff amount.
+        data2 = form(owner_id=owner, counterparty_id=cp, currency='SAR', cutoff='2025-04-01',
+                     target='150.00', source_ref='synthetic-net.xlsx', source_locator='Totals!SAR-2',
+                     authorization_ref=auth_ref)
+        stale = int(post(route, data2).headers['location'].rsplit('/', 1)[1])
+        review(stale, reconciliation_ack='1')
+        posted('receipt', '2.25', counterparty_id=cp, currency='SAR', document_date='2025-04-03')
+        post_doc(stale, code=409, reconciliation_ack='1')
+        assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (stale,))['n'] == 0
+        assert service.statement_data(owner, cp, 'SAR', 'receivable')[3] == '120.00'
+        assert service.statement_data(owner, cp, 'AED', 'receivable')[3] == '165.00'
+    # Simulate switching to the compatible rollback release after records exist.
+    finance_schema.init_storage()
+    assert route not in request('admin', 'GET', '/finance').text
+    assert request('finance', 'GET', f"/finance/documents/{recon['SAR']}").status_code == 200
     assert request('finance', 'GET', statement).status_code == 200
-    pdf = request('finance', 'GET', statement.replace('statement?', 'statement.pdf?'))
-    assert pdf.status_code == 200 and pdf.content.startswith(b'%PDF')
-    with db() as c:
-        ev = c.execute('SELECT * FROM finance_reconciliation_evidence WHERE document_id=%s',
-                       (recon['SAR'],)).fetchone()
-    assert (ev['prior_minor'], ev['target_minor'], ev['delta_minor'], ev['authorization_ref']) == (10000, 12950, 2950, auth_ref)
-    for sql in ('UPDATE finance_reconciliation_evidence SET authorization_ref=\'synthetic tamper\' WHERE document_id=%s',
-                'DELETE FROM finance_reconciliation_evidence WHERE document_id=%s'):
-        try:
-            with db() as c:
-                c.execute(sql, (recon['SAR'],))
-            raise AssertionError('Correction evidence was mutable')
-        except RaiseException:
-            pass
-    # A receipt after a new cutoff invalidates that review snapshot without
-    # creating a correction entry, even though it does not alter the cutoff amount.
-    data2 = form(owner_id=owner, counterparty_id=cp, currency='SAR', cutoff='2025-04-01',
-                 target='150.00', source_ref='synthetic-net.xlsx', source_locator='Totals!SAR-2',
-                 authorization_ref=auth_ref)
-    stale = int(post(route, data2).headers['location'].rsplit('/', 1)[1])
-    review(stale, reconciliation_ack='1')
-    posted('receipt', '2.25', counterparty_id=cp, currency='SAR', document_date='2025-04-03')
-    post_doc(stale, code=409, reconciliation_ack='1')
-    assert one('SELECT COUNT(*) n FROM finance_entries WHERE document_id=%s', (stale,))['n'] == 0
-    assert service.statement_data(owner, cp, 'SAR', 'receivable')[3] == '120.00'
-    assert service.statement_data(owner, cp, 'AED', 'receivable')[3] == '165.00'
+    post_doc(stale, code=503, reconciliation_ack='1')
+    reverse(recon['AED'])
+    assert service.statement_data(owner, cp, 'AED', 'receivable')[3] == '100.00'
     print('PASS: reconciliations on upgraded PostgreSQL: authorization, replay, currency isolation, historical cutoff, later receipt, immutable evidence, and monthly HTML/PDF.')
 
     snapshots = {table: rows('SELECT * FROM '+table+' ORDER BY id') for table in legacy}
@@ -861,6 +874,7 @@ def main():
             'DISCOVERY_AUTO_ENABLED': '0', 'ENABLE_EXTERNAL_ACTIONS': '0',
             'ADMIN_EMAIL': 'opening-bootstrap@fixture.invalid',
             'ADMIN_PASSWORD': secrets.token_urlsafe(32), 'BROWSER_COOKIE_SECURE': '0',
+            'FINANCE_RECEIVABLE_RECONCILIATION_ENABLED': '',
         }
         with patch.dict(os.environ, env), patch.object(socket.socket, 'connect', local_only):
             run()
