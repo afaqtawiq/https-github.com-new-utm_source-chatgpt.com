@@ -40,6 +40,35 @@ def standard_message(company_name, pitch):
     return template_message(company_name, pitch) + '\n' + STOP_LINE
 
 
+def approved_text_enabled():
+    """Owner switch: also send the wording Meta already approved when the current wording has no approved template."""
+    return os.getenv('AUTO_OUTREACH_APPROVED_TEXT', '0') == '1'
+
+
+def message_options(company_name, pitch):
+    """Wordings to try, newest first. The older one is the text of the template Meta approved (before the
+    e-mail line was added); it is offered only with AUTO_OUTREACH_APPROVED_TEXT=1."""
+    options = [standard_message(company_name, pitch)]
+    if approved_text_enabled():
+        from app.daily_prospects import _template_v2
+        options.append(_template_v2(company_name, pitch) + '\n' + STOP_LINE)
+    return options
+
+
+def sendable(approved, options):
+    """The first wording that an approved marketing template can carry, else None — decided locally, with
+    no provider call, so prospects that cannot be reached do not eat the WhatsApp rate limit."""
+    from app.zernio_whatsapp import template_parameters
+    for text in options:
+        for item in approved:
+            if template_parameters(item, text) is not None:
+                return text
+    return None
+
+
+_approved = []
+
+
 def template_spec():
     return {'name': TEMPLATE, 'language': 'ar', 'category': 'MARKETING', 'components': [
         {'type': 'body', 'text': standard_message('{{1}}', '{{2}}'),
@@ -52,7 +81,10 @@ async def ensure_template():
     from app import zernio_whatsapp as wa
     async with wa.client() as c:
         await wa.validate_account(c)
-        for item in await wa.templates(c):
+        found = await wa.templates(c)
+        _approved[:] = [t for t in found if str(t.get('name', '')).startswith('afaaq_marketing_')
+                        and t.get('language') == 'ar' and t.get('status') == 'APPROVED']
+        for item in found:
             if item.get('name') == TEMPLATE and item.get('language') == 'ar':
                 return str(item.get('status') or 'UNKNOWN')
         result = await c.post(wa.BASE + '/whatsapp/templates', json={'accountId': wa.account_id(), **template_spec()})
@@ -97,6 +129,7 @@ async def run():
     stats = {'enabled': enabled(), 'whatsapp': 0, 'email': 0, 'skipped': 0, 'template': None}
     if not stats['enabled']:
         return stats
+    _approved[:] = []
     from starlette.concurrency import run_in_threadpool
     from app import zernio_whatsapp as wa
     from app.daily_prospects import decide
@@ -127,9 +160,13 @@ async def run():
         channels = []
         if item['status'] == 'approved' and stats['template'] != 'APPROVED':
             continue  # still waiting for Meta; email was already attempted on the first pass
-        if item['phone'] and stats['template'] == 'APPROVED':
+        wa_text = sendable(_approved, message_options(item['company_name'], pitch)) if item['phone'] else None
+        if item['phone'] and stats['template'] == 'APPROVED' and not wa_text:
+            # Meta approved a different wording: sending would be refused after several provider calls.
+            stats['mismatch'] = stats.get('mismatch', 0) + 1
+        if wa_text and stats['template'] == 'APPROVED':
             try:
-                await wa.send(item['phone'], text, template_prefix='afaaq_marketing_')
+                await wa.send(item['phone'], wa_text, template_prefix='afaaq_marketing_')
                 channels.append('whatsapp')
                 stats['whatsapp'] += 1
             except wa.WhatsAppBlocked as exc:
@@ -152,6 +189,9 @@ async def run():
             with db() as c:
                 c.execute("UPDATE daily_prospects SET outcome_note='autopilot: waiting_channel',updated_at=%s WHERE id=%s",
                           (utcnow(), item['id']))
+    if stats.get('mismatch'):
+        print('AUTO_OUTREACH_TEMPLATE_MISMATCH', stats['mismatch'],
+              'القالب المعتمد في Meta لا يطابق نص الرسالة الحالي؛ لم تُجرَّب أي رسالة واتساب', flush=True)
     log(uid, 'prospect_autopilot_run', 'daily_prospect', None,
         f"واتساب {stats['whatsapp']} · بريد {stats['email']} · مستبعد {stats['skipped']} · القالب {stats['template']}")
     return stats
