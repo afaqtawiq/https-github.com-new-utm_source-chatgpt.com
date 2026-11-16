@@ -14,6 +14,7 @@ from urllib.parse import quote, urlencode, parse_qs, urlsplit
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from app import clearance_intake_summary
 from app import zernio_whatsapp as z
 
 router = APIRouter()
@@ -165,6 +166,9 @@ async def inbox(request: Request):
             body = '<h2>' + escape(str(row.get('participantName') or '')) + ' · +' + escape(z.phone(row['participantId'])) + '</h2>'
             if takeover_render is not None:
                 body += await takeover_render(z.account_id(), cid, z.phone(row['participantId']), current['csrf'])
+            if not cursor:
+                body += clearance_intake_summary.panel(
+                    clearance_intake_summary.build(messages, z.phone(row['participantId']), z.phone))
             body += ''.join(render_message(m, cid, current['csrf']) for m in messages) or '<p>لم تظهر رسائل؛ النتيجة لا تثبت عدم وجود تواصل سابق.</p>'
             body += next_link(payload.get('pagination') or {}, conversation=cid)
             body += '<form method="post" action="/whatsapp-inbox/drafts"><input type="hidden" name="csrf" value="' + escape(current['csrf']) + '"><input type="hidden" name="conversation" value="' + escape(cid) + '"><label>رد للمراجعة<textarea name="body" maxlength="4000" required></textarea></label><p>لا يُرسل الآن. إرسال الرد بعد المراجعة يحتاج صلاحية المدير والتحقق الإضافي ونافذة 24 ساعة مفتوحة. خارجها يلزم قالب معتمد عبر المسار المخصص.</p><button>حفظ مسودة الرد</button></form>'
