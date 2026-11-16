@@ -2,7 +2,7 @@
 from urllib.parse import urlencode
 from app import finance_view as v
 
-LABELS = {'claim':'مطالبة مالية', 'receipt':'قبض مسجل', 'receivable_adjustment':'تسوية غير نقدية', 'opening_receivable':'إثبات رصيد افتتاحي'}
+LABELS = {'receivable_reconciliation':'تصحيح صافي الذمم بالزيادة','claim':'مطالبة مالية', 'receipt':'قبض مسجل', 'receivable_adjustment':'تسوية غير نقدية', 'opening_receivable':'إثبات رصيد افتتاحي'}
 
 
 def query(report):

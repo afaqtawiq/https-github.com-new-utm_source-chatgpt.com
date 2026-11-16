@@ -77,7 +77,7 @@ def build_statement(owner, party, currency, start, end, entries):
             totals['claims_minor'] += amount
         elif entry['kind'] == 'receipt':
             totals['receipts_minor'] -= amount
-        elif entry['kind'] == 'receivable_adjustment':
+        elif entry['kind'] in ('receivable_adjustment',core.RECONCILIATION_KIND):
             totals['adjustments_minor'] += amount
         else:
             totals['opening_movements_minor'] += amount

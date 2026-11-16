@@ -2,6 +2,7 @@
 import hashlib
 import json
 import uuid
+from datetime import date, datetime
 from decimal import Decimal
 from fastapi import HTTPException
 from psycopg.errors import UniqueViolation
@@ -9,6 +10,7 @@ from psycopg.types.json import Jsonb
 from app.storage import db, utcnow
 from app import finance_core as core
 from app import finance_claim_core as claim_core
+from app.finance_monthly_core import effective_date, REPORT_TIMEZONE
 from app.finance_schema import LOCK_KEY
 
 
@@ -198,6 +200,87 @@ def rounding_required(item):
     return bool(item['currency'] and Decimal(core.display_minor(item['amount_minor'], item['currency'])) != item['source_amount'])
 
 
+def reconciliation_snapshot(c, owner_id, counterparty_id, currency, cutoff):
+    entries = c.execute("""SELECT e.id,d.document_date,e.signed_minor,e.phase,e.created_at FROM finance_entries e
+        JOIN finance_documents d ON d.id=e.document_id
+        WHERE d.owner_id=%s AND d.counterparty_id=%s AND d.currency=%s AND e.side='receivable'
+        ORDER BY e.id""", (owner_id,counterparty_id,currency)).fetchall()
+    values = [(e['id'],effective_date(e),e['signed_minor']) for e in entries]
+    history = [(id_,when.isoformat(),amount) for id_,when,amount in values]
+    prior = sum(amount for _,when,amount in values if when <= cutoff)
+    later = sum(amount for _,when,amount in values if when > cutoff)
+    return prior, later, fingerprint(history)
+
+
+def create_receivable_reconciliation(form, actor):
+    """Draft only; an explicitly reviewed net statement is not a new claim."""
+    if not core.reconciliation_writes_enabled():
+        fail('إنشاء تصحيحات صافي الذمم متوقف مؤقتًا', 503)
+    allowed = {'csrf','idempotency_key','owner_id','counterparty_id','currency','cutoff',
+               'target','source_ref','source_locator','authorization_ref'}
+    if set(form) - allowed:
+        fail('حقول تصحيح الذمم غير صالحة')
+    pair = [core.clean(form.get(k), 18, True) for k in ('owner_id','counterparty_id')]
+    if not all(v.isascii() and v.isdigit() and int(v)>0 for v in pair):
+        fail('يلزم مرجع صحيح للطرفين')
+    owner_id, counterparty_id = map(int,pair)
+    currency = core.currency_code(form.get('currency'))
+    raw = core.clean(form.get('target'), 32, True)
+    target = core.exact_minor(raw,currency)
+    cutoff = date.fromisoformat(core.clean(form.get('cutoff'),10,True))
+    if cutoff > datetime.now(REPORT_TIMEZONE).date():
+        fail('تاريخ القطع لا يمكن أن يكون في المستقبل')
+    ref = core.clean(form.get('source_ref'),300,True)
+    locator = core.clean(form.get('source_locator'),300,True)
+    authorization = core.clean(form.get('authorization_ref'),1000,True)
+    key = token(form.get('idempotency_key'))
+    digest = fingerprint([owner_id,counterparty_id,currency,cutoff,raw,ref,locator,authorization])
+    try:
+        with db() as c:
+            lock(c)
+            old = replay(c,'finance_documents',key,digest)
+            if old:
+                return old['id']
+            identity(c,owner_id,counterparty_id)
+            prior, later, snapshot_hash = reconciliation_snapshot(c,owner_id,counterparty_id,currency,cutoff)
+            delta = target-prior
+            if delta <= 0:
+                fail('التصحيح بالزيادة يتطلب صافيًا أكبر من رصيد الذمم حتى تاريخ القطع')
+            delta_value = core.decimal_amount(core.display_minor(delta,currency))
+            event = f'receivable-reconciliation:{currency}:{cutoff.isoformat()}'
+            row = c.execute("""INSERT INTO finance_documents(owner_id,counterparty_id,kind,currency,
+                source_amount,source_amount_raw,amount_minor,document_date,source_ref,source_locator,economic_ref,
+                source_role,amount_basis,idempotency_key,payload_hash,created_by,created_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'summary','net',%s,%s,%s,%s) RETURNING *""",
+                (owner_id,counterparty_id,core.RECONCILIATION_KIND,currency,delta_value,raw,delta,cutoff,
+                 ref,locator,event,key,digest,actor,utcnow())).fetchone()
+            c.execute("""INSERT INTO finance_reconciliation_evidence(document_id,cutoff,target_minor,prior_minor,
+                later_minor,delta_minor,snapshot_hash,authorization_ref) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (row['id'],cutoff,target,prior,later,delta,snapshot_hash,authorization))
+            guard_opening_period(c,row)
+            audit(c,actor,'reconciliation_created','document',row['id'],{
+                'cutoff':cutoff,'target_minor':target,'prior_minor':prior,'later_minor':later,'delta_minor':delta,
+                'currency':currency,'source_ref':ref,'source_locator':locator,'authorization_ref':authorization})
+            return row['id']
+    except UniqueViolation:
+        fail('سبق تسجيل هذا المصدر للتصحيح؛ راجع القيد قبل التكرار',409)
+
+
+def check_reconciliation(c, item, form):
+    if item['kind'] != core.RECONCILIATION_KIND:
+        return None
+    if form.get('reconciliation_ack') != '1':
+        fail('أكد الصافي وتاريخ القطع ومنع تكرار الحركات التاريخية المشمولة')
+    evidence = c.execute('SELECT * FROM finance_reconciliation_evidence WHERE document_id=%s',
+                         (item['id'],)).fetchone()
+    if not evidence or evidence['cutoff'] != item['document_date'] or evidence['delta_minor'] != item['amount_minor']:
+        fail('دليل تصحيح الذمم غير مكتمل',409)
+    prior,later,digest = reconciliation_snapshot(c,item['owner_id'],item['counterparty_id'],item['currency'],evidence['cutoff'])
+    if (prior,later,digest) != (evidence['prior_minor'],evidence['later_minor'],evidence['snapshot_hash']):
+        fail('تغير دفتر الذمم منذ إعداد التصحيح؛ ألغ المسودة وأعد المراجعة',409)
+    return evidence
+
+
 def guard_opening_period(c, item):
     """Called under the transaction lock at both review and posting.
 
@@ -206,7 +289,7 @@ def guard_opening_period(c, item):
     exact owner/counterparty/currency AND receivable/payable side only.
     """
     side = core.KINDS[item['kind']][0]
-    existing = c.execute('''SELECT id,kind,opening_cutoff FROM finance_documents
+    existing = c.execute('''SELECT id,kind,opening_cutoff,document_date FROM finance_documents
         WHERE owner_id=%s AND counterparty_id=%s AND currency=%s AND status='posted' AND id<>%s''',
         (item['owner_id'],item['counterparty_id'],item['currency'],item['id'])).fetchall()
     if item['kind'] in core.OPENING_KINDS:
@@ -214,8 +297,12 @@ def guard_opening_period(c, item):
             fail('يجب اعتماد الرصيد الافتتاحي قبل حركات الجانب المحدد من الذمم؛ يوجد رصيد افتتاحي أو حركات مرحّلة للحساب', 409)
     else:
         for prior in existing:
-            if prior['kind'] in core.OPENING_KINDS and core.KINDS[prior['kind']][0] == side and item['document_date'] <= prior['opening_cutoff']:
-                fail('الحركة ضمن الفترة المشمولة بالرصيد الافتتاحي؛ يمنع إعادة تسجيل المطالبات أو التسويات التاريخية', 409)
+            if core.KINDS[prior['kind']][0] != side:
+                continue
+            cutoff = prior['opening_cutoff'] if prior['kind'] in core.OPENING_KINDS else (
+                prior['document_date'] if prior['kind'] == core.RECONCILIATION_KIND else None)
+            if cutoff and item['document_date'] <= cutoff:
+                fail('الحركة ضمن فترة رصيد افتتاحي أو تصحيح صافٍ مرحّل؛ لا تُكرر الحركات التاريخية المشمولة',409)
 
 
 def review_document(doc_id, actor, form):
@@ -234,6 +321,7 @@ def review_document(doc_id, actor, form):
         if issues:
             fail('؛ '.join(issues))
         guard_opening_period(c, item)
+        check_reconciliation(c,item,form)
         opening_ack = item['kind'] in core.OPENING_KINDS and form.get('opening_ack') == '1'
         if item['kind'] in core.OPENING_KINDS and not opening_ack:
             fail('أكد صافي الرصيد الافتتاحي وتاريخ القطع وشمول التسويات السابقة وعدم تكرارها')
@@ -256,11 +344,14 @@ def post_document(doc_id, actor, form):
                 return
             if item['status'] != 'reviewed':
                 fail('راجع الحركة قبل الترحيل', 409)
+            if item['kind'] == core.RECONCILIATION_KIND and not core.reconciliation_writes_enabled():
+                fail('ترحيل تصحيحات صافي الذمم متوقف مؤقتًا', 503)
             identity(c, item['owner_id'], item['counterparty_id'])
             issues = core.validation_issues(item)
             if issues:
                 fail('؛ '.join(issues))
             guard_opening_period(c, item)
+            evidence = check_reconciliation(c,item,form)
             if item['kind'] in core.OPENING_KINDS and (not item['opening_review_ack'] or form.get('opening_ack') != '1'):
                 fail('يلزم اعتماد صريح لصافي الرصيد الافتتاحي والفترة التاريخية المشمولة')
             if rounding_required(item) and not item['rounding_ack']:
@@ -276,6 +367,8 @@ def post_document(doc_id, actor, form):
             c.execute('INSERT INTO finance_entries(document_id,phase,side,signed_minor,actor_id,created_at) VALUES(%s,%s,%s,%s,%s,%s)',
                       (doc_id, 'posting', side, sign * item['amount_minor'], actor, utcnow()))
             audit(c, actor, 'document_posted', 'document', doc_id, {'side':side, 'signed_minor':sign * item['amount_minor'], 'currency':item['currency'], 'kind':item['kind'], 'opening_cutoff':item['opening_cutoff'], 'opening_confirmation_ref':item['opening_confirmation_ref'], 'reason':reason})
+            if evidence:
+                audit(c,actor,'reconciliation_posted','document',doc_id,dict(evidence))
     except UniqueViolation:
         fail('الحركة مرحّلة مسبقًا؛ راجع مرجع الحركة', 409)
 
@@ -293,6 +386,11 @@ def reverse_document(doc_id, actor, form):
             return
         if item['status'] != 'posted':
             fail('العكس متاح للحركات المرحّلة فقط', 409)
+        if core.KINDS[item['kind']][0] == 'receivable' and c.execute('''SELECT id FROM finance_documents
+            WHERE owner_id=%s AND counterparty_id=%s AND currency=%s AND status='posted'
+            AND kind=%s AND document_date>=%s AND id<>%s LIMIT 1''',
+            (item['owner_id'],item['counterparty_id'],item['currency'],core.RECONCILIATION_KIND,item['document_date'],doc_id)).fetchone():
+            fail('لا يُعكس قيد مشمول بتصحيح ذمم مرحّل قبل مراجعته وعكسه أولًا',409)
         if item['kind'] in core.OPENING_KINDS:
             later = c.execute("SELECT kind FROM finance_documents WHERE owner_id=%s AND counterparty_id=%s AND currency=%s AND status='posted' AND id<>%s",(item['owner_id'],item['counterparty_id'],item['currency'],doc_id)).fetchall()
             if any(core.KINDS[d['kind']][0] == core.KINDS[item['kind']][0] for d in later):
@@ -345,7 +443,7 @@ def create_allocation(form, actor):
         if any(credit[k] != debit[k] for k in ('owner_id','counterparty_id','currency')):
             fail('يلزم تطابق المالك والطرف والعملة؛ لا تحويل عملات أو مقاصة بين جهات')
         side, sign = core.KINDS[credit['kind']]
-        if sign != -1 or core.KINDS[debit['kind']] != (side, 1):
+        if sign != -1 or debit['kind'] == core.RECONCILIATION_KIND or core.KINDS[debit['kind']] != (side, 1):
             fail('يجب تخصيص تسوية إلى مطالبة أو التزام من نفس الجانب')
         if debit['kind'] in core.OPENING_KINDS and credit['document_date'] <= debit['opening_cutoff']:
             fail('لا يخصص للرصيد الافتتاحي قبض أو تسوية ضمن الفترة التاريخية المشمولة', 409)
@@ -430,6 +528,13 @@ def detail_data(doc_id):
         if not item:
             fail('الحركة غير موجودة',404)
         item = enrich(c,item)
+        if item['kind'] == core.RECONCILIATION_KIND:
+            ev = c.execute('SELECT * FROM finance_reconciliation_evidence WHERE document_id=%s',(doc_id,)).fetchone()
+            if ev:
+                item['reconciliation_evidence'] = dict(ev)
+                for k in ('target','prior','later','delta'):
+                    item['reconciliation_evidence'][k+'_display'] = core.display_minor(ev[k+'_minor'],item['currency'])
+                item['reconciliation_evidence']['projected_display'] = core.display_minor(ev['target_minor']+ev['later_minor'],item['currency'])
         item['claim_details'] = claim_details(c, doc_id) if item['kind'] == 'claim' else None
         allocations = c.execute('SELECT * FROM finance_allocations WHERE credit_id=%s OR document_id=%s ORDER BY id', (doc_id,doc_id)).fetchall()
         for allocation in allocations:
@@ -438,7 +543,7 @@ def detail_data(doc_id):
         if item['status']=='posted':
             opposite = (item['side'], -core.KINDS[item['kind']][1])
             for candidate in c.execute(DOCUMENT_SELECT+" WHERE d.owner_id=%s AND d.counterparty_id=%s AND d.currency=%s AND d.status='posted' ORDER BY d.id", (item['owner_id'],item['counterparty_id'],item['currency'])).fetchall():
-                if core.KINDS[candidate['kind']] == opposite and allocated(c,candidate['id']) < candidate['amount_minor']:
+                if candidate['kind'] != core.RECONCILIATION_KIND and core.KINDS[candidate['kind']] == opposite and allocated(c,candidate['id']) < candidate['amount_minor']:
                     candidates.append(enrich(c,candidate))
         return item, allocations, audit_rows(c,doc_id), candidates
 

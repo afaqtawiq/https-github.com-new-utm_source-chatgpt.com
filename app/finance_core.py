@@ -3,16 +3,27 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 import csv
 import io
+import os
 import re
 
 CURRENCIES = {'SAR': 2, 'AED': 2, 'QAR': 2, 'USD': 2, 'EUR': 2, 'GBP': 2,
               'OMR': 3, 'BHD': 3, 'KWD': 3, 'JPY': 0}
+RECONCILIATION_KIND = 'receivable_reconciliation'
 OPENING_KINDS = frozenset(('opening_receivable', 'opening_payable'))
 KINDS = {'opening_receivable': ('receivable', 1), 'opening_payable': ('payable', 1),
+         RECONCILIATION_KIND: ('receivable', 1),
          'claim': ('receivable', 1), 'payable': ('payable', 1), 'expense': ('payable', 1),
          'receipt': ('receivable', -1), 'payment': ('payable', -1),
          'receivable_adjustment': ('receivable', -1), 'payable_adjustment': ('payable', -1)}
 MAX_AMOUNT = Decimal('999999999999.99999999')
+
+
+RECONCILIATION_FLAG_ENV = 'FINANCE_RECEIVABLE_RECONCILIATION_ENABLED'
+
+
+def reconciliation_writes_enabled():
+    """Compatibility releases always read existing entries; writes require opt-in."""
+    return os.getenv(RECONCILIATION_FLAG_ENV) == '1'
 
 
 def clean(value, limit=500, required=False):
@@ -100,7 +111,7 @@ def owner_balance_totals(balances):
 
 def parse_document(form):
     kind = clean(form.get('kind'), 30, True)
-    if kind not in KINDS:
+    if kind not in KINDS or kind == RECONCILIATION_KIND:
         raise ValueError('نوع القيد غير مدعوم')
     currency = currency_code(form.get('currency'), allow_unknown=True)
     amount_raw = clean(form.get('amount'), 32, True)
@@ -146,6 +157,7 @@ def parse_document(form):
 def validation_issues(document):
     issues = []
     opening = document.get('kind') in OPENING_KINDS
+    reconciliation = document.get('kind') == RECONCILIATION_KIND
     if not document.get('currency'):
         issues.append('العملة غير مؤكدة')
     if document.get('source_verification') == 'independently_verified' and not document.get('verification_ref'):
@@ -165,6 +177,11 @@ def validation_issues(document):
             issues.append('الرصيد الافتتاحي صافي ملخص تجميعي بعد التسويات التاريخية')
         if any(document.get(k) for k in ('invoice_ref','customs_ref','shipment_id')):
             issues.append('الرصيد الافتتاحي ليس فاتورة أو إيراد شحنة جديدة؛ وثّق التفاصيل في دليل المصدر')
+    elif reconciliation:
+        if document.get('source_role') != 'summary' or document.get('amount_basis') != 'net':
+            issues.append('التصحيح يعتمد صافي كشف تجميعي معتمد')
+        if any(document.get(k) for k in ('invoice_ref','customs_ref','shipment_id')):
+            issues.append('التصحيح ليس فاتورة أو إثبات قبض أو دفع')
     elif document.get('source_role') != 'detail':
         issues.append('المصدر ملخص تجميعي؛ لا يرحّل مع الحركات التفصيلية')
     if document.get('amount_minor') is not None and document['amount_minor'] <= 0:

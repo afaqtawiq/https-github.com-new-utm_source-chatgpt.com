@@ -138,6 +138,13 @@ async def create_document(request: Request):
     return RedirectResponse('/finance/documents/'+str(doc_id),303)
 
 
+@router.post('/finance/reconciliations')
+async def create_reconciliation(request: Request):
+    session, form = await mutation(request, 'approve_finance')
+    doc_id = invoke(service.create_receivable_reconciliation, form, session['user_id'])
+    return RedirectResponse('/finance/documents/'+str(doc_id),303)
+
+
 @router.post('/finance/owners/{owner_id}/display-name')
 async def rename_owner(owner_id: int, request: Request):
     session, form = await mutation(request, 'approve_finance')
