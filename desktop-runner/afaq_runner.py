@@ -491,9 +491,29 @@ class Task:
     DETAIL_SECTIONS = ('معلومات البيان الأساسية', 'الفواتير', 'تفاصيل فاتورة البيان الجمركي',
                        'الفواتير المصدرة على البيان الجمركي من جميع الجهات', 'الأصناف')
 
+    DETAIL_MARKERS = ('تفاصيل الطلب', 'ملخص الطلب', 'معلومات البيان الأساسية')
+
+    def details_open(self, page, url, size):
+        """The details screen is up: one of its titles shows, the address changed, or the page grew a lot."""
+        try:
+            for title in self.DETAIL_MARKERS:
+                found = page.get_by_text(title, exact=True)
+                if any(found.nth(i).is_visible() for i in range(min(found.count(), 5))):
+                    return True
+            return page.url.split('#')[0] != url.split('#')[0] or len(page.locator('body').inner_text()) > size + 400
+        except Exception:
+            return False
+
     def open_details(self, page, row, number):
-        """Click «إظهار التفاصيل» of one row (read-only). Some rows keep it inside the row's actions menu."""
+        """Click «إظهار التفاصيل» of one row (read-only). Some rows keep it inside the row's actions menu.
+        FASAH can take a long time to draw the details, so wait for it instead of clicking again (a second
+        click or Escape on a slow screen used to close the very window that was loading)."""
         target = row.get_by_text('إظهار التفاصيل')
+        url, clicked = page.url, False
+        try:
+            size = len(page.locator('body').inner_text())
+        except Exception:
+            size = 0
         for attempt in range(4):
             try:
                 row.scroll_into_view_if_needed(timeout=5000)
@@ -507,14 +527,22 @@ class Task:
                     target.first.dispatch_event('click')
                 else:
                     target.first.click(timeout=8000)
-                self.wait(page, 4)
-                if page.get_by_text('تفاصيل الطلب', exact=True).count() or page.get_by_text('ملخص الطلب', exact=True).count():
-                    return
+                clicked = True
             except Stop:
                 raise
             except Exception:
-                page.keyboard.press('Escape')
+                if self.details_open(page, url, size):
+                    return
+                if not clicked:
+                    page.keyboard.press('Escape')
                 self.wait(page, 2)
+                continue
+            for _ in range(10):  # up to ~20 seconds for a slow FASAH screen
+                self.wait(page, 2)
+                if self.details_open(page, url, size):
+                    return
+        if clicked:
+            return  # the click went through but no known title showed: read what is on the screen
         try:
             seen = ' '.join(row.inner_text().split())[:200] + ' | ' + row.inner_html()[:500]
         except Exception:

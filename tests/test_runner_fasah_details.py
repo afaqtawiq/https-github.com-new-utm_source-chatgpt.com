@@ -55,3 +55,24 @@ def test_details_open_and_sections_expand(number):
         assert grown > 0 and 'قيمة الفاتورة 7000' in text and '449.53' in text and 'سلة الرحائب' in text
         assert page.evaluate('window.bad') is None  # never the site menu, «إلغاء البيان» or «تقديم الطلب»
         browser.close()
+
+
+def test_slow_details_are_waited_for_not_closed():
+    """A slow FASAH screen: the details show well after the click. The runner waits; it never clicks again or
+    presses Escape (which closed the loading window before)."""
+    slow = PAGE.replace("function show(n){dlg.style.display='block';dlg.dataset.n=n}",
+                        "function show(n){window.clicks=(window.clicks||0)+1;setTimeout(function(){dlg.style.display='block';dlg.dataset.n=n},300)}"
+                        "document.addEventListener('keydown',function(e){if(e.key==='Escape')window.esc=1})")
+    assert slow != PAGE
+    with sync_api.sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch()
+        except Exception as exc:
+            pytest.skip(str(exc)[:80])
+        page = browser.new_page()
+        page.set_content(slow)
+        task = Fake()
+        task.open_details(page, page.locator('tr', has_text='111111').last, '111111')
+        assert page.locator('#dlg').is_visible()
+        assert page.evaluate('window.clicks') == 1 and page.evaluate('window.esc') is None
+        browser.close()

@@ -57,3 +57,21 @@ def test_disabled_by_default(mods, monkeypatch):
     assert ap.enabled() is False
     monkeypatch.setenv('AUTO_OUTREACH', '1'); monkeypatch.setenv('ENABLE_EXTERNAL_ACTIONS', '1')
     assert ap.enabled() is True
+
+
+def test_unapproved_wording_is_not_attempted(mods, monkeypatch):
+    """Meta approved the earlier wording: the current one is not tried at all (no provider calls); the approved
+    wording is used only when the owner switch is on."""
+    dp, ap, extra = mods
+    pitch = dp.classify('شركة أغذية', '', '')[3]
+    with patch.dict(sys.modules, extra):
+        old = dp._template_v2('{{1}}', '{{2}}') + '\n' + ap.STOP_LINE
+        approved = [{'name': ap.TEMPLATE, 'language': 'ar', 'status': 'APPROVED',
+                     'components': [{'type': 'BODY', 'text': old}]}]
+        monkeypatch.delenv('AUTO_OUTREACH_APPROVED_TEXT', raising=False)
+        assert ap.sendable(approved, ap.message_options('شركة أغذية', pitch)) is None
+        monkeypatch.setenv('AUTO_OUTREACH_APPROVED_TEXT', '1')
+        text = ap.sendable(approved, ap.message_options('شركة أغذية', pitch))
+        assert text and 'البريد:' not in text and ap.STOP_LINE in text
+        current = [{'components': ap.template_spec()['components']}]
+        assert 'البريد:' in ap.sendable(current, ap.message_options('شركة أغذية', pitch))
