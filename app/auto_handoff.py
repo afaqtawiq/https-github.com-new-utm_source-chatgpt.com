@@ -20,7 +20,8 @@ from html import escape
 from app import whatsapp_agent_store as store
 
 REASONS = {'staff': 'تدخل موظف في المحادثة', 'unverified': 'تعذر التحقق من معلومة طلبها العميل',
-           'repeat': 'كرر العميل نفس السؤال', 'conflict': 'نقص أو تعارض في بيانات/مستندات العميل'}
+           'repeat': 'كرر العميل نفس السؤال', 'conflict': 'نقص أو تعارض في بيانات/مستندات العميل',
+           'upset': 'العميل منزعج أو يشتكي'}
 REPEAT_COUNT, REPEAT_MINUTES = 3, 30
 SUGGEST_COOLDOWN_HOURS = 6
 DDL = '''CREATE TABLE IF NOT EXISTS whatsapp_handoff_summaries(id BIGSERIAL PRIMARY KEY, account_id TEXT NOT NULL,

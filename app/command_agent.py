@@ -79,6 +79,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'result': {'type': 'string', 'enum': ['approved', 'rejected']}, 'until': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['result']}},
     {'name': 'detention_claim', 'description': 'Audit a shipping agent detention/demurrage invoice for a container: compares the invoiced amount (and days if given) with the free period incl. extensions, the proven return date and the agent tariff; an overcharge gets an objection email ready to send with the code. e.g. «فاتورة غرامة الحاوية MSKU1234567 من الوكيل 4500 ريال 12 يوم».',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'amount': {'type': 'string'}, 'days': {'type': 'string'}, 'returned_on': {'type': 'string'}}, 'required': ['container', 'amount']}},
+    {'name': 'customer_waiting', 'description': '«لا أحد ينتظر»: promises made to customers (أرجع لك خلال ساعة…), customers waiting for a staff reply and upset customers. action list (default) shows them; action close with id closes a promise that was handled. e.g. «الوعود» «مين ينتظر رد» «العملاء المنزعجين» «تم الوعد 12».',
+     'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'close']}, 'id': {'type': 'string'}}}},
     {'name': 'port_storage', 'description': 'Jeddah port terminal storage (أرضيات الميناء, separate from the shipping line detention): either calculate it for a container — give container (registered) or discharged date (YYYY-MM-DD or dd/mm) and size 20/40, optional until date — or, with topic=operators, return the terminal operators guide (RSGT / DP World Jeddah: portals, contacts, payment and gate-pass steps, port charges). e.g. «كم أرضيات الميناء لحاوية 40 نزلت 1/11», «كيف أدفع لموانئ دبي», «رقم بوابة البحر الأحمر».',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'discharged': {'type': 'string'}, 'size': {'type': 'string'}, 'until': {'type': 'string'}, 'topic': {'type': 'string', 'enum': ['calc', 'operators']}}}},
     {'name': 'detention_exposure', 'description': 'Summary of demurrage/detention exposure per shipping agent: open containers, overdue, ending soon, estimated cost so far and tomorrow, extension requests. e.g. «كم الغرامات علينا» «وضع الحاويات مع الوكلاء».',
@@ -543,6 +545,14 @@ def tool_free_time_result(c, a):
 def tool_detention_claim(c, a):
     from app import line_desk
     return line_desk.audit_claim(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
+
+
+def tool_customer_waiting(c, a):
+    from app import no_wait
+    if a.get('action') == 'close':
+        m = re.search(r'\d+', str(a.get('id') or ''))
+        return no_wait.close(int(m.group()), _member().get('name') or '') if m else 'اكتب رقم الوعد، مثل: تم الوعد 12.'
+    return no_wait.list_text()
 
 
 def tool_port_storage(c, a):
