@@ -334,7 +334,11 @@ importer_or_exporter (name of the importer/exporter as written), port,
 invoice_no, invoice_total (number, as written, in the invoice currency), invoice_currency,
 invoice_issuer (the foreign supplier/company that issued the invoice, as written),
 customs_duty (الرسوم الجمركية, number), other_fees (الرسوم الأخرى, number), total_due (إجمالي المستحق),
-confidence (0..1)"""
+confidence (0..1),
+summary_ar (one Arabic sentence: what this document is and for whom),
+key_facts (object, Arabic keys, up to 8 of the most important facts as written: shipper, consignee, references,
+ETD/ETA or other dates, ports, vessel, packages/weight, amounts).
+Answer with the JSON object only."""
 PDF_PROMPT += _SHIPPING_HINT
 
 
@@ -360,9 +364,10 @@ async def extract_pdf(data):
         result.raise_for_status()
     text = ''.join(part.get('text', '') for part in result.json().get('content', []) if part.get('type') == 'text')
     match = re.search(r'\{.*\}', text, re.S)
-    if not match:
-        raise ValueError('لم أستخرج بيانات واضحة من الملف.')
-    return json.loads(match.group(0))
+    try:
+        return json.loads(match.group(0)) if match else {'document_kind': 'other'}
+    except json.JSONDecodeError:
+        return {'document_kind': 'other'}  # still kept: questions about the file are answered from the file itself
 
 
 def declaration_billing_reply(fields, caption):
@@ -407,6 +412,17 @@ async def handle_pdf(c, payload, sender, index):
                                 | si.XLSX | si.CSV, 15 * 1024 * 1024)
         if not got:
             raise ValueError('تعذر تنزيل الملف؛ أعد إرساله.')
+        from app import staff_documents
+        try:  # kept 3 days so any later question about this file is answered from it
+            doc_id = staff_documents.save(sender, staff_documents.filename_of(payload, index), got[1], got[0])
+        except Exception as exc:
+            doc_id = None
+            print('STAFF_DOCUMENT_SAVE_FAILED', type(exc).__name__, str(exc)[:120], flush=True)
+        if caption and staff_documents.is_question(caption) and not re.search(r'سجل|كشف|بنك|سداد|فوتر', caption):
+            # «شوف لي تاريخ وصول الشحنة» with the file: answer it from the file, nothing is recorded.
+            row = staff_documents.latest(sender)
+            if row:
+                return audit(c, payload, sender, await staff_documents.answer(row, caption), command + '\nسؤال عن الملف')
         from app import bank_reconcile
         _att = ((payload.get('message') or {}).get('attachments') or [{}])[index] or {}
         if bank_reconcile.is_bank(caption + ' ' + ' '.join(str(_att.get(k) or '') for k in ('name', 'fileName', 'filename'))):
@@ -444,6 +460,7 @@ async def handle_pdf(c, payload, sender, index):
             return audit(c, payload, sender, reply, command)
         fields = await extract_pdf(got[0])
         command += '\nقراءة الملف: ' + json.dumps(fields, ensure_ascii=False)[:1500]
+        staff_documents.set_fields(doc_id, fields)
         if fields.get('document_kind') == 'statement':
             from app.prospect_autopilot import system_user
             items = await si.extract(si.content_for(got[0], got[1]))
@@ -455,7 +472,12 @@ async def handle_pdf(c, payload, sender, index):
         elif fields.get('document_kind') in ('customs_declaration', 'commercial_invoice'):
             reply = declaration_billing_reply(fields, caption)
         else:
-            reply = 'وصلني الملف لكنه ليس بيانًا جمركيًا أو فاتورة واضحة؛ ما المطلوب منه؟'
+            reply = staff_documents.facts_reply(fields)
+            if not reply:
+                row = staff_documents.latest(sender)
+                reply = await staff_documents.summary(row) if row else ''
+            reply = ('📄 ' + reply + '\n\n' if reply else 'وصلني الملف. ') + \
+                'لم أسجل منه شيئًا. اسألني عن أي معلومة فيه (مثل: متى تصل الشحنة؟).'
     except ValueError as error:
         reply = str(error)
     except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError):
