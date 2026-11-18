@@ -79,6 +79,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'result': {'type': 'string', 'enum': ['approved', 'rejected']}, 'until': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['result']}},
     {'name': 'detention_claim', 'description': 'Audit a shipping agent detention/demurrage invoice for a container: compares the invoiced amount (and days if given) with the free period incl. extensions, the proven return date and the agent tariff; an overcharge gets an objection email ready to send with the code. e.g. «فاتورة غرامة الحاوية MSKU1234567 من الوكيل 4500 ريال 12 يوم».',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'amount': {'type': 'string'}, 'days': {'type': 'string'}, 'returned_on': {'type': 'string'}}, 'required': ['container', 'amount']}},
+    {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV) this team member sent in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs.',
+     'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}, 'name': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'customer_waiting', 'description': '«لا أحد ينتظر»: promises made to customers (أرجع لك خلال ساعة…), customers waiting for a staff reply and upset customers. action list (default) shows them; action close with id closes a promise that was handled. e.g. «الوعود» «مين ينتظر رد» «العملاء المنزعجين» «تم الوعد 12».',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'close']}, 'id': {'type': 'string'}}}},
     {'name': 'port_storage', 'description': 'Jeddah port terminal storage (أرضيات الميناء, separate from the shipping line detention): either calculate it for a container — give container (registered) or discharged date (YYYY-MM-DD or dd/mm) and size 20/40, optional until date — or, with topic=operators, return the terminal operators guide (RSGT / DP World Jeddah: portals, contacts, payment and gate-pass steps, port charges). e.g. «كم أرضيات الميناء لحاوية 40 نزلت 1/11», «كيف أدفع لموانئ دبي», «رقم بوابة البحر الأحمر».',
@@ -144,7 +146,7 @@ SYSTEM = ('أنت مساعد الأوامر لفريق آفاق طويق (تخل
           '(سواق=سائق، ضيف=أضف، وريني=اعرض). لا تخترع بيانات غير موجودة في الرسالة أو نتائج الأدوات، وإذا نقصت معلومة '
           'ضرورية فاسأل عنها باختصار. لا تقل إنك نفذت شيئًا لم تؤكده نتيجة أداة. أدوات الإرسال تجهز الرسالة فقط وتعيد رمز '
           'تأكيد؛ اذكر للمرسل أن يكتب «نفذ» مع الرمز. إذا طلب شيئًا لا تغطيه الأدوات (حذف، دفع، تعديل أسعار معتمدة، نشر) '
-          'فاشرح أنه يتم من البرنامج. الرد النهائي بالعربية، قصير وواضح، بلا مقدمات.')
+          'فاشرح أنه يتم من البرنامج. الملفات التي يرسلها الموظف (PDF/إكسل) تُقرأ بأداة ask_document؛ لا تقل إنك لا تستطيع قراءتها. الرد النهائي بالعربية، قصير وواضح، بلا مقدمات.')
 
 
 # ------------------------------------------------------------------ tool implementations
@@ -545,6 +547,16 @@ def tool_free_time_result(c, a):
 def tool_detention_claim(c, a):
     from app import line_desk
     return line_desk.audit_claim(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
+
+
+def tool_ask_document(c, a):
+    from app import staff_documents, transport_desk
+    chat = CHAT.get()
+    row = staff_documents.latest(chat[0], a.get('name')) if chat else None
+    if not row:
+        return 'لا يوجد ملف أرسلته في آخر 3 أيام. أعد إرسال الملف واكتب سؤالك معه أو بعده.'
+    question = _clean(a.get('question'), 1000) or 'لخص الملف'
+    return transport_desk.run_async(lambda: staff_documents.answer(row, question), timeout=150)
 
 
 def tool_customer_waiting(c, a):
