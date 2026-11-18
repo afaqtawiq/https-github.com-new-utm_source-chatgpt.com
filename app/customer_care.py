@@ -154,6 +154,11 @@ def blocked(c):
         if digits(os.getenv(key, '')):
             out.add(digits(os.getenv(key, '')))
     out |= {'966507665873', '966530130435'}
+    try:  # an upset customer gets no offers for a few days (no_wait)
+        from app.no_wait import held_numbers
+        out |= held_numbers(c)
+    except Exception:
+        pass
     return out
 
 
