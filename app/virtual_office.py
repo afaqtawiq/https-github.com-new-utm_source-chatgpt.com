@@ -499,7 +499,8 @@ def ask(key, text, author, manager=True, channel='المنصة', owner=None, att
     try:
         with db() as c:
             code = CONFIRM.match(text or '') if not attached else None
-            reply = confirm(c, code.group(1), chat) if code and manager else command_agent.run_agent(c, prompt)
+            reply = (confirm(c, code.group(1), chat or command_agent.OFFICE_CHAT) if code and manager
+                     else command_agent.run_agent(c, prompt))
     finally:
         if chat_token is not None:
             command_agent.CHAT.reset(chat_token)

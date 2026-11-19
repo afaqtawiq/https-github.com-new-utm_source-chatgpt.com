@@ -174,8 +174,12 @@ def _member():
         return {}
 
 
+OFFICE_CHAT = ('office', 'office')
+
+
 def _pending(c, action):
-    chat = CHAT.get()
+    # In the web office without a known WhatsApp chat, the code is confirmed in the office itself (admins only).
+    chat = CHAT.get() or (OFFICE_CHAT if OFFICE.get() else None)
     if not chat:
         return 'تعذر تجهيز التأكيد في هذه المحادثة.'
     token = secrets.token_hex(3).upper()

@@ -5,6 +5,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -188,6 +189,41 @@ def run():
         with db() as c:
             row = c.execute("SELECT * FROM shipment_tracks WHERE ref='SSATAOJED2609210'").fetchone()
         assert row['source'] == 'web' and row['eta'] is None and json.loads(row['hints'])['ais']['mmsi'] == '630001353'
+
+        # The model found nothing: the direct AIS lookup (no model) still gives the position.
+        page = ('<p>The current position of <b>HAI TAO 205</b> is in <b>Malacca Strait</b> with coordinates <b>2.06907° / 102.11924°</b> '
+                'as reported on <b>2026-11-02 12:22</b> by AIS to our vessel tracker app. The vessel\'s current speed is <b>8.7 Knots</b> '
+                'and is heading at the port of <b>PORT SUDAN</b>. The estimated time of arrival as calculated by MyShipTracking vessel '
+                'tracking app is <b>2026-11-24 </b>08:00 LT</p><td>MMSI</td><td>630001353</td>')
+        parsed = st.parse_ais_page(page, 'https://www.myshiptracking.com/vessels/hai-tao-205-mmsi-630001353')
+        assert parsed['area'] == 'Malacca Strait' and parsed['lat'] == 2.06907 and parsed['speed_knots'] == 8.7
+        assert parsed['destination'] == 'PORT SUDAN' and parsed['destination_eta'] == '2026-11-24'
+
+        def ais_site(request):
+            if request.url.path == '/vessels':
+                return httpx.Response(200, text='<a href="/vessels/hai-tao-205-mmsi-630001353-imo-1197422">HAI TAO 205</a>'
+                                                 '<a href="/vessels/hai-tao-2050-mmsi-412345678">x</a>')
+            assert request.url.path == '/vessels/hai-tao-205-mmsi-630001353-imo-1197422'
+            return httpx.Response(200, text=page)
+        real_client = httpx.AsyncClient
+
+        async def gave_up(ref, kind, carrier, h):
+            return {'found': False, 'vessel': 'HAI TAO 205', 'note': 'minor deck cargo vessel, no schedule'}
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture'}), patch.object(st, 'research', side_effect=gave_up), \
+                patch.object(tracking_pdf, 'send', side_effect=fake_pdf), \
+                patch.object(st.httpx, 'AsyncClient', lambda **k: real_client(transport=httpx.MockTransport(ais_site))):
+            out = asyncio.run(st.track('SSATAOJED2609210', 'SHIPNER', 'سلطان', vessel='HAI TAO 205'))
+        assert 'Malacca Strait' in out and 'الوصول التقديري' in out and 'myshiptracking.com' in out, out
+
+        # Office without a WhatsApp chat: confirmation codes are issued and confirmed in the office itself.
+        office = command_agent.OFFICE.set({'key': 'containers'})
+        try:
+            with db() as c:
+                code = command_agent._pending(c, {'tool': 'send_email', 'to': 'x@example.com', 'subject': 's', 'body': 'b'})
+                assert re.fullmatch(r'[0-9A-F]{6}', code), code
+                assert c.execute("SELECT sender FROM whatsapp_voice_pending WHERE token=%s", (code,)).fetchone()['sender'] == 'office'
+        finally:
+            command_agent.OFFICE.reset(office)
 
         # No confirmed date → an ETA question to the destination agent named on the B/L, prepared for «نفذ» only.
         from app import eta_inquiry

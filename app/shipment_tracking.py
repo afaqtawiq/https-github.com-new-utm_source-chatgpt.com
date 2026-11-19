@@ -657,11 +657,18 @@ async def web_track(clean, kind, carrier, actor, chat, auto, hints):
         fields = await research(clean, kind, carrier, hints)
     except Exception as exc:
         print('TRACKING_RESEARCH', clean, type(exc).__name__, str(exc)[:160], flush=True)
-        return None
+        fields = None
     if not fields or not fields.get('found') or not fields.get('eta'):
         if fields:
             print('TRACKING_RESEARCH_EMPTY', clean, str(fields.get('note'))[:160], flush=True)
-        if fields and isinstance(fields.get('ais'), dict):
+        fields = dict(fields or {})
+        if not isinstance(fields.get('ais'), dict) or 'lat' not in fields['ais']:
+            vessel = fields.get('vessel') or hints.get('vessel')
+            ais = await ais_lookup(vessel) if vessel else None
+            if ais:
+                fields['ais'] = ais
+                fields.setdefault('vessel', vessel)
+        if isinstance(fields.get('ais'), dict):
             return await ais_track(clean, kind, carrier, actor, chat, auto, hints, fields)
         return None
     info = page_info(fields, carrier or hints.get('carrier') or '')
@@ -686,6 +693,53 @@ async def web_track(clean, kind, carrier, actor, chat, auto, hints):
         except Exception as exc:
             print('TRACKING_PDF', clean, type(exc).__name__, str(exc)[:160], flush=True)
     return text
+
+
+AIS_SITE = 'https://www.myshiptracking.com'
+AIS_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36',
+               'Accept-Language': 'en'}
+
+
+def _slug(text):
+    return re.sub(r'[^a-z0-9]+', '-', str(text or '').lower()).strip('-')
+
+
+def parse_ais_page(html_text, url=''):
+    """The AIS fields of a MyShipTracking vessel page (its plain-language summary paragraph)."""
+    text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', html_text or ''))
+    m = re.search(r'current position of (.+?) is in (.+?) with coordinates ([-\d.]+)° / ([-\d.]+)° as reported on '
+                  r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', text)
+    if not m:
+        return None
+    out = {'vessel': m.group(1).strip(), 'area': m.group(2).strip(), 'lat': float(m.group(3)), 'lon': float(m.group(4)),
+           'position_time': m.group(5), 'url': url}
+    for key, pattern in (('speed_knots', r'current speed is ([\d.]+) Knots'), ('destination', r'heading at the port of (.+?)\. '),
+                         ('destination_eta', r'estimated time of arrival as calculated .*? is (\d{4}-\d{2}-\d{2})'),
+                         ('mmsi', r'MMSI:? (\d{9})'), ('imo', r'IMO:? (\d{7})')):
+        found = re.search(pattern, text)
+        if found:
+            out[key] = float(found.group(1)) if key == 'speed_knots' else found.group(1).strip()
+    return out
+
+
+async def ais_lookup(vessel):
+    """Direct AIS lookup by vessel name (no model involved). None when the vessel or its position is not found."""
+    name = _slug(vessel)
+    if len(name) < 3:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=25, headers=AIS_HEADERS, follow_redirects=True) as client:
+            r = await client.get(AIS_SITE + '/vessels', params={'name': vessel})
+            links = re.findall(r'/vessels/([a-z0-9-]+?)-mmsi-(\d{9})(?:-imo-\d+)?', r.text)
+            match = next((f'/vessels/{slug}-mmsi-{mmsi}' for slug, mmsi in links if slug == name), None)
+            if not match:
+                return None
+            full = re.search(re.escape(match) + r'(?:-imo-\d+)?', r.text).group(0)
+            page = await client.get(AIS_SITE + full)
+            return parse_ais_page(page.text, AIS_SITE + full)
+    except Exception as exc:
+        print('TRACKING_AIS', vessel, type(exc).__name__, str(exc)[:120], flush=True)
+        return None
 
 
 async def ais_track(clean, kind, carrier, actor, chat, auto, hints, fields):
