@@ -23,6 +23,7 @@ from app import whatsapp_admin as admin
 
 MODEL = os.getenv('COMMAND_AGENT_MODEL') or os.getenv('COMMAND_AI_MODEL', 'claude-sonnet-5')
 CHAT = contextvars.ContextVar('afaq_command_chat', default=None)   # (sender, conversation_id)
+OFFICE = contextvars.ContextVar('afaq_office_department', default=None)  # virtual office: {'key','tools','system'}
 CONFIRM_PREFIX = '__agent_action__:'
 SECRET = re.compile(r'كلمة\s*(?:ال)?سر|كلمة\s*المرور|password|passcode|رمز\s*(?:ال)?تحقق|\bOTP\b|IBAN|ايبان|آيبان|\bSA\d{2}[0-9A-Z]{18,22}\b|\b(?:\d[ -]?){13,19}\b', re.I)
 
@@ -79,6 +80,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'result': {'type': 'string', 'enum': ['approved', 'rejected']}, 'until': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['result']}},
     {'name': 'detention_claim', 'description': 'Audit a shipping agent detention/demurrage invoice for a container: compares the invoiced amount (and days if given) with the free period incl. extensions, the proven return date and the agent tariff; an overcharge gets an objection email ready to send with the code. e.g. «فاتورة غرامة الحاوية MSKU1234567 من الوكيل 4500 ريال 12 يوم».',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'amount': {'type': 'string'}, 'days': {'type': 'string'}, 'returned_on': {'type': 'string'}}, 'required': ['container', 'amount']}},
+    {'name': 'office_report', 'description': 'Virtual office: live numbers of every department (clearance, transport, containers & shipping lines, finance, sales & marketing, customer service, administration) or of one department. Use for «تقرير الأقسام», «وضع المكتب», «أرقام قسم النقل». To talk to a department manager the owner writes «مدير المالية: …».',
+     'input_schema': {'type': 'object', 'properties': {'department': {'type': 'string'}}}},
     {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines: vessel, loading port and date, ETA / actual discharge at the destination port, last event; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'list': {'type': 'boolean'}}}},
     {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV) this team member sent in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs. If the file has no arrival date but has a bill of lading or container number, also call track_shipment with it.',
@@ -551,6 +554,12 @@ def tool_detention_claim(c, a):
     return line_desk.audit_claim(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
 
 
+def tool_office_report(c, a):
+    from app import virtual_office
+    key = virtual_office.department_for(a.get('department')) if a.get('department') else None
+    return virtual_office.report_text(key)
+
+
 def tool_track_shipment(c, a):
     from app import shipment_tracking, transport_desk
     if a.get('list') or not _clean(a.get('ref')):
@@ -883,9 +892,15 @@ def execute_confirmed(c, payload):
 
 # ------------------------------------------------------------------ the loop
 
+def scoped_tools():
+    """All tools, or only the current virtual-office department's tools."""
+    scope = OFFICE.get()
+    return [t for t in TOOLS if t['name'] in scope['tools']] if scope else TOOLS
+
+
 def call_model(messages, system):
     key = os.getenv('ANTHROPIC_API_KEY', '')
-    body = {'model': MODEL, 'max_tokens': 1200, 'system': system, 'tools': TOOLS, 'messages': messages}
+    body = {'model': MODEL, 'max_tokens': 1200, 'system': system, 'tools': scoped_tools(), 'messages': messages}
     with httpx.Client(timeout=45) as client:
         response = client.post('https://api.anthropic.com/v1/messages', json=body,
                                headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
@@ -900,6 +915,23 @@ def run_agent(c, raw):
     # Actions mentioning SABER retain the existing tool and confirmation route.
     if command_ai.is_saber_information_question(raw):
         return command_ai.answer_saber_question(raw)
+    if not OFFICE.get():
+        # Virtual office: «مدير المالية: …» goes to that department manager (its tools, its role, its memory).
+        from app import virtual_office
+        routed = virtual_office.route(raw)
+        if routed:
+            key, rest = routed
+            token = OFFICE.set(virtual_office.scope(key))
+            try:
+                reply = run_agent(c, rest)
+            finally:
+                OFFICE.reset(token)
+            reply = virtual_office.sign(key, reply)
+            try:
+                virtual_office.log(key, 'واتساب', _member().get('name') or '', rest, reply)
+            except Exception as exc:
+                print('OFFICE_LOG_FAILED', type(exc).__name__, str(exc)[:120], flush=True)
+            return reply
     if not os.getenv('ANTHROPIC_API_KEY'):
         return None
     member = _member()
@@ -911,6 +943,13 @@ def run_agent(c, raw):
     except ImportError:
         pass
     system = SYSTEM + CUSTOMS_FIRST_POLICY + ('\nالمرسل: ' + (member.get('name') or 'عضو الفريق') + ('، وهو المدير.' if member.get('manager') else '، ليس المدير؛ رسائل العملاء الخارجية تحتاج تأكيد المدير.'))
+    if OFFICE.get():
+        system += OFFICE.get()['system']
+        try:
+            from app import virtual_office
+            history = [f"المالك: {m['command'][:400]}\nالمدير: {m['reply'][:400]}" for m in virtual_office.history(OFFICE.get()['key'], 4)]
+        except Exception:
+            pass
     if history:
         system += '\nآخر المحادثة للسياق فقط:\n' + '\n'.join(history)
     messages = [{'role': 'user', 'content': raw[:2000]}]
