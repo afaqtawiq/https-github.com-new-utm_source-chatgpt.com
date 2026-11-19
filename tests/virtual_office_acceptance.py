@@ -98,6 +98,29 @@ def run():
     bad = client.post('/office/finance', data={'csrf': 'wrong', 'text': 'x'}, headers={'origin': 'http://testserver'}, follow_redirects=False)
     assert bad.status_code == 403
 
+    # 5) 3D office: page with config, local assets, JSON API (state, report, history, ask with CSRF header).
+    page = client.get('/office').text
+    assert '"key": "containers"' in page and '/office/assets/three.module.min.js' in page and csrf in page
+    assert 'مدير المالية' in client.get('/office/cards').text
+    for path, kind in (('three.module.min.js', 'javascript'), ('models/Xbot.glb', 'gltf'), ('jsm/loaders/GLTFLoader.js', 'javascript')):
+        r = client.get('/office/assets/' + path)
+        assert r.status_code == 200 and kind in r.headers['content-type'], path
+    assert client.get('/office/assets/THREE_LICENSE').status_code == 404
+    assert client.get('/office/assets/%2e%2e/virtual_office.py').status_code == 404
+    state = client.get('/office/api/state').json()
+    cont = next(d for d in state['departments'] if d['key'] == 'containers')
+    assert cont['alert'] and ['متأخرة عن آخر يوم مجاني', 1] in cont['kpis'] and 'csrf' not in state
+    assert 'تقرير الأقسام' in client.get('/office/api/report').json()['text']
+    assert client.get('/office/api/finance/history').json()['messages'][-1]['command'] == 'كم البيانات المسجلة هذا الشهر؟'
+    assert client.post('/office/api/finance/ask', json={'text': 'x'}, headers={'origin': 'http://testserver'}).status_code == 403
+    calls.clear()
+    with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture'}), patch.object(command_agent, 'call_model', side_effect=model):
+        r = client.post('/office/api/containers/ask', json={'text': 'وش المتأخر؟'},
+                        headers={'origin': 'http://testserver', 'X-CSRF-Token': csrf})
+    assert r.status_code == 200 and 'MSCU1234565' in r.json()['reply'], r.text
+    client.cookies.clear()
+    assert client.get('/office/api/state').status_code == 401
+
 
 def main():
     import psycopg

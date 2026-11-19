@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>المكتب الافتراضي — آفاق طويق</title>
+<style>
+:root{--bg:#0b1620;--panel:#0f2230f2;--line:#28475d;--text:#eef6fb;--muted:#9fb4c4;--accent:#22c55e}
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:Tahoma,Arial,sans-serif}
+#scene{position:fixed;inset:0}#labels{position:fixed;inset:0;pointer-events:none;direction:ltr}
+.tag{left:0;top:0;direction:rtl;pointer-events:auto;cursor:pointer;background:#0b1c29e6;border:1px solid var(--c,#28475d);border-radius:10px;padding:4px 8px;
+ font-size:12px;white-space:nowrap;text-align:center;box-shadow:0 2px 8px #0006}
+.tag b{display:block;font-size:12.5px}.tag small{color:var(--muted)}.tag .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-left:4px}
+.tag.busy .dot{background:#ffb020;animation:p 1s infinite}.tag.alert .dot{background:#ff5c5c}@keyframes p{50%{opacity:.3}}
+.bubble{background:#fff;color:#102536;border-radius:12px;padding:4px 9px;font-size:12px;margin-bottom:4px;max-width:200px;white-space:normal}
+#bar{position:fixed;top:10px;right:10px;left:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;pointer-events:none}
+#bar>*{pointer-events:auto}#bar h1{font-size:17px;margin:0 0 0 8px;background:var(--panel);padding:8px 12px;border-radius:12px;border:1px solid var(--line)}
+button,.btn{background:#102536;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:14px;cursor:pointer;text-decoration:none;font-family:inherit}
+button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
+#panel{position:fixed;top:64px;left:10px;bottom:10px;width:390px;max-width:calc(100% - 20px);background:var(--panel);border:1px solid var(--line);
+ border-radius:16px;display:none;flex-direction:column;backdrop-filter:blur(6px);z-index:5}
+#panel.open{display:flex}#ph{padding:12px 14px;border-bottom:1px solid var(--line)}#ph h2{margin:0;font-size:17px}#ph p{margin:4px 0 0;color:var(--muted);font-size:12.5px}
+#kpis{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line)}
+.k{background:#0b1c29;border-radius:10px;padding:6px 8px;font-size:12px;color:var(--muted)}.k b{display:block;color:var(--text);font-size:17px}
+#msgs{flex:1;overflow:auto;padding:10px 14px}.m{border-radius:12px;padding:8px 10px;margin:6px 0;white-space:pre-wrap;font-size:14px;line-height:1.55}
+.m.me{background:#17344a;margin-right:30px}.m.him{background:#0b1c29;border-right:3px solid var(--c,#22c55e);margin-left:20px}.m small{display:block;color:var(--muted);font-size:11px}
+#form{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}#form textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;background:#0b1c29;color:var(--text);
+ border:1px solid var(--line);border-radius:10px;padding:8px;font-size:15px;font-family:inherit}
+#close{position:absolute;left:10px;top:10px;padding:4px 10px}
+#loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--muted);pointer-events:none}
+@media (max-width:700px){#panel{top:auto;left:0;right:0;bottom:0;width:100%;max-width:100%;height:68%;border-radius:16px 16px 0 0}#bar h1{font-size:14px}
+ button{padding:7px 9px;font-size:13px}.tag{font-size:10.5px;padding:3px 6px}.tag small{display:none}}
+</style>
+<script type="importmap">{"imports":{"three":"/office/assets/three.module.min.js","three/addons/":"/office/assets/jsm/"}}</script>
+</head>
+<body>
+<div id="scene"></div><div id="labels"></div><div id="loading">جاري تجهيز المكتب…</div>
+<div id="bar">
+  <h1>🏢 مكتب آفاق طويق</h1>
+  <button id="meeting" class="primary">👥 اجتماع الفريق</button>
+  <button id="view">🗺️ منظور علوي</button>
+  <a class="btn" href="/office/cards">📋 البطاقات</a>
+  <a class="btn" href="/dashboard">← النظام</a>
+</div>
+<div id="panel"><button id="close">✕</button>
+  <div id="ph"><h2 id="pt"></h2><p id="pr"></p></div>
+  <div id="kpis"></div><div id="msgs"></div>
+  <form id="form"><textarea id="text" placeholder="اكتب لمدير القسم…" required></textarea><button class="primary">إرسال</button></form>
+</div>
+<script id="config" type="application/json">__CONFIG__</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+const CFG = JSON.parse(document.getElementById('config').textContent);
+const COLORS = {clearance:0x3b82f6, transport:0xf59e0b, containers:0x06b6d4, finance:0x22c55e, sales:0xec4899, service:0xa855f7, admin:0x94a3b8};
+const DESKS = {clearance:[-10,-3], transport:[-6,-3], containers:[-2,-3], finance:[2,-3], sales:[-10,3], service:[-6,3], admin:[-2,3]};
+const MEETING = new THREE.Vector3(10.5, 0, 3);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ---------- renderer / camera ----------
+const host = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace; host.appendChild(renderer.domElement);
+const labels = new CSS2DRenderer({element: document.getElementById('labels')}); labels.setSize(innerWidth, innerHeight);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0xdfe7ee); scene.fog = new THREE.Fog(0xdfe7ee, 40, 80);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 200);
+const persp = {pos: new THREE.Vector3(-2, 12, 20), target: new THREE.Vector3(-1, 0.5, 0)};
+const overhead = {pos: new THREE.Vector3(-1, 34, 0.01), target: new THREE.Vector3(-1, 0, 0)};
+if (innerWidth < innerHeight) {   // phone held upright: look along the room's long side
+  camera.fov = 60; camera.updateProjectionMatrix(); persp.pos.set(-22, 15, 3); persp.target.set(-3, 0, -1);
+  overhead.pos.set(-1, 52, 0.01);
+}
+camera.position.copy(persp.pos);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(persp.target); controls.enableDamping = true; controls.maxPolarAngle = Math.PI / 2.1; controls.minDistance = 6; controls.maxDistance = 45;
+
+// ---------- light ----------
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7a66, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(-8, 18, -14); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048); Object.assign(sun.shadow.camera, {left:-20, right:20, top:15, bottom:-15}); scene.add(sun);
+
+// ---------- room ----------
+const mat = (c, o = {}) => new THREE.MeshStandardMaterial(Object.assign({color:c, roughness:.85}, o));
+const box = (w, h, d, m, x, y, z, shadow = true) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); b.position.set(x, y, z); b.castShadow = shadow; b.receiveShadow = true; scene.add(b); return b; };
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 20), mat(0xb88a5a, {roughness:.7})); floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+for (let i = -14; i <= 14; i += 1.2) box(0.02, 0.005, 20, mat(0xa47648), i, 0.003, 0, false);       // wood planks
+box(30, 4.2, 0.3, mat(0xeef1f3), 0, 2.1, -10); const leftWall = box(0.3, 4.2, 20, mat(0xc9c2b8), -15, 2.1, 0); if (innerWidth < innerHeight) leftWall.visible = false; box(0.3, 4.2, 20, mat(0xeef1f3), 15, 2.1, 0);
+const glass = mat(0x9cc8ee, {roughness:.1, metalness:.1, transparent:true, opacity:.55, emissive:0x4a80b0, emissiveIntensity:.25});
+for (let x = -12; x <= 6; x += 4.5) { box(3.6, 2.6, 0.06, glass, x, 2.1, -9.82, false); box(3.8, 0.12, 0.1, mat(0x222831), x, 3.45, -9.8); box(3.8, 0.12, 0.1, mat(0x222831), x, 0.75, -9.8); box(0.1, 2.8, 0.1, mat(0x222831), x, 2.1, -9.78); }
+// meeting room (glass walls, long table, chairs)
+box(0.08, 3.2, 6, glass, 7, 1.6, 2, false); box(0.12, 3.2, 0.12, mat(0x222831), 7, 1.6, 5, false); box(6.6, 3.2, 0.08, glass, 10.8, 1.6, -1, false);
+box(6, 0.02, 8.4, mat(0x2f6f6a), 10.8, 0.01, 3.5, false);
+box(4.6, 0.12, 1.6, mat(0x5b3a24), 10.5, 1.0, 3); box(0.16, 1.0, 0.16, mat(0x333), 8.6, 0.5, 3); box(0.16, 1.0, 0.16, mat(0x333), 12.4, 0.5, 3);
+const seats = [];
+for (let i = 0; i < 4; i++) { seats.push(new THREE.Vector3(8.8 + i * 1.15, 0, 1.6)); seats.push(new THREE.Vector3(8.8 + i * 1.15, 0, 4.4)); }
+seats.forEach(s => box(0.6, 0.5, 0.6, mat(0x1f2937), s.x, 0.25, s.z > 3 ? s.z + 0.35 : s.z - 0.35));
+const screenTv = box(2.6, 1.5, 0.06, mat(0x0b1620, {emissive:0x1e3a5f, emissiveIntensity:.6}), 10.5, 2.2, -0.9, false);
+// plants, shelves, cooler
+const plant = (x, z, s = 1) => { box(0.5 * s, 0.5 * s, 0.5 * s, mat(0xf1f1f1), x, 0.25 * s, z); const l = new THREE.Mesh(new THREE.SphereGeometry(0.55 * s, 10, 8), mat(0x3f8f3a)); l.position.set(x, 0.95 * s, z); l.castShadow = true; scene.add(l); };
+plant(-14, -9.2, 1.3); plant(6.2, -9.2, 1.2); if (innerWidth >= innerHeight) plant(-14, 9, 1.2); plant(6.4, 8.8); plant(-14, -5);
+if (innerWidth >= innerHeight) { box(0.5, 2.6, 2.4, mat(0x6b4a32), -14.55, 1.3, 6.5); for (let y = 0.6; y < 2.6; y += 0.6) box(0.5, 0.05, 2.3, mat(0x3b2a1e), -14.5, y, 6.5, false); }
+box(0.5, 1.2, 0.5, mat(0xdfe6ee), 5, 0.6, -9.3); box(0.35, 0.45, 0.35, mat(0x7cc4ff, {transparent:true, opacity:.8}), 5, 1.45, -9.3);
+const COOLER = new THREE.Vector3(5, 0, -8.3);
+
+// desks with department rugs, laptops and chairs
+const deskMat = mat(0xd9dadc, {roughness:.5});
+for (const [key, [x, z]] of Object.entries(DESKS)) {
+  box(3.2, 0.02, 2.6, mat(COLORS[key], {roughness:.95}), x, 0.012, z, false);
+  box(1.9, 0.08, 0.9, deskMat, x, 1.02, z + 0.25); box(1.8, 0.98, 0.08, mat(0x9aa3ab), x, 0.5, z + 0.66);
+  box(0.08, 0.98, 0.8, mat(0x9aa3ab), x - 0.9, 0.5, z + 0.25); box(0.08, 0.98, 0.8, mat(0x9aa3ab), x + 0.9, 0.5, z + 0.25);
+  const lap = box(0.55, 0.03, 0.38, mat(0xb8bec6, {metalness:.6, roughness:.3}), x, 1.08, z + 0.3);
+  const scr = box(0.55, 0.36, 0.02, mat(0x111827, {emissive:COLORS[key], emissiveIntensity:.25}), x, 1.26, z + 0.48);
+  scr.rotation.x = -0.2; box(0.12, 0.25, 0.12, mat(0xf97316), x + 0.7, 1.18, z + 0.4); // desk lamp
+}
+
+// ---------- people ----------
+const people = {};
+let model = null;
+function fallbackPerson(color) {                  // used only if the 3D model fails to load
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.9, 6, 12), mat(color)); body.position.y = 0.85; body.castShadow = true;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), mat(0xe0b48f)); head.position.y = 1.65; head.castShadow = true;
+  g.add(body, head); return {root: g, mixer: null, actions: {}};
+}
+function makePerson(key) {
+  if (!model) return fallbackPerson(COLORS[key]);
+  const root = SkeletonUtils.clone(model.scene);
+  root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.material = o.material.clone();
+    if (!/Joints/i.test(o.material.name)) o.material.color = new THREE.Color(COLORS[key]).lerp(new THREE.Color(0xffffff), .25); } });
+  root.scale.setScalar(1.0);
+  const mixer = new THREE.AnimationMixer(root), actions = {};
+  for (const clip of model.animations) actions[clip.name] = mixer.clipAction(clip);
+  return {root, mixer, actions};
+}
+function play(p, name, fade = .35) {
+  const next = p.actions[name]; if (!next || p.current === next) return;
+  if (name === 'agree' || name === 'headShake') { next.reset(); next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = false; }
+  next.reset().fadeIn(fade).play(); if (p.current) p.current.fadeOut(fade); p.current = next;
+}
+
+function build() {
+  for (const d of CFG.departments) {
+    const [x, z] = DESKS[d.key]; const p = makePerson(d.key);
+    p.home = new THREE.Vector3(x, 0, z - 0.45); p.root.position.copy(p.home); p.root.rotation.y = 0; scene.add(p.root);
+    const el = document.createElement('div'); el.className = 'tag'; el.style.setProperty('--c', '#' + COLORS[d.key].toString(16).padStart(6, '0'));
+    el.addEventListener('click', e => { e.stopPropagation(); openPanel(d.key); });
+    const tag = new CSS2DObject(el); tag.position.set(0, 2.25, 0); p.root.add(tag);
+    Object.assign(p, {key: d.key, dept: d, el, path: [], speed: 2.3, next: 8 + Math.random() * 25});
+    play(p, 'idle', 0); people[d.key] = p; renderTag(p);
+  }
+  document.getElementById('loading').remove();
+}
+function renderTag(p, bubble) {
+  const d = p.dept, first = (d.kpis || [])[0];
+  p.el.innerHTML = (bubble ? `<div class="bubble">${esc(bubble)}</div>` : '') +
+    `<b><span class="dot"></span>${esc(d.icon)} ${esc(d.manager)}</b><small>${first ? esc(first[0]) + ': ' + esc(first[1] ?? '—') : esc(d.name)}</small>`;
+  p.el.classList.toggle('alert', !!d.alert);
+}
+
+// ---------- walking ----------
+function walkTo(p, points, then) { p.path = points.map(v => v.clone()); p.then = then; play(p, 'walk'); }
+function step(p, dt) {
+  if (!p.path.length) return;
+  const target = p.path[0], pos = p.root.position, dir = target.clone().sub(pos); dir.y = 0;
+  const dist = dir.length();
+  if (dist < 0.05) { p.path.shift(); if (!p.path.length) { play(p, 'idle'); p.then && p.then(); } return; }
+  dir.normalize(); pos.addScaledVector(dir, Math.min(dist, p.speed * dt));
+  const want = Math.atan2(dir.x, dir.z); let diff = want - p.root.rotation.y; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+  p.root.rotation.y += diff * Math.min(1, dt * 8);
+}
+const AISLE_Z = 0, V = (x, z) => new THREE.Vector3(x, 0, z);
+// Row behind the back desks: go around the desk's side; front row: straight to the aisle.
+function leave(p) { const h = p.home; return h.z < 0 ? [V(h.x + 1.3, h.z), V(h.x + 1.3, AISLE_Z)] : [V(h.x, AISLE_Z)]; }
+function arrive(p) { const h = p.home; return h.z < 0 ? [V(h.x + 1.3, AISLE_Z), V(h.x + 1.3, h.z), h.clone()] : [V(h.x, AISLE_Z), h.clone()]; }
+function faceFront(p) { p.root.rotation.y = 0; }
+let meeting = false;
+function wander(p, dt) {
+  if (meeting || p.busy || p.path.length || p.away) return;
+  p.next -= dt; if (p.next > 0) return;
+  p.next = 25 + Math.random() * 40; p.away = true;
+  const spot = Math.random() < .5 ? COOLER.clone() : V(-13.6, 6.5);
+  walkTo(p, [...leave(p), V(spot.x, AISLE_Z), spot], () => setTimeout(() => {
+    if (meeting) return; walkTo(p, [V(spot.x, AISLE_Z), ...arrive(p)], () => { faceFront(p); p.away = false; }); }, 3000));
+}
+
+// ---------- meeting ----------
+document.getElementById('meeting').onclick = async () => {
+  const btn = document.getElementById('meeting');
+  if (meeting) { meeting = false; btn.textContent = '👥 اجتماع الفريق';
+    Object.values(people).forEach(p => { const s = p.seat || V(7.7, 6.6);
+      walkTo(p, [V(7.7, s.z), V(7.5, 6.6), V(6, 6.6), V(6, AISLE_Z), ...arrive(p)], () => { faceFront(p); p.away = false; }); });
+    return; }
+  meeting = true; btn.textContent = '↩️ إنهاء الاجتماع';
+  Object.values(people).forEach((p, i) => { const s = seats[i % seats.length]; p.seat = s; p.away = true;
+    const start = p.root.position.distanceTo(p.home) < 0.2 ? leave(p) : [V(p.root.position.x, AISLE_Z)];
+    walkTo(p, [...start, V(6, AISLE_Z), V(6, 6.6), V(7.5, 6.6), V(7.7, s.z), s.clone()],
+      () => { p.root.rotation.y = s.z > 3 ? Math.PI : 0; }); });
+  openPanel(null);
+  try { const r = await fetch('/office/api/report'); const data = await r.json(); addMsg('him', data.text, 'اجتماع الأقسام', '#22c55e'); }
+  catch (e) { addMsg('him', 'تعذر جلب أرقام الأقسام الآن.', 'اجتماع الأقسام'); }
+};
+
+// ---------- view toggle ----------
+let topView = false;
+document.getElementById('view').onclick = () => {
+  topView = !topView; const v = topView ? overhead : persp; document.getElementById('view').textContent = topView ? '🎥 منظور ثلاثي' : '🗺️ منظور علوي';
+  tween(camera.position, v.pos); tween(controls.target, v.target);
+};
+const tweens = [];
+function tween(obj, to) { tweens.push({obj, from: obj.clone(), to: to.clone(), t: 0}); }
+
+// ---------- click on a person ----------
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+renderer.domElement.addEventListener('click', e => {
+  mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(mouse, camera);
+  for (const p of Object.values(people)) if (ray.intersectObject(p.root, true).length) return openPanel(p.key);
+});
+
+// ---------- chat panel ----------
+let current = null;
+const panel = document.getElementById('panel'), msgs = document.getElementById('msgs');
+document.getElementById('close').onclick = () => { panel.classList.remove('open'); current = null; };
+function addMsg(kind, text, meta, color) {
+  const m = document.createElement('div'); m.className = 'm ' + kind; if (color) m.style.setProperty('--c', color);
+  m.innerHTML = (meta ? `<small>${esc(meta)}</small>` : '') + esc(text); msgs.appendChild(m); msgs.scrollTop = msgs.scrollHeight; return m;
+}
+async function openPanel(key) {
+  current = key; panel.classList.add('open'); msgs.innerHTML = '';
+  const form = document.getElementById('form');
+  if (!key) { document.getElementById('pt').textContent = '👥 اجتماع الفريق'; document.getElementById('pr').textContent = 'أرقام كل الأقسام الآن';
+    document.getElementById('kpis').innerHTML = ''; form.style.display = 'none'; return; }
+  form.style.display = '';
+  const d = CFG.departments.find(x => x.key === key), color = '#' + COLORS[key].toString(16).padStart(6, '0');
+  document.getElementById('pt').textContent = d.icon + ' ' + d.manager; document.getElementById('pr').textContent = d.role;
+  document.getElementById('kpis').innerHTML = (d.kpis || []).map(([l, v]) => `<div class="k">${esc(l)}<b>${esc(v ?? '—')}</b></div>`).join('');
+  const p = people[key]; if (p && !p.path.length && !meeting) { p.root.rotation.y = 0; play(p, 'agree'); setTimeout(() => !p.path.length && play(p, 'idle'), 1800); }
+  const r = await fetch('/office/api/' + key + '/history'); const data = await r.json();
+  if (current !== key) return;
+  for (const m of data.messages) { addMsg('me', m.command, m.author + ' · ' + m.channel + ' · ' + m.at); addMsg('him', m.reply, d.manager, color); }
+  if (!data.messages.length) addMsg('him', 'أهلًا، أنا ' + d.manager + '. اسألني عن أي شيء في قسم ' + d.name + '.', d.manager, color);
+}
+document.getElementById('form').onsubmit = async e => {
+  e.preventDefault(); const key = current, input = document.getElementById('text'), text = input.value.trim(); if (!key || !text) return;
+  input.value = ''; addMsg('me', text, 'أنت'); const d = CFG.departments.find(x => x.key === key), p = people[key];
+  const color = '#' + COLORS[key].toString(16).padStart(6, '0'), wait = addMsg('him', '… يكتب', d.manager, color);
+  if (p) { p.busy = true; p.el.classList.add('busy'); renderTag(p, 'أشتغل على طلبك…'); p.el.classList.add('busy'); }
+  try {
+    const r = await fetch('/office/api/' + key + '/ask', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': CFG.csrf}, body: JSON.stringify({text})});
+    const data = await r.json(); wait.innerHTML = `<small>${esc(d.manager)}</small>` + esc(data.reply || data.detail || 'تعذر الرد الآن.');
+    if (p) play(p, r.ok ? 'agree' : 'headShake');
+  } catch (err) { wait.textContent = 'تعذر الاتصال؛ أعد المحاولة.'; if (p) play(p, 'headShake'); }
+  if (p) { p.busy = false; p.el.classList.remove('busy'); setTimeout(() => !p.path.length && play(p, 'idle'), 2000); renderTag(p); }
+  refresh();
+};
+
+// ---------- live numbers ----------
+async function refresh() {
+  try { const r = await fetch('/office/api/state'); const data = await r.json();
+    for (const d of data.departments) { const i = CFG.departments.findIndex(x => x.key === d.key); CFG.departments[i] = d; if (people[d.key]) { people[d.key].dept = d; if (!people[d.key].busy) renderTag(people[d.key]); } }
+  } catch (e) {}
+}
+setInterval(refresh, 60000);
+
+// ---------- loop ----------
+const clock = new THREE.Clock();
+function frame() {
+  const dt = Math.min(clock.getDelta(), .05);
+  for (const p of Object.values(people)) { p.mixer && p.mixer.update(dt); step(p, dt); wander(p, dt); }
+  for (let i = tweens.length - 1; i >= 0; i--) { const t = tweens[i]; t.t = Math.min(1, t.t + dt * 1.2); const k = t.t * t.t * (3 - 2 * t.t);
+    t.obj.lerpVectors(t.from, t.to, k); if (t.t >= 1) tweens.splice(i, 1); }
+  controls.update(); renderer.render(scene, camera); labels.render(scene, camera); requestAnimationFrame(frame);
+}
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); labels.setSize(innerWidth, innerHeight); });
+
+new GLTFLoader().load('/office/assets/models/Xbot.glb', g => { model = g; build(); frame(); },
+  undefined, () => { model = null; build(); frame(); });
+</script>
+</body>
+</html>
