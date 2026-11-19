@@ -26,7 +26,7 @@ router = APIRouter()
 RIYADH = dt.timezone(dt.timedelta(hours=3))
 _READY = False
 
-COMMON = ('search', 'list_recent', 'report', 'ask_document')
+COMMON = ('search', 'list_recent', 'report', 'ask_document', 'ask_colleague')
 DEPARTMENTS = {
     'clearance': {
         'person': 'فيصل', 'model': 'suit_male',
@@ -84,7 +84,7 @@ DEPARTMENTS = {
         'name': 'البريد والمراسلات', 'manager': 'مديرة البريد', 'icon': '📧',
         'aliases': ('البريد', 'الايميل', 'الإيميل', 'الايميلات', 'الإيميلات', 'المراسلات'),
         'role': 'تستلم إيميلات البريد الرسمي وتفرزها وتنبه للعاجل، وتجهز الردود والمراسلات مع الوكلاء الملاحيين والعملاء والجهات؛ لا يخرج إيميل إلا بعد «نفذ».',
-        'tools': ('mail_inbox', 'mail_open', 'mail_reply', 'send_email', 'ask_eta_by_email', 'free_time_extension'),
+        'tools': ('mail_inbox', 'mail_open', 'mail_reply', 'mail_sent', 'send_email', 'ask_eta_by_email', 'free_time_extension'),
         'actions': (('📌 تحتاج انتباه', 'وش الإيميلات اللي تحتاج انتباه أو رد؟'), ('📥 بريد اليوم', 'وش وصل على الإيميل اليوم؟'))},
     'admin': {
         'person': 'هند', 'model': 'classy_female',
@@ -139,7 +139,8 @@ def scope(key):
     others = '، '.join(f"{x['name']} ({x.get('person', '')})" for k, x in DEPARTMENTS.items() if k != key)
     system = (f"\n\nأنت الآن {d.get('person', '')}، «{d['manager']}» في المكتب الافتراضي لآفاق طويق — قسم {d['name']}. مهمتك: {d['role']} "
               'تكلم كمدير قسم يرفع تقريره للمالك: النتيجة أولًا، أرقام دقيقة من الأدوات فقط، ثم ما يحتاج قراره. '
-              f'إذا كان الطلب خارج قسمك فقل باختصار أي قسم يتولاه ({others}) وكيف يكتب له، مثل «مدير المالية: …». '
+              f'إذا احتاج الطلب قسمًا آخر ({others}) فاطلبه من الزميل مباشرة بأداة ask_colleague وارجع للمالك بالنتيجة، '
+              'ولا تحيل المالك لزميل. كل بريد يخرج من البريد الرسمي تراه دانة، وردود الوكلاء ترجع لمن أرسل. '
               'ربط الحسابات والإعدادات التقنية (مثل رموز الخدمات في Railway) يتولاها المالك نفسه؛ لا تحيلها لمدير آخر. '
               'إذا أعادت أداة نتيجة بديلة (مثل فتح الصفحة على جهاز آفاق طويق) فاعرضها كما هي ولا تقل إن الأمر غير متاح. '
               '\nأرقام القسم الآن:\n' + snapshot_text(key))
@@ -496,7 +497,7 @@ MEETING_NOTE = ('[اجتماع الفريق: المالك يخاطب كل الم
                 'إن لم يخص الطلب قسمك فاكتب سطرًا واحدًا: «لا شيء يخص قسمي». لا تجهّز إرسالًا أو تسجيلًا إلا إذا ذُكر قسمك أو اسمك صراحة.]\n')
 
 
-def ask(key, text, author, manager=True, channel='المنصة', owner=None, attached=None, meeting=False):
+def ask(key, text, author, manager=True, channel='المنصة', owner=None, attached=None, meeting=False, chat=None):
     """Run one request through the department manager (used by the web page). Returns the reply.
     owner = whose uploaded files ask_document reads; attached = (filename, kind) of a file sent with this message."""
     from app import command_agent, staff_documents
@@ -511,7 +512,7 @@ def ask(key, text, author, manager=True, channel='المنصة', owner=None, att
     ctx = CONTEXT.set({'history': past})
     scope_token = command_agent.OFFICE.set(scope(key))
     doc_token = staff_documents.SENDER.set(owner) if owner else None
-    chat = owner_chat() if channel == 'المنصة' else None
+    chat = chat or (owner_chat() if channel == 'المنصة' else None)
     chat_token = command_agent.CHAT.set(chat) if chat else None
     try:
         with db() as c:

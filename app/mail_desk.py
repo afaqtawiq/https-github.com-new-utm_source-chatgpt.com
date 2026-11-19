@@ -66,7 +66,13 @@ def inbox(c, view='attention', query='', limit=10):
         WHERE {' AND '.join(where)} ORDER BY i.id DESC LIMIT %s''', (*params, max(1, min(int(limit or 10), 20)))).fetchall()
     if not rows:
         return title + ': لا يوجد.' + (' اكتب «بريد اليوم» أو «آخر الرسائل» لعرض الكل.' if view == 'attention' and not query else '')
-    return title + ':\n' + '\n'.join(_line(r) for r in rows) + '\nلفتح رسالة: «افتحي الرسالة #رقم»؛ للرد: «ردي على #رقم».'
+    routed = {}
+    if c.execute("SELECT to_regclass('office_mail_routed') t").fetchone()['t']:
+        for r in c.execute('''SELECT r.inbox_id, l.person FROM office_mail_routed r JOIN office_mail_log l ON l.id=r.log_id
+                WHERE r.inbox_id = ANY(%s)''', ([r['id'] for r in rows],)).fetchall():
+            routed[r['inbox_id']] = r['person'] or 'المنصة'
+    lines = [_line(r) + (f"\n   ↩️ رد على إيميل {routed[r['id']]} — وصله" if r['id'] in routed else '') for r in rows]
+    return title + ':\n' + '\n'.join(lines) + '\nلفتح رسالة: «افتحي الرسالة #رقم»؛ للرد: «ردي على #رقم».'
 
 
 def open_message(c, mid):

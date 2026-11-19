@@ -363,6 +363,11 @@ def tick():
                 process(item, conf)
             except Exception as exc:
                 print('MAIL_AGENT_ERROR', item['id'], type(exc).__name__, flush=True)
+        try:
+            from app.office_mail import route_replies
+            route_replies()
+        except Exception as exc:
+            print('OFFICE_MAIL_ROUTE_ERROR', type(exc).__name__, str(exc)[:200], flush=True)
         if conf['organize']:
             try:
                 organize(uid)

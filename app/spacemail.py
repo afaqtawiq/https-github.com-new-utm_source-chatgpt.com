@@ -159,6 +159,8 @@ def send(uid, recipient, subject, body, attachment=None, *, in_reply_to=None, re
     finally:
         with suppress(Exception):
             client.close()
+    from app.office_mail import record
+    record(recipient, subject, str(msg['Message-ID']))
     return str(msg['Message-ID'])
 
 
