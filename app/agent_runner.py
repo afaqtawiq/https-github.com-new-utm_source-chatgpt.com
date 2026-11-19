@@ -51,8 +51,14 @@ STALE_MINUTES = 30
 _READY = False
 
 
+# Public shipment-tracking pages of the shipping lines (read-only «read_page» tasks for shipment tracking).
+TRACKING_DOMAINS = ('msc.com', 'maersk.com', 'cma-cgm.com', 'hapag-lloyd.com', 'coscoshipping.com', 'one-line.com',
+                    'shipmentlink.com')
+
+
 def allowed_domains():
-    return [d.strip().lower() for d in os.getenv('RUNNER_ALLOWED_DOMAINS', DEFAULT_DOMAINS).split(',') if d.strip()]
+    own = [d.strip().lower() for d in os.getenv('RUNNER_ALLOWED_DOMAINS', DEFAULT_DOMAINS).split(',') if d.strip()]
+    return own + [d for d in TRACKING_DOMAINS if d not in own]
 
 
 def domain_allowed(url):
@@ -436,6 +442,10 @@ async def finish(tid: int, request: Request):
     if status == 'done' and task['kind'] in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
         import threading
         threading.Thread(target=after_fasah, args=(tid,), daemon=True).start()
+    if task['kind'] == 'read_page' and json.loads(task['params_json'] or '{}').get('purpose') == 'tracking':
+        import threading
+        from app import shipment_tracking
+        threading.Thread(target=shipment_tracking.after_page, args=(tid, status), daemon=True).start()
     return {'status': status}
 
 

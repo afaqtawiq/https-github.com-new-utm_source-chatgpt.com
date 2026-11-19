@@ -308,7 +308,15 @@ class Task:
 
     def do_read_page(self):
         page = self.open(self.params['url'])
+        # Shipping-line tracking pages draw their results with scripts: wait until the text stops growing (max 'wait' s).
+        limit, size = max(3, min(int(self.params.get('wait') or 3), 45)), -1
         self.wait(page, 3)
+        for _ in range((limit - 3) // 3):
+            now = len(page.inner_text('body') or '')
+            if now == size and now > 400:
+                break
+            size = now
+            self.wait(page, 3)
         self.step('فتحت الصفحة: ' + (page.title() or page.url), page=page)
         text = page.inner_text('body').strip()
         if not text:

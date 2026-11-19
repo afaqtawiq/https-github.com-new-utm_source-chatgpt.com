@@ -66,10 +66,58 @@ def run():
         c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_voice_pending(token TEXT PRIMARY KEY, sender TEXT, conversation_id TEXT,
             command TEXT, expires_at TIMESTAMPTZ, consumed BOOLEAN NOT NULL DEFAULT FALSE)''')
 
-    # 1) Not connected → clear message, nothing called.
+    # 1) No paid service → the work computer opens the line's public tracking page; the result comes back as a PDF.
+    from app import agent_runner, tracking_pdf
+    agent_runner.init()
     with patch.dict(os.environ, {'SHIPSGO_API_TOKEN': ''}):
-        assert 'SHIPSGO_API_TOKEN' in asyncio.run(st.track('SHZ8739334'))
-        assert 'غير مفعّل' in asyncio.run(st.after_document({'bill_no': 'SHZ8739334'}))
+        assert 'اسم الخط الملاحي' in asyncio.run(st.track('799610583408'))        # line unknown → asks, no task
+        out = asyncio.run(st.track('MEDU7788990', chat=('966500000001', 'conv-m')))
+        assert 'جهاز آفاق طويق' in out and 'PDF' in out, out
+        with db() as c:
+            task = c.execute("SELECT * FROM runner_tasks WHERE kind='read_page' ORDER BY id DESC LIMIT 1").fetchone()
+        params = json.loads(task['params_json'])
+        assert params['url'].startswith('https://www.msc.com/') and 'MEDU7788990' in params['url'] and params['purpose'] == 'tracking'
+        assert params['chat'] == ['966500000001', 'conv-m'] and agent_runner.domain_allowed(params['url'])
+        assert agent_runner.domain_allowed('https://www.maersk.com/tracking/123') and not agent_runner.domain_allowed('https://evil.example/x')
+        out = asyncio.run(st.track('CMAU1234565', carrier='CMA CGM'))
+        assert 'CMA CGM' in out
+        # The runner finished: page text → result saved, desk updated, PDF sent to the requester, summary delivered.
+        container_returns.track({'container': 'MSCU1234565', 'bill': 'MEDU7788990'}, 'محمد')
+        with db() as c:
+            c.execute("UPDATE runner_tasks SET status='done' WHERE id=%s", (task['id'],))
+            c.execute('''INSERT INTO runner_files(task_id,name,mime,size,sha256,verified,data,created_at) VALUES(%s,'page.txt','text/plain',5,'x',TRUE,%s,NOW())''',
+                      (task['id'], 'MSC tracking MEDU7788990 ... ETA Jeddah 05/12/2026'.encode()))
+        page = {'found': True, 'carrier': 'MSC', 'vessel': 'MSC ANNA', 'voyage': 'QX547A', 'pol': 'Ningbo', 'etd': '2026-11-15',
+                'pod': 'Jeddah', 'eta': '2026-12-05', 'arrived': False, 'last_event': 'Loaded on vessel, Ningbo',
+                'last_event_date': '2026-11-15', 'containers': ['MSCU1234565']}
+        sent, delivered = [], []
+
+        async def fake_extract(text, ref):
+            assert 'MEDU7788990' in text and ref == 'MEDU7788990'
+            return page
+
+        async def fake_send(chat, ref, info, source):
+            sent.append((chat, ref, tracking_pdf.build(ref, info, source)[:5]))
+            return True
+
+        async def fake_deliver(text):
+            delivered.append(text)
+        with patch.object(st, 'extract_page', side_effect=fake_extract), patch.object(tracking_pdf, 'send', side_effect=fake_send), \
+                patch('app.owner_briefing.deliver', side_effect=fake_deliver):
+            text = st.after_page(task['id'], 'done')
+        assert '05/12/2026' in text and 'MSC ANNA' in text and '📎' in text and delivered == [text], text
+        assert sent == [(('966500000001', 'conv-m'), 'MEDU7788990', b'%PDF-')]
+        with db() as c:
+            row = c.execute("SELECT * FROM shipment_tracks WHERE ref='MEDU7788990'").fetchone()
+            cr = c.execute("SELECT arrived_on FROM container_returns WHERE container='MSCU1234565'").fetchone()
+        assert row['vessel'] == 'MSC ANNA' and cr['arrived_on'] == dt.date(2026, 12, 5)
+        # A blocked / captcha page → honest message, nothing saved as a result.
+        async def _blocked(t, r):
+            return {'found': False, 'reason': 'captcha'}
+        with patch.object(st, 'extract_page', side_effect=_blocked), patch('app.owner_briefing.deliver', side_effect=fake_deliver):
+            text = st.after_page(task['id'], 'done')
+        assert 'لم تعرض نتيجة' in text and 'captcha' in text
+        assert 'جهاز آفاق طويق' in asyncio.run(st.after_document({'bill_no': 'MEDU5556667', 'shipping_line': 'MSC'}))
         assert asyncio.run(st.after_document({'bill_no': 'SHZ8739334', 'eta': '2026-12-01'})) == ''
 
     os.environ['SHIPSGO_API_TOKEN'] = 'fixture-token'
