@@ -282,6 +282,8 @@ from app.no_wait import register_worker as register_no_wait
 register_no_wait(app)
 from app.shipment_tracking import register_worker as register_shipment_tracking
 register_shipment_tracking(app)
+from app.virtual_office import router as virtual_office_router
+app.include_router(virtual_office_router)
 from app import stock_video
 stock_video.init()
 from app import clearance_card
