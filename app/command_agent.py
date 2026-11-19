@@ -88,6 +88,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'vessel': {'type': 'string'},
                                                        'voyage': {'type': 'string'}, 'containers': {'type': 'array', 'items': {'type': 'string'}},
                                                        'list': {'type': 'boolean'}}}},
+    {'name': 'ask_eta_by_email', 'description': 'Email the DESTINATION SHIPPING AGENT (وكيل الوجهة / الوكيل الملاحي في جدة, e.g. GOODRICH ARABIA) asking for the ETA and the arrival notice of a B/L. The agent and its email come from the B/L the team sent or from agent = the name given, using the Jeddah shipping-agents directory. Sent from the official mailbox only after the confirmation code. Use when tracking has no confirmed arrival date, or «راسل الوكيل واسأله عن موعد الوصول».',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'agent': {'type': 'string'}}, 'required': ['ref']}},
     {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV, Word, image) this team member sent or uploaded in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs. If the file has no arrival date but has a bill of lading or container number, also call track_shipment with it.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}, 'name': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'customer_waiting', 'description': '«لا أحد ينتظر»: promises made to customers (أرجع لك خلال ساعة…), customers waiting for a staff reply and upset customers. action list (default) shows them; action close with id closes a promise that was handled. e.g. «الوعود» «مين ينتظر رد» «العملاء المنزعجين» «تم الوعد 12».',
@@ -576,10 +578,27 @@ def tool_track_shipment(c, a):
     from app import shipment_tracking, transport_desk
     if a.get('list') or not (_clean(a.get('ref')) or _clean(a.get('vessel'))):
         return shipment_tracking.list_text()
-    return transport_desk.run_async(lambda: shipment_tracking.track(
+    out = transport_desk.run_async(lambda: shipment_tracking.track(
         _clean(a.get('ref'), 40), _clean(a.get('carrier'), 60), _member().get('name') or '', chat=CHAT.get(),
         vessel=_clean(a.get('vessel'), 60), voyage=_clean(a.get('voyage'), 30),
         containers=[_clean(x, 15) for x in (a.get('containers') or [])][:10]), timeout=240)
+    # No confirmed arrival date → prepare the ETA question to the destination agent (sent only after «نفذ»).
+    if _clean(a.get('ref')) and re.search(r'ليس موعدًا رسميًا|ما لقيت موعدًا مؤكدًا|لم تعرض نتيجة|غير مؤكد', out or ''):
+        try:
+            from app import eta_inquiry
+            extra = eta_inquiry.prepare(_clean(a.get('ref'), 40), '', lambda action: _pending(c, action),
+                                        {'vessel': _clean(a.get('vessel'), 60), 'voyage': _clean(a.get('voyage'), 30),
+                                         'containers': [_clean(x, 15) for x in (a.get('containers') or [])][:10]})
+            if extra.startswith('✉️'):
+                out += '\n\n' + extra
+        except Exception as exc:
+            print('ETA_INQUIRY', type(exc).__name__, str(exc)[:160], flush=True)
+    return out
+
+
+def tool_ask_eta_by_email(c, a):
+    from app import eta_inquiry
+    return eta_inquiry.prepare(_clean(a.get('ref'), 40), _clean(a.get('agent'), 80), lambda action: _pending(c, action))
 
 
 def tool_ask_document(c, a):
