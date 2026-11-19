@@ -280,6 +280,8 @@ from app.agent_learning import register_worker as register_agent_learning
 register_agent_learning(app)
 from app.no_wait import register_worker as register_no_wait
 register_no_wait(app)
+from app.shipment_tracking import register_worker as register_shipment_tracking
+register_shipment_tracking(app)
 from app import stock_video
 stock_video.init()
 from app import clearance_card

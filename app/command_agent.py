@@ -79,7 +79,9 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'result': {'type': 'string', 'enum': ['approved', 'rejected']}, 'until': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['result']}},
     {'name': 'detention_claim', 'description': 'Audit a shipping agent detention/demurrage invoice for a container: compares the invoiced amount (and days if given) with the free period incl. extensions, the proven return date and the agent tariff; an overcharge gets an objection email ready to send with the code. e.g. «فاتورة غرامة الحاوية MSKU1234567 من الوكيل 4500 ريال 12 يوم».',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'amount': {'type': 'string'}, 'days': {'type': 'string'}, 'returned_on': {'type': 'string'}}, 'required': ['container', 'amount']}},
-    {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV) this team member sent in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs.',
+    {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines: vessel, loading port and date, ETA / actual discharge at the destination port, last event; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'list': {'type': 'boolean'}}}},
+    {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV) this team member sent in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs. If the file has no arrival date but has a bill of lading or container number, also call track_shipment with it.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}, 'name': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'customer_waiting', 'description': '«لا أحد ينتظر»: promises made to customers (أرجع لك خلال ساعة…), customers waiting for a staff reply and upset customers. action list (default) shows them; action close with id closes a promise that was handled. e.g. «الوعود» «مين ينتظر رد» «العملاء المنزعجين» «تم الوعد 12».',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'close']}, 'id': {'type': 'string'}}}},
@@ -547,6 +549,14 @@ def tool_free_time_result(c, a):
 def tool_detention_claim(c, a):
     from app import line_desk
     return line_desk.audit_claim(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
+
+
+def tool_track_shipment(c, a):
+    from app import shipment_tracking, transport_desk
+    if a.get('list') or not _clean(a.get('ref')):
+        return shipment_tracking.list_text()
+    return transport_desk.run_async(lambda: shipment_tracking.track(_clean(a.get('ref'), 40), _clean(a.get('carrier'), 60),
+                                                                    _member().get('name') or ''), timeout=90)
 
 
 def tool_ask_document(c, a):

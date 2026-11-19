@@ -259,6 +259,17 @@ def chat_load_reply(c, payload, sender, fields):
 _SHIPPING_CACHE = {}
 
 
+async def _with_tracking(reply, fields):
+    """After a shipping document: live tracking of its B/L for the arrival date (when connected)."""
+    try:
+        from app import shipment_tracking
+        extra = await shipment_tracking.after_document(fields)
+    except Exception as exc:
+        print('SHIPMENT_TRACKING_AFTER_DOC', type(exc).__name__, str(exc)[:160], flush=True)
+        extra = ''
+    return reply + ('\n\n' + extra if extra.startswith('🔎') else ('\n' + extra if extra else ''))
+
+
 def shipping_reply(fields, caption, cached=False):
     """Register the containers of a shipping document once per message and return the reply (or None)."""
     from app import shipping_docs
@@ -290,6 +301,7 @@ async def handle_image(c, payload, sender, index):
                                              proof='صورة سند الإرجاع عبر واتساب: ' + (description or caption)[:300])
         elif kind == 'shipping_document' and fields.get('container_numbers') and shipping_reply(fields, caption):
             reply = shipping_reply(fields, caption, cached=True)
+            reply = await _with_tracking(reply, fields)
         elif kind in ('commercial_invoice', 'customs_declaration') and fields.get('invoice_total'):
             reply = invoice_billing_reply(fields, caption)
         elif kind == 'rate_table':
@@ -469,6 +481,7 @@ async def handle_pdf(c, payload, sender, index):
         elif fields.get('document_kind') == 'shipping_document' and fields.get('container_numbers'):
             from app import shipping_docs
             reply = shipping_docs.register(fields, caption) or 'وصلني المستند الملاحي لكن لم أقرأ أرقام حاويات واضحة؛ اكتبها في رسالة.'
+            reply = await _with_tracking(reply, fields)
         elif fields.get('document_kind') in ('customs_declaration', 'commercial_invoice'):
             reply = declaration_billing_reply(fields, caption)
         else:
