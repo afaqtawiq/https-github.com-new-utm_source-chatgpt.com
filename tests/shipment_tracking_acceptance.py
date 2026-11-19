@@ -172,6 +172,23 @@ def run():
             out = asyncio.run(st.track('MEDU1112223', 'MSC'))
         assert 'ما لقيت موعدًا مؤكدًا' in out and 'جهاز آفاق طويق' in out, out
 
+        # Small NVOCC line (SHIPNER), no published schedule: the vessel's AIS position gives a clearly marked estimate.
+        async def ais_only(ref, kind, carrier, h):
+            return {'found': False, 'vessel': 'HAI TAO 205', 'voyage': 'HT26001W', 'pod': 'Jeddah', 'note': 'no schedule',
+                    'ais': {'lat': 2.06907, 'lon': 102.11924, 'area': 'Malacca Strait', 'position_time': '2026-11-02 12:22',
+                            'speed_knots': 8.7, 'destination': 'PORT SUDAN', 'destination_eta': '2026-11-24',
+                            'mmsi': '630001353', 'url': 'https://www.myshiptracking.com/vessels/hai-tao-205'}}
+        pdfs.clear()
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture'}), patch.object(st, 'research', side_effect=ais_only), \
+                patch.object(tracking_pdf, 'send', side_effect=fake_pdf):
+            out = asyncio.run(st.track('SSATAOJED2609210', 'SHIPNER', 'سلطان', chat=('966500000001', 'conv-m'),
+                                       vessel='HAI TAO 205', voyage='HT26001W'))
+        assert 'AIS' in out and 'Malacca Strait' in out and 'الوصول التقديري' in out and 'ليس موعدًا رسميًا' in out, out
+        assert 'PORT SUDAN' in out and 'ليست جدة' in out and 'myshiptracking.com' in out and pdfs[-1][1] == 'SSATAOJED2609210', out
+        with db() as c:
+            row = c.execute("SELECT * FROM shipment_tracks WHERE ref='SSATAOJED2609210'").fetchone()
+        assert row['source'] == 'web' and row['eta'] is None and json.loads(row['hints'])['ais']['mmsi'] == '630001353'
+
         # research() talks to the Claude API with web search + fetch and continues a paused turn.
         calls = []
 
