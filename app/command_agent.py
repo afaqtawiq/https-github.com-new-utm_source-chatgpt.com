@@ -84,7 +84,7 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'department': {'type': 'string'}}}},
     {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines: vessel, loading port and date, ETA / actual discharge at the destination port, last event; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'list': {'type': 'boolean'}}}},
-    {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV) this team member sent in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs. If the file has no arrival date but has a bill of lading or container number, also call track_shipment with it.',
+    {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV, Word, image) this team member sent or uploaded in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs. If the file has no arrival date but has a bill of lading or container number, also call track_shipment with it.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}, 'name': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'customer_waiting', 'description': '«لا أحد ينتظر»: promises made to customers (أرجع لك خلال ساعة…), customers waiting for a staff reply and upset customers. action list (default) shows them; action close with id closes a promise that was handled. e.g. «الوعود» «مين ينتظر رد» «العملاء المنزعجين» «تم الوعد 12».',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'close']}, 'id': {'type': 'string'}}}},
@@ -571,7 +571,8 @@ def tool_track_shipment(c, a):
 def tool_ask_document(c, a):
     from app import staff_documents, transport_desk
     chat = CHAT.get()
-    row = staff_documents.latest(chat[0], a.get('name')) if chat else None
+    owner = staff_documents.SENDER.get() or (chat[0] if chat else None)
+    row = staff_documents.latest(owner, a.get('name')) if owner else None
     if not row:
         return 'لا يوجد ملف أرسلته في آخر 3 أيام. أعد إرسال الملف واكتب سؤالك معه أو بعده.'
     question = _clean(a.get('question'), 1000) or 'لخص الملف'
