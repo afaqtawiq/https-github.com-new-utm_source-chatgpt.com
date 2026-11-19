@@ -35,7 +35,11 @@ DEPARTMENTS = {
         'role': 'تتابع البيانات الجمركية في فسح ومراحلها والرسوم، والتعرفة والبنود والاشتراطات (سابر وغيرها)، وجهاز العمل الذي يقرأ فسح.',
         'tools': ('tariff', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
                   'fasah_importer_phone', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
-                  'runner_deny')},
+                  'runner_deny', 'fasah_billing'),
+        'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
+                    ('📋 سجّل كشوفات سلة الرحائب من فسح', 'سجل حسابات سلة الرحائب من فسح'),
+                    ('🔎 حالة البيانات في فسح', 'وش حالة البيانات المفتوحة في فسح؟'),
+                    ('🖥️ وش يسوي جهاز العمل الحين؟', 'وش حالة مهمة جهاز العمل؟'))},
     'transport': {
         'person': 'خالد', 'model': 'casual_male',
         'name': 'النقل والحمولات', 'manager': 'مدير النقل', 'icon': '🚚',
@@ -56,7 +60,12 @@ DEPARTMENTS = {
         'name': 'المالية والحسابات', 'manager': 'المدير المالي', 'icon': '💰',
         'aliases': ('المالية', 'الحسابات', 'المحاسبة', 'المالي'),
         'role': 'تسجل البيانات في الحسابات بقواعد الفوترة المعتمدة، والكشوفات والأرصدة والسدادات. لا ترحيل مالي إلا بموافقة المالك.',
-        'tools': ('record_declaration_billing', 'customer_balance', 'record_payment', 'party_statement', 'fasah_billing')},
+        'tools': ('record_declaration_billing', 'customer_balance', 'record_payment', 'party_statement', 'fasah_billing',
+                  'statement_to_group', 'open_fasah', 'runner_status', 'runner_stop', 'runner_deny'),
+        'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
+                    ('📋 سجّل كشوفات سلة الرحائب من فسح', 'سجل حسابات سلة الرحائب من فسح'),
+                    ('📤 أرسل كشف الياسمين للقروب', 'أرسل كشف الياسمين لهذا الشهر إلى قروب الياسمين'),
+                    ('📄 الكشوفات', 'ارسل الكشوفات لهذا الشهر'))},
     'sales': {
         'person': 'ريم', 'model': 'casual_female',
         'name': 'المبيعات والتسويق', 'manager': 'مدير المبيعات والتسويق', 'icon': '📈',
@@ -279,6 +288,7 @@ def _state(session=None):
         last = history(key, 1)
         out.append({'key': key, 'name': d['name'], 'manager': d['manager'], 'icon': d['icon'], 'role': d['role'],
                     'person': d.get('person', ''), 'model': d.get('model', ''),
+                    'actions': [list(x) for x in d.get('actions', ())],
                     'kpis': [[label, v] for label, v in kpis], 'alert': bool(alert),
                     'last': ({'command': last[-1]['command'][:200], 'reply': last[-1]['reply'][:300]} if last else None)})
     data = {'departments': out}
@@ -430,6 +440,43 @@ def department_page(key: str, request: Request):
 KIND_AR = {'pdf': 'PDF', 'excel': 'إكسل', 'csv': 'جدول CSV', 'word': 'وورد', 'image': 'صورة'}
 
 
+CONFIRM = re.compile(r'^\s*(?:نفذ|نفّذ)\s*[:،-]?\s*([0-9A-Fa-f]{6})\s*$')
+
+
+def owner_chat():
+    """The owner's WhatsApp chat with the agent (sender, conversation), so codes prepared from the office are the same
+    codes he can confirm on WhatsApp, and statement PDFs reach him there. None when unknown."""
+    import os
+    owner = re.sub(r'\D', '', os.getenv('WHATSAPP_COMMAND_OWNER', ''))
+    if not owner:
+        return None
+    try:
+        with db() as c:
+            if not c.execute("SELECT to_regclass('whatsapp_admin_audit') t").fetchone()['t']:
+                return None
+            row = c.execute('''SELECT sender, conversation_id FROM whatsapp_admin_audit
+                WHERE regexp_replace(sender, '\\D', '', 'g') = %s AND conversation_id IS NOT NULL ORDER BY id DESC LIMIT 1''',
+                            (owner,)).fetchone()
+    except Exception:
+        return None
+    return (row['sender'], row['conversation_id']) if row else None
+
+
+def confirm(c, code, chat):
+    """«نفذ CODE» typed in the office: run the same prepared action as on WhatsApp (one use, not expired)."""
+    from app import command_agent
+    if not chat:
+        return 'لا أستطيع تنفيذ الرمز من هنا؛ اكتب «نفذ ' + code + '» على واتساب.'
+    row = c.execute('''UPDATE whatsapp_voice_pending SET consumed=TRUE WHERE token=%s AND sender=%s AND NOT consumed
+        AND expires_at>NOW() RETURNING command''', (code.upper(), chat[0])).fetchone()
+    if not row:
+        return 'الرمز غير صحيح أو انتهت صلاحيته أو نُفذ من قبل.'
+    command = row['command']
+    if not command.startswith(command_agent.CONFIRM_PREFIX):
+        return 'هذا الرمز لأمر يُنفذ من واتساب فقط؛ اكتب «نفذ ' + code + '» هناك.'
+    return command_agent.execute_confirmed(c, command[len(command_agent.CONFIRM_PREFIX):])
+
+
 def ask(key, text, author, manager=True, channel='المنصة', owner=None, attached=None):
     """Run one request through the department manager (used by the web page). Returns the reply.
     owner = whose uploaded files ask_document reads; attached = (filename, kind) of a file sent with this message."""
@@ -445,10 +492,15 @@ def ask(key, text, author, manager=True, channel='المنصة', owner=None, att
     ctx = CONTEXT.set({'history': past})
     scope_token = command_agent.OFFICE.set(scope(key))
     doc_token = staff_documents.SENDER.set(owner) if owner else None
+    chat = owner_chat() if channel == 'المنصة' else None
+    chat_token = command_agent.CHAT.set(chat) if chat else None
     try:
         with db() as c:
-            reply = command_agent.run_agent(c, prompt)
+            code = CONFIRM.match(text or '') if not attached else None
+            reply = confirm(c, code.group(1), chat) if code and manager else command_agent.run_agent(c, prompt)
     finally:
+        if chat_token is not None:
+            command_agent.CHAT.reset(chat_token)
         if doc_token is not None:
             staff_documents.SENDER.reset(doc_token)
         command_agent.OFFICE.reset(scope_token)

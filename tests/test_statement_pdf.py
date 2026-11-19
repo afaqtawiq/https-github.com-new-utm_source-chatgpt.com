@@ -37,7 +37,7 @@ def test_sent_only_to_the_requesters_chat(monkeypatch):
     async def fake(recipient, content, filename, caption='', *, expected_account, expected_conversation, idempotency_key):
         assert z._dispatch_guard.get() is not None
         calls.append((recipient, filename, expected_conversation, idempotency_key, content[:5], caption))
-        return {'status': 'sent', 'provider_ids': ['1']}
+        return {'status': 'accepted', 'provider_ids': ['1']}   # what send_document really returns
     monkeypatch.setattr(z, 'send_document', fake)
     monkeypatch.setattr(z, 'account_id', lambda: 'acc')
     sent, failed = statement_pdf.send_to_requester(('966500000001', 'conv-1'), [STATEMENT, dict(STATEMENT, lines=[])])
@@ -45,6 +45,11 @@ def test_sent_only_to_the_requesters_chat(monkeypatch):
     recipient, name, conv, key, head, caption = calls[0]
     assert recipient == '966500000001' and conv == 'conv-1' and name.endswith('.pdf') and head == b'%PDF-'
     assert key.startswith('wa-document-') and len(key) == 12 + 64 and '8,299.53' in caption
+
+    async def partial(*a, **k):
+        return {'status': 'partial', 'provider_ids': []}
+    monkeypatch.setattr(z, 'send_document', partial)
+    assert statement_pdf.send_to_requester(('966500000001', 'conv-1'), [STATEMENT]) == ([], ['الياسمين'])
 
     async def boom(*a, **k):
         raise z.WhatsAppBlocked('نافذة الرد مغلقة')

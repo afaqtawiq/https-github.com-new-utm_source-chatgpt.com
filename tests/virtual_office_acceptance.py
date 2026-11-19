@@ -3,6 +3,7 @@ reply and keeps its memory; ordinary messages are not routed; «تقرير ال�
 need an admin session and the chat posts through the department manager. Isolated PostgreSQL; model simulated."""
 import datetime as dt
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -175,6 +176,62 @@ def run():
                                   headers=headers).json()['detail']
     # WhatsApp files stay separate from the office uploads.
     assert staff_documents.latest('966500000001') is None
+
+
+    # 7) Finance and clearance run the work computer and the FASAH billing; finance sends a statement to a group.
+    fin, clr = vo.scope('finance')['tools'], vo.scope('clearance')['tools']
+    assert {'open_fasah', 'fasah_billing', 'statement_to_group', 'runner_status'} <= fin and {'open_fasah', 'fasah_billing'} <= clr
+    state = client.get('/office/api/state').json()
+    assert any('جهاز آفاق طويق' in a[0] for a in next(d for d in state['departments'] if d['key'] == 'finance')['actions'])
+    from app import statement_groups, statement_import
+    found = [('g1', 'قروب الياسمين للتخليص'), ('g2', 'عمران — الحسابات'), ('g3', 'عائلة')]
+    assert statement_groups.match(found, 'الياسمين') == ('g1', 'قروب الياسمين للتخليص')
+    assert statement_groups.match(found, 'سلة الرحائب') is None and statement_groups.match(found, 'الياسمين', 'عائلة')[0] == 'g3'
+    with db() as c:
+        c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_admin_audit(id BIGSERIAL PRIMARY KEY, event_id TEXT, sender TEXT,
+            conversation_id TEXT, command TEXT, reply TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_voice_pending(token TEXT PRIMARY KEY, sender TEXT, conversation_id TEXT,
+            command TEXT, expires_at TIMESTAMPTZ, consumed BOOLEAN NOT NULL DEFAULT FALSE)''')
+        c.execute("INSERT INTO whatsapp_admin_audit(event_id,sender,conversation_id,command,reply) VALUES('e','966500000001','conv-owner','x','y')")
+    fake_statement = {'party': 'الياسمين', 'month': '2026-11', 'lines': [{'number': '418801'}], 'total': 1250.5}
+    posted = []
+
+    async def fake_groups():
+        return found
+
+    async def fake_send(cid, content, filename, caption):
+        posted.append((cid, content[:5], filename, caption))
+        return 'wamid.1'
+
+    def group_model(messages, system):
+        if len(messages) == 1:
+            return {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'statement_to_group', 'input': {'party': 'الياسمين'}}]}
+        return {'content': [{'type': 'text', 'text': messages[-1]['content'][0]['content']}]}
+
+    with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture', 'WHATSAPP_COMMAND_OWNER': '+966500000001'}), \
+            patch.object(command_agent, 'call_model', side_effect=group_model), \
+            patch.object(statement_import, 'statement', return_value=fake_statement), \
+            patch.object(statement_groups, 'groups', side_effect=fake_groups), patch.object(statement_groups, 'send_pdf', side_effect=fake_send), \
+            patch('app.statement_pdf.build', return_value=b'%PDF-1.4 statement'):
+        r = client.post('/office/api/finance/ask', json={'text': 'أرسل كشف الياسمين لقروب الياسمين'}, headers=headers)
+        reply = r.json()['reply']
+        assert 'قروب الياسمين للتخليص' in reply and '1,250.50' in reply and 'نفذ ' in reply and not posted, reply
+        code = re.search(r'نفذ ([0-9A-F]{6})', reply).group(1)
+        with db() as c:
+            row = c.execute('SELECT sender, conversation_id FROM whatsapp_voice_pending WHERE token=%s', (code,)).fetchone()
+        assert row['sender'] == '966500000001' and row['conversation_id'] == 'conv-owner'   # confirmable on WhatsApp too
+        done = client.post('/office/api/finance/ask', json={'text': 'نفذ ' + code}, headers=headers).json()['reply']
+        assert '✅' in done and posted and posted[0][0] == 'g1' and posted[0][1] == b'%PDF-' and 'الياسمين' in posted[0][3], done
+        again = client.post('/office/api/finance/ask', json={'text': 'نفذ ' + code}, headers=headers).json()['reply']
+        assert 'نُفذ من قبل' in again and len(posted) == 1
+    # No group → clear explanation, nothing prepared.
+    async def fake_groups_empty():
+        return []
+    with patch.dict(os.environ, {'WHATSAPP_COMMAND_OWNER': '+966500000001'}), \
+            patch.object(statement_import, 'statement', return_value=fake_statement), \
+            patch.object(statement_groups, 'groups', side_effect=fake_groups_empty):
+        out = statement_groups.prepare('الياسمين', '', '', lambda a: 'XXXXXX')
+    assert 'لم أجد قروب' in out and 'عضوًا' in out and 'نفذ' not in out
 
     client.cookies.clear()
     assert client.get('/office/api/state').status_code == 401

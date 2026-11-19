@@ -80,6 +80,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'containers': {'type': 'array', 'items': {'type': 'string'}}, 'bill': {'type': 'string'}, 'result': {'type': 'string', 'enum': ['approved', 'rejected']}, 'until': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['result']}},
     {'name': 'detention_claim', 'description': 'Audit a shipping agent detention/demurrage invoice for a container: compares the invoiced amount (and days if given) with the free period incl. extensions, the proven return date and the agent tariff; an overcharge gets an objection email ready to send with the code. e.g. «فاتورة غرامة الحاوية MSKU1234567 من الوكيل 4500 ريال 12 يوم».',
      'input_schema': {'type': 'object', 'properties': {'container': {'type': 'string'}, 'amount': {'type': 'string'}, 'days': {'type': 'string'}, 'returned_on': {'type': 'string'}}, 'required': ['container', 'amount']}},
+    {'name': 'statement_to_group', 'description': 'Send a party monthly account statement as a PDF to that party WhatsApp GROUP (e.g. قروب الياسمين). Finds the group among the agent number WhatsApp conversations, prepares the statement and returns a «نفذ» code; it is sent only after the manager confirms. party = الياسمين / عمران / سلة الرحائب; month YYYY-MM (default current); group = part of the group name if the manager names it. e.g. «أرسل كشف الياسمين لقروب الياسمين», «ارسلي كشف عمران للقروب».',
+     'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}, 'group': {'type': 'string'}}, 'required': ['party']}},
     {'name': 'office_report', 'description': 'Virtual office: live numbers of every department (clearance, transport, containers & shipping lines, finance, sales & marketing, customer service, administration) or of one department. Use for «تقرير الأقسام», «وضع المكتب», «أرقام قسم النقل». To talk to a department manager the owner writes «مدير المالية: …».',
      'input_schema': {'type': 'object', 'properties': {'department': {'type': 'string'}}}},
     {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines: vessel, loading port and date, ETA / actual discharge at the destination port, last event; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
@@ -554,6 +556,14 @@ def tool_detention_claim(c, a):
     return line_desk.audit_claim(a, _member().get('name') or '', make_token=lambda action: _pending(c, action))
 
 
+def tool_statement_to_group(c, a):
+    from app import statement_groups
+    if not _member().get('manager'):
+        return 'إرسال الكشوفات للقروبات للمدير فقط.'
+    return statement_groups.prepare(a.get('party') or '', a.get('month') or '', _clean(a.get('group'), 80),
+                                    lambda action: _pending(c, action))
+
+
 def tool_office_report(c, a):
     from app import virtual_office
     key = virtual_office.department_for(a.get('department')) if a.get('department') else None
@@ -778,6 +788,9 @@ def execute_confirmed(c, payload):
     if not member.get('manager'):
         return 'الإرسال خارج الشركة يحتاج تأكيد المدير؛ لم يُرسل شيء.'
     action = json.loads(payload)
+    if action.get('tool') == 'statement_group_send':
+        from app import statement_groups
+        return statement_groups.execute(action)
     if action.get('tool') == 'add_employee':
         from app.employees import init
         init()

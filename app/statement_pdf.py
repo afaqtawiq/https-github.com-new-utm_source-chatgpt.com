@@ -127,7 +127,8 @@ async def send(recipient, conversation, s):
     with z.dispatch_guard(lambda: None):
         result = await z.send_document(recipient, content, filename(s), caption, expected_account=z.account_id(),
                                        expected_conversation=str(conversation), idempotency_key=key)
-    return isinstance(result, dict) and result.get('status') == 'sent'
+    # send_document reports «accepted» (or a public-link warning) when WhatsApp took the file.
+    return isinstance(result, dict) and result.get('status') in ('sent', 'accepted', 'public_link_warning')
 
 
 def send_to_requester(chat, statements):
