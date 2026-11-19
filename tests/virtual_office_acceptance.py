@@ -233,6 +233,37 @@ def run():
         out = statement_groups.prepare('الياسمين', '', '', lambda a: 'XXXXXX')
     assert 'لم أجد قروب' in out and 'عضوًا' in out and 'نفذ' not in out
 
+    # Email desk (دانة): inbox, open, reply in the thread only after «نفذ».
+    from app import mail_agent, mail_desk, spacemail
+    assert vo.route('دانة: وش وصل على الإيميل') == ('email', 'وش وصل على الإيميل') and vo.DEPARTMENTS['email']['person'] == 'دانة'
+    mail_agent.init()
+    with db() as c:
+        uid = c.execute("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").fetchone()['id']
+        mid = c.execute('''INSERT INTO spacemail_inbox(user_id,uidvalidity,uid,message_id,sender,subject,body,received,imported_at,message_references)
+            VALUES(%s,'1',77,'<abc@goodrich>','Goodrich Ops <goodrich.jed@goodricharabia.com>','RE: ETA B/L SSATAOJED2609210',
+            'Dear Afaq, vessel HAI TAO 205 ETA Jeddah 26/11/2026.',%s,NOW(),'') RETURNING id''', (uid, 'Thu, 19 Nov 2026')).fetchone()['id']
+        c.execute('''INSERT INTO mail_agent_items(inbox_id,user_id,category,urgency,summary,reply_to,reply_subject,reply_body,action,created_at,updated_at)
+            VALUES(%s,%s,'shipping_agent','high','الوكيل يؤكد وصول السفينة 26/11','goodrich.jed@goodricharabia.com','Re: ETA',
+            'Thank you for the update, well noted. Best regards.','draft',NOW(),NOW())''', (mid, uid))
+    with patch.object(mail_desk, 'mailbox_user', return_value=uid):
+        with db() as c:
+            box = mail_desk.inbox(c)
+            assert f'#{mid}' in box and '🔴' in box and '⏳' in box and 'وكيل ملاحي' in box and '26/11' in box, box
+            assert f'#{mid}' in mail_desk.inbox(c, query='goodrich') and 'لا يوجد' in mail_desk.inbox(c, query='zzzz')
+            opened = mail_desk.open_message(c, mid)
+            assert 'ETA Jeddah 26/11/2026' in opened and 'رد مقترح' in opened, opened
+            prepared = []
+            out = mail_desk.prepare_reply(c, mid, '', lambda a: (prepared.append(a), 'D4N4A1')[1])
+            assert 'نفذ D4N4A1' in out and prepared[0]['to'] == 'goodrich.jed@goodricharabia.com' and prepared[0]['subject'].lower().startswith('re: ')
+            sent = []
+            with patch.object(spacemail, 'send', side_effect=lambda *a, **k: (sent.append((a, k)), '<reply@afaq>')[1]):
+                done = mail_desk.send_reply(c, prepared[0])
+            assert done.startswith('✅') and sent[0][1]['in_reply_to'] == '<abc@goodrich>'
+            assert c.execute('SELECT action FROM mail_agent_items WHERE inbox_id=%s', (mid,)).fetchone()['action'] == 'approved_sent'
+    assert {'mail_inbox', 'mail_open', 'mail_reply'} <= set(command_agent.HANDLERS)
+    with db() as c:
+        assert 'غير متصل' in mail_desk.inbox(c)
+
     client.cookies.clear()
     assert client.get('/office/api/state').status_code == 401
 

@@ -61,8 +61,8 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const CFG = JSON.parse(document.getElementById('config').textContent);
-const COLORS = {clearance:0x3b82f6, transport:0xf59e0b, containers:0x06b6d4, finance:0x22c55e, sales:0xec4899, service:0xa855f7, admin:0x94a3b8};
-const DESKS = {clearance:[-10,-3], transport:[-6,-3], containers:[-2,-3], finance:[2,-3], sales:[-10,3], service:[-6,3], admin:[-2,3]};
+const COLORS = {clearance:0x3b82f6, transport:0xf59e0b, containers:0x06b6d4, finance:0x22c55e, sales:0xec4899, service:0xa855f7, email:0xef4444, admin:0x94a3b8};
+const DESKS = {clearance:[-10,-3], transport:[-6,-3], containers:[-2,-3], finance:[2,-3], sales:[-10,3], service:[-6,3], admin:[-2,3], email:[2,3]};
 const MEETING = new THREE.Vector3(10.5, 0, 3);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -134,7 +134,8 @@ const SCALE = 0.72;                               // the pack shares one rig: on
 // Look of each person (the pack's own skin colour exports almost black): skin, hair, suit.
 const LOOK = {clearance: {skin: 0xc68a5f, hair: 0x1b120c, suit: 0x26324a}, transport: {skin: 0xb5764b, hair: 0x20140c},
   containers: {skin: 0xd09a70, hair: 0x2a2a2a, suit: 0x3a3f46}, finance: {skin: 0xe0ac86, hair: 0x2b1a12, suit: 0x1f2a3d},
-  sales: {skin: 0xd8a07a, hair: 0x3a2215}, service: {skin: 0xc58b63, hair: 0x1e130d}, admin: {skin: 0xe2b28f, hair: 0x3b2a20, suit: 0x5a4636}};
+  sales: {skin: 0xd8a07a, hair: 0x3a2215}, service: {skin: 0xc58b63, hair: 0x1e130d}, admin: {skin: 0xe2b28f, hair: 0x3b2a20, suit: 0x5a4636},
+  email: {skin: 0xd6a27e, hair: 0x1a110b, suit: 0x7f1d1d}};
 function fallbackPerson(color) {                  // used only if a 3D model fails to load
   const g = new THREE.Group();
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.9, 6, 12), mat(color)); body.position.y = 0.85; body.castShadow = true;

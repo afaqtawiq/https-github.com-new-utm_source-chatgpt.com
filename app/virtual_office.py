@@ -79,6 +79,13 @@ DEPARTMENTS = {
         'aliases': ('خدمة العملاء', 'العملاء', 'الدعم', 'الشكاوى'),
         'role': 'تتابع محادثات العملاء: الوعود والانتظار والعملاء المنزعجين، وتعليم الوكيل الإجابات الصحيحة، وحالة شحنات العملاء.',
         'tools': ('customer_waiting', 'teach_answer', 'learned_answers', 'shipment_status', 'track_shipment', 'send_whatsapp')},
+    'email': {
+        'person': 'دانة', 'model': 'suit_female',
+        'name': 'البريد والمراسلات', 'manager': 'مديرة البريد', 'icon': '📧',
+        'aliases': ('البريد', 'الايميل', 'الإيميل', 'الايميلات', 'الإيميلات', 'المراسلات'),
+        'role': 'تستلم إيميلات البريد الرسمي وتفرزها وتنبه للعاجل، وتجهز الردود والمراسلات مع الوكلاء الملاحيين والعملاء والجهات؛ لا يخرج إيميل إلا بعد «نفذ».',
+        'tools': ('mail_inbox', 'mail_open', 'mail_reply', 'send_email', 'ask_eta_by_email', 'free_time_extension'),
+        'actions': (('📌 تحتاج انتباه', 'وش الإيميلات اللي تحتاج انتباه أو رد؟'), ('📥 بريد اليوم', 'وش وصل على الإيميل اليوم؟'))},
     'admin': {
         'person': 'هند', 'model': 'classy_female',
         'name': 'الإدارة والموظفين', 'manager': 'مدير الإدارة', 'icon': '🗂️',
@@ -213,6 +220,12 @@ def snapshot(key):
             ('وعود مفتوحة', "SELECT COUNT(*) FROM customer_promises WHERE status='open'"),
             ('تنبيهات انتظار (24 ساعة)', "SELECT COUNT(*) FROM customer_wait_alerts WHERE outcome='alerted' AND created_at > NOW() - INTERVAL '24 hours'"),
             ('عملاء منزعجون (يومين)', "SELECT COUNT(*) FROM customer_upset_events WHERE created_at > NOW() - INTERVAL '2 days'"),
+        ],
+        'email': [
+            ('رسائل وصلت اليوم', 'SELECT COUNT(*) FROM spacemail_inbox WHERE imported_at >= %s', (day_start,)),
+            ('تنتظر رد', "SELECT COUNT(*) FROM mail_agent_items WHERE action IN ('draft','preview','send_failed')"),
+            ('عاجلة (3 أيام)', "SELECT COUNT(*) FROM mail_agent_items WHERE urgency='high' AND created_at > NOW() - INTERVAL '3 days'"),
+            ('ردود أُرسلت (7 أيام)', "SELECT COUNT(*) FROM mail_agent_items WHERE action IN ('approved_sent','auto_sent') AND updated_at >= %s", (week,)),
         ],
         'admin': [
             ('موظفون مسجلون', 'SELECT COUNT(*) FROM team_employees'),
