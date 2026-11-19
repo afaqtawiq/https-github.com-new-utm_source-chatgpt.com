@@ -22,7 +22,7 @@ button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
 #panel.open{display:flex}#ph{padding:12px 14px;border-bottom:1px solid var(--line)}#ph h2{margin:0;font-size:17px}#ph p{margin:4px 0 0;color:var(--muted);font-size:12.5px}
 #kpis{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line)}
 .k{background:#0b1c29;border-radius:10px;padding:6px 8px;font-size:12px;color:var(--muted)}.k b{display:block;color:var(--text);font-size:17px}
-#msgs{flex:1;overflow:auto;padding:10px 14px}.m{border-radius:12px;padding:8px 10px;margin:6px 0;white-space:pre-wrap;font-size:14px;line-height:1.55}
+#actions{display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px 0}#actions:empty{display:none}#actions button{font-size:12.5px;padding:6px 9px;background:#17344a}#msgs{flex:1;overflow:auto;padding:10px 14px}.m{border-radius:12px;padding:8px 10px;margin:6px 0;white-space:pre-wrap;font-size:14px;line-height:1.55}
 .m.me{background:#17344a;margin-right:30px}.m.him{background:#0b1c29;border-right:3px solid var(--c,#22c55e);margin-left:20px}.m small{display:block;color:var(--muted);font-size:11px}
 #form{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line);align-items:stretch}#attach{display:flex;align-items:center;justify-content:center;width:44px;border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:20px;background:#102536}#chip{margin:0 10px;padding:6px 10px;background:#17344a;border-radius:10px;font-size:13px;display:flex;justify-content:space-between;align-items:center}#chip[hidden]{display:none}#chip button{padding:2px 8px}#form textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;background:#0b1c29;color:var(--text);
  border:1px solid var(--line);border-radius:10px;padding:8px;font-size:15px;font-family:inherit}
@@ -44,7 +44,7 @@ button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
 </div>
 <div id="panel"><button id="close">✕</button>
   <div id="ph"><h2 id="pt"></h2><p id="pr"></p></div>
-  <div id="kpis"></div><div id="msgs"></div>
+  <div id="kpis"></div><div id="actions"></div><div id="msgs"></div>
   <div id="chip" hidden><span id="chipname"></span><button type="button" id="chipx" title="إزالة">✕</button></div>
   <form id="form"><label id="attach" title="إرفاق ملف: PDF، إكسل، وورد، صور">📎<input id="file" type="file" hidden
     accept=".pdf,.xlsx,.csv,.docx,.jpg,.jpeg,.png,.webp,.gif,application/pdf,image/*"></label>
@@ -277,11 +277,14 @@ async function openPanel(key) {
   current = key; panel.classList.add('open'); msgs.innerHTML = '';
   const form = document.getElementById('form');
   if (!key) { document.getElementById('pt').textContent = '👥 اجتماع الفريق'; document.getElementById('pr').textContent = 'أرقام كل الأقسام الآن';
-    document.getElementById('kpis').innerHTML = ''; form.style.display = 'none'; return; }
+    document.getElementById('kpis').innerHTML = ''; document.getElementById('actions').innerHTML = ''; form.style.display = 'none'; return; }
   form.style.display = '';
   const d = CFG.departments.find(x => x.key === key), color = '#' + COLORS[key].toString(16).padStart(6, '0');
   document.getElementById('pt').textContent = d.icon + ' ' + (d.person ? d.person + ' — ' : '') + d.manager; document.getElementById('pr').textContent = d.role;
   document.getElementById('kpis').innerHTML = (d.kpis || []).map(([l, v]) => `<div class="k">${esc(l)}<b>${esc(v ?? '—')}</b></div>`).join('');
+  const acts = document.getElementById('actions'); acts.innerHTML = '';
+  for (const [label, say] of d.actions || []) { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+    b.onclick = () => { document.getElementById('text').value = say; document.getElementById('form').requestSubmit(); }; acts.appendChild(b); }
   for (const [k, o] of Object.entries(people)) if (k !== key && !o.seated && !o.path.length && !o.away && !meeting) { sitDown(o); renderTag(o); }
   const p = people[key]; if (p && !p.path.length && !p.away && !meeting) standUp(p, () => { faceFront(p); renderTag(p); });
   const r = await fetch('/office/api/' + key + '/history'); const data = await r.json();
