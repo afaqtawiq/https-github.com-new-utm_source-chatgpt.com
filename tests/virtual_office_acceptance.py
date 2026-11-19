@@ -27,6 +27,8 @@ def run():
     assert vo.route('قسم النقل، كم حمولة اليوم؟') == ('transport', 'كم حمولة اليوم؟')
     assert vo.route('الحاويات: وش المتأخر') == ('containers', 'وش المتأخر')
     assert vo.route('مدير خدمة العملاء')[0] == 'service'
+    assert vo.route('نورة: كشف عمران') == ('finance', 'كشف عمران') and vo.route('يا سلطان وش المتأخر')[0] == 'containers'
+    assert vo.route('نورة كلمت العميل') is None
     for text in ('الحاويات المتأخرة كم', 'كشف عمران لشهر اكتوبر', 'فسح مفتوح الان', 'سجل حسابات سلة من فسح'):
         assert vo.route(text) is None, text
 
@@ -44,10 +46,10 @@ def run():
         with db() as c:
             reply = command_agent.run_agent(c, 'مدير الحاويات: وش المتأخر عندك؟')
         ROLE.reset(token)
-    assert reply.startswith('🚢 مدير الحاويات والملاحة:') and 'MSCU1234565' in reply, reply
+    assert reply.startswith('🚢 سلطان — مدير الحاويات والملاحة:') and 'MSCU1234565' in reply, reply
     first = calls[0]
     assert 'containers_status' in first['tools'] and 'record_payment' not in first['tools'] and 'broadcast_load' not in first['tools']
-    assert 'مدير الحاويات والملاحة' in first['system'] and 'متأخرة عن آخر يوم مجاني: 1' in first['system'], first['system'][-600:]
+    assert 'مدير الحاويات والملاحة' in first['system'] and 'سلطان' in first['system'] and 'متأخرة عن آخر يوم مجاني: 1' in first['system'], first['system'][-600:]
     assert first['messages'][0]['content'] == 'وش المتأخر عندك؟'
     with db() as c:
         row = c.execute("SELECT * FROM office_messages WHERE department='containers'").fetchone()
@@ -102,14 +104,14 @@ def run():
     page = client.get('/office').text
     assert '"key": "containers"' in page and '/office/assets/three.module.min.js' in page and csrf in page
     assert 'مدير المالية' in client.get('/office/cards').text
-    for path, kind in (('three.module.min.js', 'javascript'), ('models/Xbot.glb', 'gltf'), ('jsm/loaders/GLTFLoader.js', 'javascript')):
+    for path, kind in (('three.module.min.js', 'javascript'), ('models/people/suit_male.glb', 'gltf'), ('models/people/classy_female.glb', 'gltf'), ('jsm/libs/meshopt_decoder.module.js', 'javascript'), ('jsm/loaders/GLTFLoader.js', 'javascript')):
         r = client.get('/office/assets/' + path)
         assert r.status_code == 200 and kind in r.headers['content-type'], path
     assert client.get('/office/assets/THREE_LICENSE').status_code == 404
     assert client.get('/office/assets/%2e%2e/virtual_office.py').status_code == 404
     state = client.get('/office/api/state').json()
     cont = next(d for d in state['departments'] if d['key'] == 'containers')
-    assert cont['alert'] and ['متأخرة عن آخر يوم مجاني', 1] in cont['kpis'] and 'csrf' not in state
+    assert cont['person'] == 'سلطان' and cont['model'] == 'classy_male' and cont['alert'] and ['متأخرة عن آخر يوم مجاني', 1] in cont['kpis'] and 'csrf' not in state
     assert 'تقرير الأقسام' in client.get('/office/api/report').json()['text']
     assert client.get('/office/api/finance/history').json()['messages'][-1]['command'] == 'كم البيانات المسجلة هذا الشهر؟'
     assert client.post('/office/api/finance/ask', json={'text': 'x'}, headers={'origin': 'http://testserver'}).status_code == 403

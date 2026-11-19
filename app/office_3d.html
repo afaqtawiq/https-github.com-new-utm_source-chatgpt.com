@@ -10,7 +10,7 @@
 #scene{position:fixed;inset:0}#labels{position:fixed;inset:0;pointer-events:none;direction:ltr}
 .tag{left:0;top:0;direction:rtl;pointer-events:auto;cursor:pointer;background:#0b1c29e6;border:1px solid var(--c,#28475d);border-radius:10px;padding:4px 8px;
  font-size:12px;white-space:nowrap;text-align:center;box-shadow:0 2px 8px #0006}
-.tag b{display:block;font-size:12.5px}.tag small{color:var(--muted)}.tag .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-left:4px}
+.tag b{display:block;font-size:13.5px}.tag small{display:block;color:var(--muted)}.tag small.role{color:#cfe3f1}.tag .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-left:4px}
 .tag.busy .dot{background:#ffb020;animation:p 1s infinite}.tag.alert .dot{background:#ff5c5c}@keyframes p{50%{opacity:.3}}
 .bubble{background:#fff;color:#102536;border-radius:12px;padding:4px 9px;font-size:12px;margin-bottom:4px;max-width:200px;white-space:normal}
 #bar{position:fixed;top:10px;right:10px;left:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;pointer-events:none}
@@ -54,6 +54,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const CFG = JSON.parse(document.getElementById('config').textContent);
 const COLORS = {clearance:0x3b82f6, transport:0xf59e0b, containers:0x06b6d4, finance:0x22c55e, sales:0xec4899, service:0xa855f7, admin:0x94a3b8};
@@ -96,10 +97,10 @@ for (let x = -12; x <= 6; x += 4.5) { box(3.6, 2.6, 0.06, glass, x, 2.1, -9.82, 
 // meeting room (glass walls, long table, chairs)
 box(0.08, 3.2, 6, glass, 7, 1.6, 2, false); box(0.12, 3.2, 0.12, mat(0x222831), 7, 1.6, 5, false); box(6.6, 3.2, 0.08, glass, 10.8, 1.6, -1, false);
 box(6, 0.02, 8.4, mat(0x2f6f6a), 10.8, 0.01, 3.5, false);
-box(4.6, 0.12, 1.6, mat(0x5b3a24), 10.5, 1.0, 3); box(0.16, 1.0, 0.16, mat(0x333), 8.6, 0.5, 3); box(0.16, 1.0, 0.16, mat(0x333), 12.4, 0.5, 3);
+box(4.6, 0.08, 1.6, mat(0x5b3a24), 10.5, 0.76, 3); box(0.16, 0.74, 0.16, mat(0x333), 8.6, 0.37, 3); box(0.16, 0.74, 0.16, mat(0x333), 12.4, 0.37, 3);
 const seats = [];
 for (let i = 0; i < 4; i++) { seats.push(new THREE.Vector3(8.8 + i * 1.15, 0, 1.6)); seats.push(new THREE.Vector3(8.8 + i * 1.15, 0, 4.4)); }
-seats.forEach(s => box(0.6, 0.5, 0.6, mat(0x1f2937), s.x, 0.25, s.z > 3 ? s.z + 0.35 : s.z - 0.35));
+seats.forEach(s => { const back = s.z > 3 ? 1 : -1; box(0.55, 0.08, 0.5, mat(0x1f2937), s.x, 0.46, s.z + back * 0.15); box(0.55, 0.6, 0.08, mat(0x1f2937), s.x, 0.8, s.z + back * 0.42); });
 const screenTv = box(2.6, 1.5, 0.06, mat(0x0b1620, {emissive:0x1e3a5f, emissiveIntensity:.6}), 10.5, 2.2, -0.9, false);
 // plants, shelves, cooler
 const plant = (x, z, s = 1) => { box(0.5 * s, 0.5 * s, 0.5 * s, mat(0xf1f1f1), x, 0.25 * s, z); const l = new THREE.Mesh(new THREE.SphereGeometry(0.55 * s, 10, 8), mat(0x3f8f3a)); l.position.set(x, 0.95 * s, z); l.castShadow = true; scene.add(l); };
@@ -108,85 +109,121 @@ if (innerWidth >= innerHeight) { box(0.5, 2.6, 2.4, mat(0x6b4a32), -14.55, 1.3, 
 box(0.5, 1.2, 0.5, mat(0xdfe6ee), 5, 0.6, -9.3); box(0.35, 0.45, 0.35, mat(0x7cc4ff, {transparent:true, opacity:.8}), 5, 1.45, -9.3);
 const COOLER = new THREE.Vector3(5, 0, -8.3);
 
-// desks with department rugs, laptops and chairs
+// desks with department rugs, laptops and chairs (seated height)
 const deskMat = mat(0xd9dadc, {roughness:.5});
 for (const [key, [x, z]] of Object.entries(DESKS)) {
   box(3.2, 0.02, 2.6, mat(COLORS[key], {roughness:.95}), x, 0.012, z, false);
-  box(1.9, 0.08, 0.9, deskMat, x, 1.02, z + 0.25); box(1.8, 0.98, 0.08, mat(0x9aa3ab), x, 0.5, z + 0.66);
-  box(0.08, 0.98, 0.8, mat(0x9aa3ab), x - 0.9, 0.5, z + 0.25); box(0.08, 0.98, 0.8, mat(0x9aa3ab), x + 0.9, 0.5, z + 0.25);
-  const lap = box(0.55, 0.03, 0.38, mat(0xb8bec6, {metalness:.6, roughness:.3}), x, 1.08, z + 0.3);
-  const scr = box(0.55, 0.36, 0.02, mat(0x111827, {emissive:COLORS[key], emissiveIntensity:.25}), x, 1.26, z + 0.48);
-  scr.rotation.x = -0.2; box(0.12, 0.25, 0.12, mat(0xf97316), x + 0.7, 1.18, z + 0.4); // desk lamp
+  box(1.9, 0.06, 0.9, deskMat, x, 0.76, z + 0.35); box(1.8, 0.72, 0.06, mat(0x9aa3ab), x, 0.37, z + 0.77);
+  box(0.06, 0.73, 0.8, mat(0x9aa3ab), x - 0.92, 0.37, z + 0.35); box(0.06, 0.73, 0.8, mat(0x9aa3ab), x + 0.92, 0.37, z + 0.35);
+  box(0.55, 0.03, 0.38, mat(0xb8bec6, {metalness:.6, roughness:.3}), x, 0.8, z + 0.38);
+  const scr = box(0.55, 0.36, 0.02, mat(0x111827, {emissive:COLORS[key], emissiveIntensity:.35}), x, 0.98, z + 0.58);
+  scr.rotation.x = -0.2; box(0.12, 0.25, 0.12, mat(0xf97316), x + 0.7, 0.9, z + 0.5);  // desk lamp
+  box(0.55, 0.08, 0.5, mat(0x1f2937), x, 0.46, z - 0.42); box(0.55, 0.6, 0.08, mat(0x1f2937), x, 0.8, z - 0.7);      // chair
+  box(0.08, 0.42, 0.08, mat(0x111111), x, 0.21, z - 0.42);
 }
 
-// ---------- people ----------
+// ---------- people (real 3D humans, CC0 "Ultimate Animated Character Pack" by Quaternius) ----------
 const people = {};
-let model = null;
-function fallbackPerson(color) {                  // used only if the 3D model fails to load
+const models = {};
+let clips = [];
+const SCALE = 0.72;                               // the pack shares one rig: one scale gives ~1.78 m people
+// Look of each person (the pack's own skin colour exports almost black): skin, hair, suit.
+const LOOK = {clearance: {skin: 0xc68a5f, hair: 0x1b120c, suit: 0x26324a}, transport: {skin: 0xb5764b, hair: 0x20140c},
+  containers: {skin: 0xd09a70, hair: 0x2a2a2a, suit: 0x3a3f46}, finance: {skin: 0xe0ac86, hair: 0x2b1a12, suit: 0x1f2a3d},
+  sales: {skin: 0xd8a07a, hair: 0x3a2215}, service: {skin: 0xc58b63, hair: 0x1e130d}, admin: {skin: 0xe2b28f, hair: 0x3b2a20, suit: 0x5a4636}};
+function fallbackPerson(color) {                  // used only if a 3D model fails to load
   const g = new THREE.Group();
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.9, 6, 12), mat(color)); body.position.y = 0.85; body.castShadow = true;
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), mat(0xe0b48f)); head.position.y = 1.65; head.castShadow = true;
   g.add(body, head); return {root: g, mixer: null, actions: {}};
 }
-function makePerson(key) {
-  if (!model) return fallbackPerson(COLORS[key]);
-  const root = SkeletonUtils.clone(model.scene);
-  root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.material = o.material.clone();
-    if (!/Joints/i.test(o.material.name)) o.material.color = new THREE.Color(COLORS[key]).lerp(new THREE.Color(0xffffff), .25); } });
-  root.scale.setScalar(1.0);
-  const mixer = new THREE.AnimationMixer(root), actions = {};
-  for (const clip of model.animations) actions[clip.name] = mixer.clipAction(clip);
+function makePerson(d) {
+  const src = models[d.model];
+  if (!src || !clips.length) return fallbackPerson(COLORS[d.key]);
+  const inner = SkeletonUtils.clone(src.scene), look = LOOK[d.key] || {};
+  inner.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = true; o.frustumCulled = false;
+    const recolor = m => { m = m.clone(); const n = m.name || '';
+      if (n === 'Skin') m.color.setHex(look.skin || 0xd09a70);
+      else if (n === 'Hair') m.color.setHex(look.hair || 0x24170f);
+      else if (n === 'Black' && look.suit) m.color.setHex(look.suit);
+      else if (n === 'Hat') m.visible = false;
+      else if (n === 'Face') m.color.setHex(0x1d1a18);             // eyes and brows dark, not white
+      m.roughness = 0.75; return m; };
+    o.material = Array.isArray(o.material) ? o.material.map(recolor) : recolor(o.material);
+  });
+  inner.scale.setScalar(SCALE);
+  const root = new THREE.Group(); root.add(inner);
+  const mixer = new THREE.AnimationMixer(inner), actions = {};
+  for (const clip of clips) actions[clip.name] = mixer.clipAction(clip);
   return {root, mixer, actions};
 }
-function play(p, name, fade = .35) {
-  const next = p.actions[name]; if (!next || p.current === next) return;
-  if (name === 'agree' || name === 'headShake') { next.reset(); next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = false; }
-  next.reset().fadeIn(fade).play(); if (p.current) p.current.fadeOut(fade); p.current = next;
+function play(p, name, {fade = .3, once = false, then = null} = {}) {
+  const next = p.actions[name]; if (!next) { then && then(); return; }
+  if (p.current === next && !once) return;
+  next.reset(); next.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, Infinity); next.clampWhenFinished = once;
+  next.fadeIn(fade).play(); if (p.current && p.current !== next) p.current.fadeOut(fade); p.current = next;
+  clearTimeout(p.timer); if (then) p.timer = setTimeout(then, next.getClip().duration * 1000);
+}
+function sitDown(p, instant = false) {
+  faceFront(p); p.seated = true;
+  if (instant && p.actions.SitDown) { play(p, 'SitDown', {fade: 0, once: true}); p.actions.SitDown.time = p.actions.SitDown.getClip().duration; return; }
+  play(p, 'SitDown', {once: true});
+}
+function standUp(p, then) {
+  if (!p.seated) { play(p, 'Idle'); then && then(); return; }
+  p.seated = false; play(p, 'StandUp', {once: true, then: () => { play(p, 'Idle'); then && then(); }});
 }
 
 function build() {
   for (const d of CFG.departments) {
-    const [x, z] = DESKS[d.key]; const p = makePerson(d.key);
-    p.home = new THREE.Vector3(x, 0, z - 0.45); p.root.position.copy(p.home); p.root.rotation.y = 0; scene.add(p.root);
+    const [x, z] = DESKS[d.key]; const p = makePerson(d);
+    p.home = new THREE.Vector3(x, 0, z - 0.45); p.root.position.copy(p.home); scene.add(p.root);
     const el = document.createElement('div'); el.className = 'tag'; el.style.setProperty('--c', '#' + COLORS[d.key].toString(16).padStart(6, '0'));
     el.addEventListener('click', e => { e.stopPropagation(); openPanel(d.key); });
-    const tag = new CSS2DObject(el); tag.position.set(0, 2.25, 0); p.root.add(tag);
-    Object.assign(p, {key: d.key, dept: d, el, path: [], speed: 2.3, next: 8 + Math.random() * 25});
-    play(p, 'idle', 0); people[d.key] = p; renderTag(p);
+    const tag = new CSS2DObject(el); tag.position.set(0, 2.05, 0); p.root.add(tag);
+    Object.assign(p, {key: d.key, dept: d, el, tag, path: [], speed: 2.1, next: 10 + Math.random() * 30});
+    people[d.key] = p; sitDown(p, true); renderTag(p);
   }
-  document.getElementById('loading').remove();
+  const l = document.getElementById('loading'); l && l.remove();
 }
 function renderTag(p, bubble) {
   const d = p.dept, first = (d.kpis || [])[0];
   p.el.innerHTML = (bubble ? `<div class="bubble">${esc(bubble)}</div>` : '') +
-    `<b><span class="dot"></span>${esc(d.icon)} ${esc(d.manager)}</b><small>${first ? esc(first[0]) + ': ' + esc(first[1] ?? '—') : esc(d.name)}</small>`;
+    `<b><span class="dot"></span>${esc(d.person || '')}</b><small class="role">${esc(d.icon)} ${esc(d.manager)}</small>` +
+    `<small>${first ? esc(first[0]) + ': ' + esc(first[1] ?? '—') : esc(d.name)}</small>`;
   p.el.classList.toggle('alert', !!d.alert);
+  p.tag.position.y = p.seated ? 1.55 : 2.05;
 }
 
 // ---------- walking ----------
-function walkTo(p, points, then) { p.path = points.map(v => v.clone()); p.then = then; play(p, 'walk'); }
+function walkTo(p, points, then) {
+  standUp(p, () => { p.path = points.map(v => v.clone()); p.then = then; play(p, 'Walk'); renderTag(p); });
+}
 function step(p, dt) {
   if (!p.path.length) return;
   const target = p.path[0], pos = p.root.position, dir = target.clone().sub(pos); dir.y = 0;
   const dist = dir.length();
-  if (dist < 0.05) { p.path.shift(); if (!p.path.length) { play(p, 'idle'); p.then && p.then(); } return; }
+  if (dist < 0.05) { p.path.shift(); if (!p.path.length) { play(p, 'Idle'); const t = p.then; p.then = null; t && t(); } return; }
   dir.normalize(); pos.addScaledVector(dir, Math.min(dist, p.speed * dt));
   const want = Math.atan2(dir.x, dir.z); let diff = want - p.root.rotation.y; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
   p.root.rotation.y += diff * Math.min(1, dt * 8);
 }
 const AISLE_Z = 0, V = (x, z) => new THREE.Vector3(x, 0, z);
-// Row behind the back desks: go around the desk's side; front row: straight to the aisle.
+// Back-row people go around their desk's side; front-row people step straight into the aisle.
 function leave(p) { const h = p.home; return h.z < 0 ? [V(h.x + 1.3, h.z), V(h.x + 1.3, AISLE_Z)] : [V(h.x, AISLE_Z)]; }
 function arrive(p) { const h = p.home; return h.z < 0 ? [V(h.x + 1.3, AISLE_Z), V(h.x + 1.3, h.z), h.clone()] : [V(h.x, AISLE_Z), h.clone()]; }
 function faceFront(p) { p.root.rotation.y = 0; }
+function backToDesk(p) { p.away = false; sitDown(p); renderTag(p); }
 let meeting = false;
 function wander(p, dt) {
-  if (meeting || p.busy || p.path.length || p.away) return;
+  if (meeting || p.busy || p.path.length || p.away || current === p.key) return;
   p.next -= dt; if (p.next > 0) return;
-  p.next = 25 + Math.random() * 40; p.away = true;
+  p.next = 35 + Math.random() * 50; p.away = true;
   const spot = Math.random() < .5 ? COOLER.clone() : V(-13.6, 6.5);
   walkTo(p, [...leave(p), V(spot.x, AISLE_Z), spot], () => setTimeout(() => {
-    if (meeting) return; walkTo(p, [V(spot.x, AISLE_Z), ...arrive(p)], () => { faceFront(p); p.away = false; }); }, 3000));
+    if (meeting) return; walkTo(p, [V(spot.x, AISLE_Z), ...arrive(p)], () => backToDesk(p)); }, 3000));
 }
 
 // ---------- meeting ----------
@@ -194,13 +231,13 @@ document.getElementById('meeting').onclick = async () => {
   const btn = document.getElementById('meeting');
   if (meeting) { meeting = false; btn.textContent = '👥 اجتماع الفريق';
     Object.values(people).forEach(p => { const s = p.seat || V(7.7, 6.6);
-      walkTo(p, [V(7.7, s.z), V(7.5, 6.6), V(6, 6.6), V(6, AISLE_Z), ...arrive(p)], () => { faceFront(p); p.away = false; }); });
+      walkTo(p, [V(7.7, s.z), V(7.5, 6.6), V(6, 6.6), V(6, AISLE_Z), ...arrive(p)], () => backToDesk(p)); });
     return; }
   meeting = true; btn.textContent = '↩️ إنهاء الاجتماع';
   Object.values(people).forEach((p, i) => { const s = seats[i % seats.length]; p.seat = s; p.away = true;
     const start = p.root.position.distanceTo(p.home) < 0.2 ? leave(p) : [V(p.root.position.x, AISLE_Z)];
     walkTo(p, [...start, V(6, AISLE_Z), V(6, 6.6), V(7.5, 6.6), V(7.7, s.z), s.clone()],
-      () => { p.root.rotation.y = s.z > 3 ? Math.PI : 0; }); });
+      () => { p.root.rotation.y = s.z > 3 ? Math.PI : 0; p.seated = true; play(p, 'SitDown', {once: true}); renderTag(p); }); });
   openPanel(null);
   try { const r = await fetch('/office/api/report'); const data = await r.json(); addMsg('him', data.text, 'اجتماع الأقسام', '#22c55e'); }
   catch (e) { addMsg('him', 'تعذر جلب أرقام الأقسام الآن.', 'اجتماع الأقسام'); }
@@ -225,7 +262,10 @@ renderer.domElement.addEventListener('click', e => {
 // ---------- chat panel ----------
 let current = null;
 const panel = document.getElementById('panel'), msgs = document.getElementById('msgs');
-document.getElementById('close').onclick = () => { panel.classList.remove('open'); current = null; };
+document.getElementById('close').onclick = () => {
+  const p = people[current]; panel.classList.remove('open'); current = null;
+  if (p && !meeting && !p.path.length && !p.away) { sitDown(p); renderTag(p); }
+};
 function addMsg(kind, text, meta, color) {
   const m = document.createElement('div'); m.className = 'm ' + kind; if (color) m.style.setProperty('--c', color);
   m.innerHTML = (meta ? `<small>${esc(meta)}</small>` : '') + esc(text); msgs.appendChild(m); msgs.scrollTop = msgs.scrollHeight; return m;
@@ -237,25 +277,26 @@ async function openPanel(key) {
     document.getElementById('kpis').innerHTML = ''; form.style.display = 'none'; return; }
   form.style.display = '';
   const d = CFG.departments.find(x => x.key === key), color = '#' + COLORS[key].toString(16).padStart(6, '0');
-  document.getElementById('pt').textContent = d.icon + ' ' + d.manager; document.getElementById('pr').textContent = d.role;
+  document.getElementById('pt').textContent = d.icon + ' ' + (d.person ? d.person + ' — ' : '') + d.manager; document.getElementById('pr').textContent = d.role;
   document.getElementById('kpis').innerHTML = (d.kpis || []).map(([l, v]) => `<div class="k">${esc(l)}<b>${esc(v ?? '—')}</b></div>`).join('');
-  const p = people[key]; if (p && !p.path.length && !meeting) { p.root.rotation.y = 0; play(p, 'agree'); setTimeout(() => !p.path.length && play(p, 'idle'), 1800); }
+  for (const [k, o] of Object.entries(people)) if (k !== key && !o.seated && !o.path.length && !o.away && !meeting) { sitDown(o); renderTag(o); }
+  const p = people[key]; if (p && !p.path.length && !p.away && !meeting) standUp(p, () => { faceFront(p); renderTag(p); });
   const r = await fetch('/office/api/' + key + '/history'); const data = await r.json();
   if (current !== key) return;
-  for (const m of data.messages) { addMsg('me', m.command, m.author + ' · ' + m.channel + ' · ' + m.at); addMsg('him', m.reply, d.manager, color); }
-  if (!data.messages.length) addMsg('him', 'أهلًا، أنا ' + d.manager + '. اسألني عن أي شيء في قسم ' + d.name + '.', d.manager, color);
+  for (const m of data.messages) { addMsg('me', m.command, m.author + ' · ' + m.channel + ' · ' + m.at); addMsg('him', m.reply, d.person || d.manager, color); }
+  if (!data.messages.length) addMsg('him', 'أهلًا، أنا ' + (d.person ? d.person + '، ' : '') + d.manager + '. اسألني عن أي شيء في قسم ' + d.name + '.', d.person || d.manager, color);
 }
 document.getElementById('form').onsubmit = async e => {
   e.preventDefault(); const key = current, input = document.getElementById('text'), text = input.value.trim(); if (!key || !text) return;
   input.value = ''; addMsg('me', text, 'أنت'); const d = CFG.departments.find(x => x.key === key), p = people[key];
-  const color = '#' + COLORS[key].toString(16).padStart(6, '0'), wait = addMsg('him', '… يكتب', d.manager, color);
+  const color = '#' + COLORS[key].toString(16).padStart(6, '0'), wait = addMsg('him', '… يكتب', d.person || d.manager, color);
   if (p) { p.busy = true; p.el.classList.add('busy'); renderTag(p, 'أشتغل على طلبك…'); p.el.classList.add('busy'); }
   try {
     const r = await fetch('/office/api/' + key + '/ask', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': CFG.csrf}, body: JSON.stringify({text})});
-    const data = await r.json(); wait.innerHTML = `<small>${esc(d.manager)}</small>` + esc(data.reply || data.detail || 'تعذر الرد الآن.');
-    if (p) play(p, r.ok ? 'agree' : 'headShake');
-  } catch (err) { wait.textContent = 'تعذر الاتصال؛ أعد المحاولة.'; if (p) play(p, 'headShake'); }
-  if (p) { p.busy = false; p.el.classList.remove('busy'); setTimeout(() => !p.path.length && play(p, 'idle'), 2000); renderTag(p); }
+    const data = await r.json(); wait.innerHTML = `<small>${esc(d.person || d.manager)}</small>` + esc(data.reply || data.detail || 'تعذر الرد الآن.');
+    if (p && r.ok && !p.seated && !p.path.length) play(p, 'Victory', {once: true, then: () => !p.path.length && !p.seated && play(p, 'Idle')});
+  } catch (err) { wait.textContent = 'تعذر الاتصال؛ أعد المحاولة.'; }
+  if (p) { p.busy = false; p.el.classList.remove('busy'); renderTag(p); }
   refresh();
 };
 
@@ -278,8 +319,16 @@ function frame() {
 }
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); labels.setSize(innerWidth, innerHeight); });
 
-new GLTFLoader().load('/office/assets/models/Xbot.glb', g => { model = g; build(); frame(); },
-  undefined, () => { model = null; build(); frame(); });
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+const load = url => new Promise(res => loader.load(url, res, undefined, () => res(null)));
+(async () => {
+  const names = [...new Set(CFG.departments.map(d => d.model).filter(Boolean))];
+  if (!names.includes('suit_male')) names.unshift('suit_male');               // carries the shared animations
+  const got = await Promise.all(names.map(n => load('/office/assets/models/people/' + n + '.glb')));
+  names.forEach((n, i) => { if (got[i]) models[n] = got[i]; });
+  clips = (models.suit_male && models.suit_male.animations) || [];
+  build(); frame();
+})();
 </script>
 </body>
 </html>
