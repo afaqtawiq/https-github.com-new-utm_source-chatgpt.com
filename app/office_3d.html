@@ -22,6 +22,7 @@ button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
 #panel.open{display:flex}#ph{padding:12px 14px;border-bottom:1px solid var(--line)}#ph h2{margin:0;font-size:17px}#ph p{margin:4px 0 0;color:var(--muted);font-size:12.5px}
 #kpis{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line)}
 .k{background:#0b1c29;border-radius:10px;padding:6px 8px;font-size:12px;color:var(--muted)}.k b{display:block;color:var(--text);font-size:17px}
+#actions .to.on{background:#16a34a;outline:2px solid #86efac}#actions .lbl{color:var(--muted);font-size:12px;align-self:center}
 #actions{display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px 0}#actions:empty{display:none}#actions button{font-size:12.5px;padding:6px 9px;background:#17344a}#msgs{flex:1;overflow:auto;padding:10px 14px}.m{border-radius:12px;padding:8px 10px;margin:6px 0;white-space:pre-wrap;font-size:14px;line-height:1.55}
 .m.me{background:#17344a;margin-right:30px}.m.him{background:#0b1c29;border-right:3px solid var(--c,#22c55e);margin-left:20px}.m small{display:block;color:var(--muted);font-size:11px}
 #form{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line);align-items:stretch}#attach{display:flex;align-items:center;justify-content:center;width:44px;border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:20px;background:#102536}#chip{margin:0 10px;padding:6px 10px;background:#17344a;border-radius:10px;font-size:13px;display:flex;justify-content:space-between;align-items:center}#chip[hidden]{display:none}#chip button{padding:2px 8px}#form textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;background:#0b1c29;color:var(--text);
@@ -232,6 +233,7 @@ function wander(p, dt) {
 // ---------- meeting ----------
 document.getElementById('meeting').onclick = async () => {
   const btn = document.getElementById('meeting');
+  if (meeting && !(panel.classList.contains('open') && current === null)) { openPanel(null); return; }
   if (meeting) { meeting = false; btn.textContent = '👥 اجتماع الفريق';
     Object.values(people).forEach(p => { const s = p.seat || V(7.7, 6.6);
       walkTo(p, [V(7.7, s.z), V(7.5, 6.6), V(6, 6.6), V(6, AISLE_Z), ...arrive(p)], () => backToDesk(p)); });
@@ -276,9 +278,11 @@ function addMsg(kind, text, meta, color) {
 async function openPanel(key) {
   current = key; panel.classList.add('open'); msgs.innerHTML = '';
   const form = document.getElementById('form');
-  if (!key) { document.getElementById('pt').textContent = '👥 اجتماع الفريق'; document.getElementById('pr').textContent = 'أرقام كل الأقسام الآن';
-    document.getElementById('kpis').innerHTML = ''; document.getElementById('actions').innerHTML = ''; form.style.display = 'none'; return; }
   form.style.display = '';
+  if (!key) { document.getElementById('pt').textContent = '👥 اجتماع الفريق'; document.getElementById('pr').textContent = 'اكتب للفريق كله أو اختر موظفًا؛ يرد كل واحد من قسمه.';
+    document.getElementById('kpis').innerHTML = ''; meetingTo = 'all'; renderRecipients();
+    document.getElementById('text').placeholder = 'اكتب للفريق كله… أو اختر موظفًا من الأعلى'; return; }
+  document.getElementById('text').placeholder = 'اكتب لمدير القسم… أو أرفق ملفًا 📎';
   const d = CFG.departments.find(x => x.key === key), color = '#' + COLORS[key].toString(16).padStart(6, '0');
   document.getElementById('pt').textContent = d.icon + ' ' + (d.person ? d.person + ' — ' : '') + d.manager; document.getElementById('pr').textContent = d.role;
   document.getElementById('kpis').innerHTML = (d.kpis || []).map(([l, v]) => `<div class="k">${esc(l)}<b>${esc(v ?? '—')}</b></div>`).join('');
@@ -292,6 +296,47 @@ async function openPanel(key) {
   for (const m of data.messages) { addMsg('me', m.command, m.author + ' · ' + m.channel + ' · ' + m.at); addMsg('him', m.reply, d.person || d.manager, color); }
   if (!data.messages.length) addMsg('him', 'أهلًا، أنا ' + (d.person ? d.person + '، ' : '') + d.manager + '. اسألني عن أي شيء في قسم ' + d.name + '.', d.person || d.manager, color);
 }
+// ---------- meeting chat: everyone or one person ----------
+let meetingTo = 'all';
+const codeOwner = {};
+function colorOf(k) { return '#' + COLORS[k].toString(16).padStart(6, '0'); }
+function nameOf(k) { const d = CFG.departments.find(x => x.key === k); return d.person || d.manager; }
+function renderRecipients() {
+  const acts = document.getElementById('actions'); acts.innerHTML = '<span class="lbl">إلى:</span>';
+  const add = (k, label) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'to' + (meetingTo === k ? ' on' : '');
+    b.textContent = label; b.onclick = () => { meetingTo = k; renderRecipients(); }; acts.appendChild(b); };
+  add('all', '👥 الكل'); for (const d of CFG.departments) if (people[d.key]) add(d.key, d.icon + ' ' + (d.person || d.manager));
+}
+function targetsFor(text) {
+  const code = (text.match(/^\s*نفذ\s+([0-9A-F]{6})\b/i) || [])[1];
+  if (code && codeOwner[code.toUpperCase()]) return [codeOwner[code.toUpperCase()]];
+  if (meetingTo !== 'all') return [meetingTo];
+  const named = CFG.departments.filter(d => d.person && people[d.key] && new RegExp('(^|\\s|يا)' + d.person + '(\\s|$|،|,)').test(text));
+  return named.length ? named.map(d => d.key) : CFG.departments.filter(d => people[d.key]).map(d => d.key);
+}
+function rememberCodes(key, reply) { for (const m of String(reply || '').matchAll(/نفذ\s+([0-9A-F]{6})/g)) codeOwner[m[1]] = key; }
+async function meetingSend(text, file) {
+  const keys = file ? [meetingTo === 'all' ? null : meetingTo] : targetsFor(text);
+  if (file && !keys[0]) { addMsg('him', 'اختر موظفًا من الأعلى لإرسال الملف له.', 'الاجتماع'); return; }
+  addMsg('me', (file ? '📎 ' + file.name + (text ? '\n' : '') : '') + text, 'أنت → ' + (keys.length > 1 ? 'الكل' : nameOf(keys[0])));
+  await Promise.all(keys.map(async key => {
+    const p = people[key], wait = addMsg('him', file ? '… يقرأ الملف' : '… يكتب', nameOf(key), colorOf(key));
+    if (p) { p.busy = true; p.el.classList.add('busy'); renderTag(p, 'في الاجتماع…'); }
+    try {
+      let r;
+      if (file) { const fd = new FormData(); fd.append('file', file); fd.append('text', text);
+        r = await fetch('/office/api/' + key + '/upload', {method: 'POST', headers: {'X-CSRF-Token': CFG.csrf}, body: fd}); }
+      else r = await fetch('/office/api/' + key + '/ask', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': CFG.csrf},
+        body: JSON.stringify({text, meeting: keys.length > 1})});
+      let data = {}; try { data = await r.json(); } catch (x) {}
+      const reply = data.reply || data.detail || 'تعذر الرد الآن.'; rememberCodes(key, reply);
+      wait.innerHTML = `<small>${esc(nameOf(key))}</small>` + esc(reply); msgs.scrollTop = msgs.scrollHeight;
+    } catch (err) { wait.textContent = 'تعذر الاتصال؛ أعد المحاولة.'; }
+    if (p) { p.busy = false; p.el.classList.remove('busy'); renderTag(p); }
+  }));
+  refresh();
+}
+
 const fileInput = document.getElementById('file'), chip = document.getElementById('chip');
 const KINDS = /\.(pdf|xlsx|csv|docx|jpe?g|png|webp|gif)$/i;
 fileInput.onchange = () => {
@@ -303,7 +348,8 @@ fileInput.onchange = () => {
 document.getElementById('chipx').onclick = () => { fileInput.value = ''; chip.hidden = true; };
 document.getElementById('form').onsubmit = async e => {
   e.preventDefault(); const key = current, input = document.getElementById('text'), text = input.value.trim(), file = fileInput.files[0];
-  if (!key || (!text && !file)) return;
+  if (!text && !file) return;
+  if (!key) { input.value = ''; fileInput.value = ''; chip.hidden = true; return meetingSend(text, file); }
   input.value = ''; fileInput.value = ''; chip.hidden = true;
   addMsg('me', (file ? '📎 ' + file.name + (text ? '\n' : '') : '') + text, 'أنت'); const d = CFG.departments.find(x => x.key === key), p = people[key];
   const color = '#' + COLORS[key].toString(16).padStart(6, '0'), wait = addMsg('him', file ? '… يقرأ الملف' : '… يكتب', d.person || d.manager, color);

@@ -356,7 +356,7 @@ async def office_ask(key: str, request: Request):
     if not text:
         raise HTTPException(400, 'اكتب طلبك.')
     reply = await run_in_threadpool(ask, key, text, session.get('name') or session.get('email') or 'المدير',
-                                    owner=office_owner(session))
+                                    owner=office_owner(session), meeting=bool((body or {}).get('meeting')))
     return {'reply': reply}
 
 
@@ -479,13 +479,17 @@ def confirm(c, code, chat):
     return command_agent.execute_confirmed(c, command[len(command_agent.CONFIRM_PREFIX):])
 
 
-def ask(key, text, author, manager=True, channel='المنصة', owner=None, attached=None):
+MEETING_NOTE = ('[اجتماع الفريق: المالك يخاطب كل المدراء معًا. رد من زاوية قسمك فقط في 3 أسطر كحد أقصى، بالأرقام إن وجدت. '
+                'إن لم يخص الطلب قسمك فاكتب سطرًا واحدًا: «لا شيء يخص قسمي». لا تجهّز إرسالًا أو تسجيلًا إلا إذا ذُكر قسمك أو اسمك صراحة.]\n')
+
+
+def ask(key, text, author, manager=True, channel='المنصة', owner=None, attached=None, meeting=False):
     """Run one request through the department manager (used by the web page). Returns the reply.
     owner = whose uploaded files ask_document reads; attached = (filename, kind) of a file sent with this message."""
     from app import command_agent, staff_documents
     from app.team import CONTEXT, ROLE
     past = [{'command': m['command'], 'reply': m['reply']} for m in history(key, 4)]
-    prompt = text
+    prompt = (MEETING_NOTE + text) if meeting else text
     if attached:
         prompt = (text or 'اقرأ الملف ولخص لي أهم ما فيه.') + (
             f"\n\n[أرفق المالك الآن ملف «{attached[0]}» ({KIND_AR.get(attached[1], attached[1])}). اقرأه بأداة ask_document قبل الرد. "
@@ -510,7 +514,7 @@ def ask(key, text, author, manager=True, channel='المنصة', owner=None, att
         CONTEXT.reset(ctx)
         ROLE.reset(role)
     reply = reply or 'تعذر الحصول على رد الآن؛ أعد المحاولة بعد قليل.'
-    log(key, channel, author, (f'📎 {attached[0]}\n' if attached else '') + (text or ''), reply)
+    log(key, 'اجتماع' if meeting else channel, author, (f'📎 {attached[0]}\n' if attached else '') + (text or ''), reply)
     return reply
 
 
