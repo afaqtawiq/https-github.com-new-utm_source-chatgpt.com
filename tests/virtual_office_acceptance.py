@@ -261,6 +261,71 @@ def run():
             assert done.startswith('✅') and sent[0][1]['in_reply_to'] == '<abc@goodrich>'
             assert c.execute('SELECT action FROM mail_agent_items WHERE inbox_id=%s', (mid,)).fetchone()['action'] == 'approved_sent'
     assert {'mail_inbox', 'mail_open', 'mail_reply'} <= set(command_agent.HANDLERS)
+
+    # Collaboration: outgoing mail logged with its employee; the answer is routed back to him.
+    from app import office_mail
+    token = office_mail.MAIL_FROM.set(('containers', 'سلطان'))
+    office_mail.record('goodrich.jed@goodricharabia.com', 'ETA / Arrival Notice Request - B/L SSATAOJED2609210', '<out1@afaq>')
+    office_mail.MAIL_FROM.reset(token)
+    with db() as c:
+        back = c.execute('''INSERT INTO spacemail_inbox(user_id,uidvalidity,uid,message_id,sender,subject,body,received,imported_at,in_reply_to,message_references)
+            VALUES(%s,'1',78,'<ans@goodrich>','Goodrich <goodrich.jed@goodricharabia.com>','RE: ETA / Arrival Notice Request',
+            'ETA Jeddah 26/11/2026, arrival notice attached.','x',NOW(),'<out1@afaq>','<out1@afaq>') RETURNING id''', (uid,)).fetchone()['id']
+    notes = []
+    assert office_mail.route_replies(deliver=notes.append) == 1 and office_mail.route_replies(deliver=notes.append) == 0
+    assert 'سلطان' in notes[0] and f'#{back}' in notes[0] and '26/11/2026' in notes[0], notes
+    assert any(m['channel'] == 'بريد' and '26/11/2026' in m['reply'] for m in vo.history('containers', 5))
+    with patch.object(mail_desk, 'mailbox_user', return_value=uid), db() as c:
+        assert 'رد على إيميل سلطان' in mail_desk.inbox(c, view='all')
+        out_box = office_mail.sent(c)
+        assert 'سلطان → goodrich.jed@goodricharabia.com' in out_box and 'وصل رد (1)' in out_box, out_box
+
+    # A code prepared in Sultan's office carries his department; sending it logs him as the sender.
+    seen = []
+    office = command_agent.OFFICE.set(vo.scope('containers'))
+    try:
+        with patch.object(mail_desk, 'mailbox_user', return_value=uid), db() as c:
+            payload = []
+            mail_desk.prepare_reply(c, back, 'Thank you, well received. We will follow up on arrival.',
+                                    lambda a: (payload.append(a), 'X')[1])
+    finally:
+        command_agent.OFFICE.reset(office)
+    office = command_agent.OFFICE.set(vo.scope('containers'))
+    chat_t = command_agent.CHAT.set(('966500000001', 'conv-x'))
+    try:
+        with db() as c:
+            code = command_agent._pending(c, dict(payload[0], tool='mail_reply'))
+            row = c.execute('SELECT command FROM whatsapp_voice_pending WHERE token=%s', (code,)).fetchone()
+        assert '"dept": "containers"' in row['command'], row['command']
+    finally:
+        command_agent.CHAT.reset(chat_t)
+        command_agent.OFFICE.reset(office)
+    role = ROLE.set({'name': 'محمد', 'manager': True})
+    try:
+        with patch.object(mail_desk, 'mailbox_user', return_value=uid), \
+                patch.object(spacemail, 'send', side_effect=lambda *a, **k: (seen.append(office_mail.MAIL_FROM.get()), '<r2@afaq>')[1]), db() as c:
+            done = command_agent.execute_confirmed(c, row['command'][len(command_agent.CONFIRM_PREFIX):])
+    finally:
+        ROLE.reset(role)
+    assert done.startswith('✅') and seen == [('containers', 'سلطان')], (done, seen)
+
+    # Colleagues ask each other directly; no second hop, no forwarded codes.
+    asked = []
+    office = command_agent.OFFICE.set(vo.scope('containers'))
+    role = ROLE.set({'name': 'محمد', 'manager': True})
+    try:
+        with patch.object(vo, 'ask', side_effect=lambda key, text, author, **k: (asked.append((key, text, author, k.get('channel'))), 'تم تسجيل الغرامة.')[1]), db() as c:
+            out = command_agent.tool_ask_colleague(c, {'colleague': 'نورة', 'request': 'سجلي غرامة الحاوية MSCU1234565 بمبلغ 900'})
+            assert out.startswith('رد نورة') and asked[-1][0] == 'finance' and asked[-1][2] == 'سلطان (زميل)' and asked[-1][3] == 'زميل'
+            assert 'لا تُحوَّل' in command_agent.tool_ask_colleague(c, {'colleague': 'دانة', 'request': 'نفذ ABC123'})
+            assert 'هذا قسمك' in command_agent.tool_ask_colleague(c, {'colleague': 'سلطان', 'request': 'كم حاوية'})
+            depth = command_agent.COLLEAGUE_DEPTH.set(1)
+            assert 'لا أحوّل' in command_agent.tool_ask_colleague(c, {'colleague': 'هند', 'request': 'كم موظف'})
+            command_agent.COLLEAGUE_DEPTH.reset(depth)
+    finally:
+        ROLE.reset(role)
+        command_agent.OFFICE.reset(office)
+    assert 'ask_colleague' in vo.scope('finance')['tools'] and 'mail_sent' in vo.scope('email')['tools']
     with db() as c:
         assert 'غير متصل' in mail_desk.inbox(c)
 

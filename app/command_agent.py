@@ -154,6 +154,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'id': {'type': 'integer'}}, 'required': ['id']}},
     {'name': 'mail_reply', 'description': 'Prepare a reply in the same thread to an incoming email (#id). body = the reply text (write it professionally in the language of the email when the manager asks you to compose it); empty = the suggested reply. Sent from the official mailbox only after the confirmation code.',
      'input_schema': {'type': 'object', 'properties': {'id': {'type': 'integer'}, 'body': {'type': 'string'}}, 'required': ['id']}},
+    {'name': 'mail_sent', 'description': 'OUTGOING mail of the official mailbox (every employee, not only you): who sent what to whom, and whether a reply arrived. days default 7.',
+     'input_schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}},
+    {'name': 'ask_colleague', 'description': 'Ask a COLLEAGUE in the virtual office to do or check something in THEIR department and get the answer back: فيصل (التخليص/التعرفة/سابر/فسح)، خالد (النقل والسائقين)، سلطان (الحاويات والوكلاء الملاحيين والتتبع)، نورة (المالية والكشوفات)، ريم (المبيعات)، لمى (خدمة العملاء)، دانة (البريد والمراسلات)، هند (الإدارة والموظفين). Use it instead of telling the owner to go to another department. Anything sent outside the company still needs the owner «نفذ CODE».',
+     'input_schema': {'type': 'object', 'properties': {'colleague': {'type': 'string'}, 'request': {'type': 'string'}}, 'required': ['colleague', 'request']}},
     {'name': 'send_email', 'description': 'Prepare an email from the official mailbox. It is sent only after the manager confirms with the code.',
      'input_schema': {'type': 'object', 'properties': {'to': {'type': 'string'}, 'subject': {'type': 'string'}, 'body': {'type': 'string'}}, 'required': ['to', 'subject', 'body']}},
 ]
@@ -188,6 +192,9 @@ def _pending(c, action):
     chat = CHAT.get() or (OFFICE_CHAT if OFFICE.get() else None)
     if not chat:
         return 'تعذر تجهيز التأكيد في هذه المحادثة.'
+    office = OFFICE.get()
+    if office and isinstance(action, dict) and 'dept' not in action:
+        action = dict(action, dept=office.get('key') or '')
     token = secrets.token_hex(3).upper()
     c.execute('''INSERT INTO whatsapp_voice_pending(token,sender,conversation_id,command,expires_at)
         VALUES(%s,%s,%s,%s,NOW()+INTERVAL '15 minutes')''', (token, chat[0], chat[1], CONFIRM_PREFIX + json.dumps(action, ensure_ascii=False)))
@@ -825,6 +832,45 @@ def tool_mail_reply(c, a):
     return mail_desk.prepare_reply(c, mid, body, lambda action: _pending(c, action))
 
 
+def tool_mail_sent(c, a):
+    from app import office_mail
+    try:
+        days = max(1, min(int(a.get('days') or 7), 60))
+    except (TypeError, ValueError):
+        days = 7
+    return office_mail.sent(c, days)
+
+
+COLLEAGUE_DEPTH = contextvars.ContextVar('afaq_colleague_depth', default=0)
+
+
+def tool_ask_colleague(c, a):
+    from app import staff_documents, virtual_office
+    if COLLEAGUE_DEPTH.get():
+        return 'لا أحوّل طلبًا محوّلًا مرة ثانية؛ أجب من أدواتك أو قل ما ينقصك.'
+    want = str(a.get('colleague') or '').strip()
+    request = _clean(a.get('request'), 1500)
+    key = next((k for k, d in virtual_office.DEPARTMENTS.items()
+                if want and (want in (d.get('person'), k) or d.get('person', '#') in want
+                             or any(x in want for x in (d['name'], d['manager']) + tuple(d.get('aliases') or ())))), None)
+    if re.match(r'\s*نفذ\b', request or ''):
+        return 'رموز التأكيد يكتبها المالك بنفسه؛ لا تُحوَّل لزميل.'
+    if not key or not request:
+        return 'اذكر اسم الزميل (فيصل، خالد، سلطان، نورة، ريم، لمى، دانة، هند) والطلب.'
+    me = OFFICE.get() or {}
+    if me.get('key') == key:
+        return 'هذا قسمك؛ نفّذ الطلب بأدواتك.'
+    mine = virtual_office.DEPARTMENTS.get(me.get('key'), {})
+    author = (mine.get('person') or 'الوكيل') + ' (زميل)'
+    depth = COLLEAGUE_DEPTH.set(1)
+    try:
+        reply = virtual_office.ask(key, request, author, manager=bool(_member().get('manager')), channel='زميل',
+                                   owner=staff_documents.SENDER.get(), chat=CHAT.get())
+    finally:
+        COLLEAGUE_DEPTH.reset(depth)
+    return f"رد {virtual_office.DEPARTMENTS[key].get('person')}:\n{reply}"
+
+
 def tool_send_email(c, a):
     from app.marketing_content import email_address
     to = email_address(a.get('to'))
@@ -848,6 +894,21 @@ def execute_confirmed(c, payload):
     if not member.get('manager'):
         return 'الإرسال خارج الشركة يحتاج تأكيد المدير؛ لم يُرسل شيء.'
     action = json.loads(payload)
+    from app import office_mail
+    dept = action.get('dept') or ''
+    try:
+        from app.virtual_office import DEPARTMENTS
+        person = DEPARTMENTS.get(dept, {}).get('person', '')
+    except Exception:
+        person = ''
+    token = office_mail.MAIL_FROM.set((dept, person))
+    try:
+        return _execute_action(c, action, member)
+    finally:
+        office_mail.MAIL_FROM.reset(token)
+
+
+def _execute_action(c, action, member):
     if action.get('tool') == 'statement_group_send':
         from app import statement_groups
         return statement_groups.execute(action)
