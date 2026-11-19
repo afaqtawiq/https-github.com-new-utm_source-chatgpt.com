@@ -343,8 +343,48 @@ async def office_ask(key: str, request: Request):
     text = str((body or {}).get('text') or '').strip()[:2000]
     if not text:
         raise HTTPException(400, 'اكتب طلبك.')
-    reply = await run_in_threadpool(ask, key, text, session.get('name') or session.get('email') or 'المدير')
+    reply = await run_in_threadpool(ask, key, text, session.get('name') or session.get('email') or 'المدير',
+                                    owner=office_owner(session))
     return {'reply': reply}
+
+
+MAX_UPLOAD = 15 * 1024 * 1024
+
+
+@router.post('/office/api/{key}/upload')
+async def office_upload(key: str, request: Request):
+    """A file (PDF, Excel, CSV, Word, image) for one manager, with an optional message. Kept 3 days for questions."""
+    import secrets as _secrets
+    from starlette.concurrency import run_in_threadpool
+    from starlette.datastructures import UploadFile
+    from app import staff_documents
+    session = _admin(request)
+    if key not in DEPARTMENTS:
+        raise HTTPException(404, 'قسم غير موجود')
+    expected = session.get('csrf') or ''
+    if not expected or not _secrets.compare_digest(request.headers.get('x-csrf-token', ''), expected):
+        raise HTTPException(403, 'أعد فتح الصفحة ثم حاول مجددًا.')
+    if int(request.headers.get('content-length') or 0) > MAX_UPLOAD + 200_000:
+        raise HTTPException(413, 'الملف أكبر من 15 ميجابايت.')
+    form = await request.form()
+    item = form.get('file')
+    if not isinstance(item, UploadFile):
+        raise HTTPException(400, 'اختر ملفًا.')
+    data = await item.read(MAX_UPLOAD + 1)
+    if not data:
+        raise HTTPException(400, 'الملف فارغ.')
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, 'الملف أكبر من 15 ميجابايت.')
+    name = re.sub(r'[\x00-\x1f]', '', str(item.filename or 'ملف'))[:160]
+    kind, mime = staff_documents.kind_of(name, data)
+    if not kind:
+        raise HTTPException(415, mime)
+    owner = office_owner(session)
+    await run_in_threadpool(staff_documents.save, owner, name, mime, data)
+    text = str(form.get('text') or '').strip()[:2000]
+    reply = await run_in_threadpool(ask, key, text, session.get('name') or session.get('email') or 'المدير',
+                                    owner=owner, attached=(name, kind))
+    return {'reply': reply, 'file': name, 'kind': KIND_AR.get(kind, kind)}
 
 
 @router.get('/office/cards', response_class=HTMLResponse)
@@ -387,24 +427,40 @@ def department_page(key: str, request: Request):
     return _page(d['manager'], body)
 
 
-def ask(key, text, author, manager=True, channel='المنصة'):
-    """Run one request through the department manager (used by the web page). Returns the reply."""
-    from app import command_agent
+KIND_AR = {'pdf': 'PDF', 'excel': 'إكسل', 'csv': 'جدول CSV', 'word': 'وورد', 'image': 'صورة'}
+
+
+def ask(key, text, author, manager=True, channel='المنصة', owner=None, attached=None):
+    """Run one request through the department manager (used by the web page). Returns the reply.
+    owner = whose uploaded files ask_document reads; attached = (filename, kind) of a file sent with this message."""
+    from app import command_agent, staff_documents
     from app.team import CONTEXT, ROLE
     past = [{'command': m['command'], 'reply': m['reply']} for m in history(key, 4)]
+    prompt = text
+    if attached:
+        prompt = (text or 'اقرأ الملف ولخص لي أهم ما فيه.') + (
+            f"\n\n[أرفق المالك الآن ملف «{attached[0]}» ({KIND_AR.get(attached[1], attached[1])}). اقرأه بأداة ask_document قبل الرد. "
+            'لا تسجل أو ترسل شيئًا بناءً عليه إلا إذا طلب ذلك صراحة.]')
     role = ROLE.set({'name': author, 'manager': manager})
     ctx = CONTEXT.set({'history': past})
     scope_token = command_agent.OFFICE.set(scope(key))
+    doc_token = staff_documents.SENDER.set(owner) if owner else None
     try:
         with db() as c:
-            reply = command_agent.run_agent(c, text)
+            reply = command_agent.run_agent(c, prompt)
     finally:
+        if doc_token is not None:
+            staff_documents.SENDER.reset(doc_token)
         command_agent.OFFICE.reset(scope_token)
         CONTEXT.reset(ctx)
         ROLE.reset(role)
     reply = reply or 'تعذر الحصول على رد الآن؛ أعد المحاولة بعد قليل.'
-    log(key, channel, author, text, reply)
+    log(key, channel, author, (f'📎 {attached[0]}\n' if attached else '') + (text or ''), reply)
     return reply
+
+
+def office_owner(session):
+    return 'office:' + str(session.get('user_id') or session.get('email') or 'admin')
 
 
 @router.post('/office/{key}')

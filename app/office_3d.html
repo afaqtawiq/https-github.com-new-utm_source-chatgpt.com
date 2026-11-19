@@ -24,7 +24,7 @@ button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
 .k{background:#0b1c29;border-radius:10px;padding:6px 8px;font-size:12px;color:var(--muted)}.k b{display:block;color:var(--text);font-size:17px}
 #msgs{flex:1;overflow:auto;padding:10px 14px}.m{border-radius:12px;padding:8px 10px;margin:6px 0;white-space:pre-wrap;font-size:14px;line-height:1.55}
 .m.me{background:#17344a;margin-right:30px}.m.him{background:#0b1c29;border-right:3px solid var(--c,#22c55e);margin-left:20px}.m small{display:block;color:var(--muted);font-size:11px}
-#form{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}#form textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;background:#0b1c29;color:var(--text);
+#form{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line);align-items:stretch}#attach{display:flex;align-items:center;justify-content:center;width:44px;border:1px solid var(--line);border-radius:10px;cursor:pointer;font-size:20px;background:#102536}#chip{margin:0 10px;padding:6px 10px;background:#17344a;border-radius:10px;font-size:13px;display:flex;justify-content:space-between;align-items:center}#chip[hidden]{display:none}#chip button{padding:2px 8px}#form textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;background:#0b1c29;color:var(--text);
  border:1px solid var(--line);border-radius:10px;padding:8px;font-size:15px;font-family:inherit}
 #close{position:absolute;left:10px;top:10px;padding:4px 10px}
 #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--muted);pointer-events:none}
@@ -45,7 +45,10 @@ button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
 <div id="panel"><button id="close">✕</button>
   <div id="ph"><h2 id="pt"></h2><p id="pr"></p></div>
   <div id="kpis"></div><div id="msgs"></div>
-  <form id="form"><textarea id="text" placeholder="اكتب لمدير القسم…" required></textarea><button class="primary">إرسال</button></form>
+  <div id="chip" hidden><span id="chipname"></span><button type="button" id="chipx" title="إزالة">✕</button></div>
+  <form id="form"><label id="attach" title="إرفاق ملف: PDF، إكسل، وورد، صور">📎<input id="file" type="file" hidden
+    accept=".pdf,.xlsx,.csv,.docx,.jpg,.jpeg,.png,.webp,.gif,application/pdf,image/*"></label>
+    <textarea id="text" placeholder="اكتب لمدير القسم… أو أرفق ملفًا 📎"></textarea><button class="primary">إرسال</button></form>
 </div>
 <script id="config" type="application/json">__CONFIG__</script>
 <script type="module">
@@ -286,14 +289,29 @@ async function openPanel(key) {
   for (const m of data.messages) { addMsg('me', m.command, m.author + ' · ' + m.channel + ' · ' + m.at); addMsg('him', m.reply, d.person || d.manager, color); }
   if (!data.messages.length) addMsg('him', 'أهلًا، أنا ' + (d.person ? d.person + '، ' : '') + d.manager + '. اسألني عن أي شيء في قسم ' + d.name + '.', d.person || d.manager, color);
 }
+const fileInput = document.getElementById('file'), chip = document.getElementById('chip');
+const KINDS = /\.(pdf|xlsx|csv|docx|jpe?g|png|webp|gif)$/i;
+fileInput.onchange = () => {
+  const f = fileInput.files[0]; if (!f) { chip.hidden = true; return; }
+  if (!KINDS.test(f.name)) { alert('المسموح: PDF، إكسل (xlsx/csv)، وورد (docx)، صور.'); fileInput.value = ''; chip.hidden = true; return; }
+  if (f.size > 15 * 1024 * 1024) { alert('الملف أكبر من 15 ميجابايت.'); fileInput.value = ''; chip.hidden = true; return; }
+  document.getElementById('chipname').textContent = '📎 ' + f.name + ' (' + Math.max(1, Math.round(f.size / 1024)) + ' KB)'; chip.hidden = false;
+};
+document.getElementById('chipx').onclick = () => { fileInput.value = ''; chip.hidden = true; };
 document.getElementById('form').onsubmit = async e => {
-  e.preventDefault(); const key = current, input = document.getElementById('text'), text = input.value.trim(); if (!key || !text) return;
-  input.value = ''; addMsg('me', text, 'أنت'); const d = CFG.departments.find(x => x.key === key), p = people[key];
-  const color = '#' + COLORS[key].toString(16).padStart(6, '0'), wait = addMsg('him', '… يكتب', d.person || d.manager, color);
-  if (p) { p.busy = true; p.el.classList.add('busy'); renderTag(p, 'أشتغل على طلبك…'); p.el.classList.add('busy'); }
+  e.preventDefault(); const key = current, input = document.getElementById('text'), text = input.value.trim(), file = fileInput.files[0];
+  if (!key || (!text && !file)) return;
+  input.value = ''; fileInput.value = ''; chip.hidden = true;
+  addMsg('me', (file ? '📎 ' + file.name + (text ? '\n' : '') : '') + text, 'أنت'); const d = CFG.departments.find(x => x.key === key), p = people[key];
+  const color = '#' + COLORS[key].toString(16).padStart(6, '0'), wait = addMsg('him', file ? '… يقرأ الملف' : '… يكتب', d.person || d.manager, color);
+  if (p) { p.busy = true; p.el.classList.add('busy'); renderTag(p, file ? 'أقرأ الملف…' : 'أشتغل على طلبك…'); p.el.classList.add('busy'); }
   try {
-    const r = await fetch('/office/api/' + key + '/ask', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': CFG.csrf}, body: JSON.stringify({text})});
-    const data = await r.json(); wait.innerHTML = `<small>${esc(d.person || d.manager)}</small>` + esc(data.reply || data.detail || 'تعذر الرد الآن.');
+    let r;
+    if (file) { const fd = new FormData(); fd.append('file', file); fd.append('text', text);
+      r = await fetch('/office/api/' + key + '/upload', {method: 'POST', headers: {'X-CSRF-Token': CFG.csrf}, body: fd}); }
+    else r = await fetch('/office/api/' + key + '/ask', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': CFG.csrf}, body: JSON.stringify({text})});
+    let data = {}; try { data = await r.json(); } catch (x) {}
+    wait.innerHTML = `<small>${esc(d.person || d.manager)}</small>` + esc(data.reply || data.detail || 'تعذر الرد الآن.');
     if (p && r.ok && !p.seated && !p.path.length) play(p, 'Victory', {once: true, then: () => !p.path.length && !p.seated && play(p, 'Idle')});
   } catch (err) { wait.textContent = 'تعذر الاتصال؛ أعد المحاولة.'; }
   if (p) { p.busy = false; p.el.classList.remove('busy'); renderTag(p); }

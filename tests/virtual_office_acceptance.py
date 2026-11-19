@@ -120,6 +120,62 @@ def run():
         r = client.post('/office/api/containers/ask', json={'text': 'وش المتأخر؟'},
                         headers={'origin': 'http://testserver', 'X-CSRF-Token': csrf})
     assert r.status_code == 200 and 'MSCU1234565' in r.json()['reply'], r.text
+
+    # 6) Uploads: PDF, Excel, Word and images reach the manager; the manager reads the file with ask_document.
+    import io, zipfile
+    from app import staff_documents
+    import openpyxl
+    from PIL import Image
+    book = openpyxl.Workbook(); book.active.append(['البيان', 'القيمة']); book.active.append(['418801', '20500'])
+    xbuf = io.BytesIO(); book.save(xbuf)
+    dbuf = io.BytesIO()
+    with zipfile.ZipFile(dbuf, 'w') as z:
+        z.writestr('[Content_Types].xml', '<Types/>')
+        z.writestr('word/document.xml', '<w:document><w:body><w:p><w:r><w:t>عقد نقل مع شركة النخبة</w:t></w:r></w:p>'
+                   '<w:p><w:r><w:t>المبلغ 4500 ريال</w:t></w:r></w:p></w:body></w:document>')
+    ibuf = io.BytesIO(); Image.new('RGB', (2400, 1200), 'white').save(ibuf, 'PNG')
+    files = {'a.pdf': (b'%PDF-1.4 fixture', 'document'), 'b.xlsx': (xbuf.getvalue(), 'text'), 'c.docx': (dbuf.getvalue(), 'text'),
+             'd.png': (ibuf.getvalue(), 'image')}
+    seen = []
+
+    async def fake_model(row, prompt, max_tokens=900):
+        content = staff_documents._content(row)
+        seen.append((row['filename'], row['sender'], content[0]['type'], content))
+        return 'قرأت الملف ' + row['filename']
+
+    def reading_model(messages, system):
+        if len(messages) == 1:
+            return {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'ask_document', 'input': {'question': 'لخص'}}]}
+        result = messages[-1]['content'][0]['content']
+        return {'content': [{'type': 'text', 'text': 'تمام: ' + result}]}
+
+    headers = {'origin': 'http://testserver', 'X-CSRF-Token': csrf}
+    with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture'}), patch.object(command_agent, 'call_model', side_effect=reading_model), \
+            patch.object(staff_documents, '_ask_model', side_effect=fake_model):
+        for name, (data, kind) in files.items():
+            r = client.post('/office/api/finance/upload', files={'file': (name, data)}, data={'text': 'وش في الملف؟'}, headers=headers)
+            assert r.status_code == 200 and name in r.json()['reply'], (name, r.text)
+            assert seen[-1][0] == name and seen[-1][1].startswith('office:') and seen[-1][2] == kind, seen[-1][:3]
+        r = client.post('/office/api/finance/upload', files={'file': ('e.xlsx', xbuf.getvalue())}, headers=headers)
+        assert r.status_code == 200, r.text   # a file with no message is summarised
+    word = next(c for n, _, _, c in seen if n == 'c.docx')[0]['text']
+    assert 'عقد نقل مع شركة النخبة' in word and '4500' in word
+    excel = next(c for n, _, _, c in seen if n == 'b.xlsx')[0]['text']
+    assert '418801' in excel
+    img = next(c for n, _, _, c in seen if n == 'd.png')[0]['source']
+    assert img['media_type'] == 'image/jpeg'                        # 2400 px resized for the model
+    page = client.get('/office/api/finance/history').json()['messages']
+    assert page[-1]['command'].startswith('📎 e.xlsx')
+    for name, data, code in (('old.xls', b'\xd0\xcf\x11\xe0' + b'0' * 50, 415), ('x.exe', b'MZ' + b'0' * 50, 415),
+                             ('a.pdf', b'%PDF', 403)):
+        h = headers if code != 403 else {'origin': 'http://testserver'}
+        r = client.post('/office/api/finance/upload', files={'file': (name, data)}, headers=h)
+        assert r.status_code == code, (name, r.status_code, r.text)
+    assert 'xlsx' in client.post('/office/api/finance/upload', files={'file': ('old.xls', b'\xd0\xcf\x11\xe0' + b'0' * 50)},
+                                  headers=headers).json()['detail']
+    # WhatsApp files stay separate from the office uploads.
+    assert staff_documents.latest('966500000001') is None
+
     client.cookies.clear()
     assert client.get('/office/api/state').status_code == 401
 
