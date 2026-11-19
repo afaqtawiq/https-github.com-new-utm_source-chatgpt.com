@@ -29,6 +29,7 @@ _READY = False
 COMMON = ('search', 'list_recent', 'report', 'ask_document')
 DEPARTMENTS = {
     'clearance': {
+        'person': 'فيصل', 'model': 'suit_male',
         'name': 'التخليص الجمركي', 'manager': 'مدير التخليص الجمركي', 'icon': '🛃',
         'aliases': ('التخليص', 'التخليص الجمركي', 'الجمارك'),
         'role': 'تتابع البيانات الجمركية في فسح ومراحلها والرسوم، والتعرفة والبنود والاشتراطات (سابر وغيرها)، وجهاز العمل الذي يقرأ فسح.',
@@ -36,12 +37,14 @@ DEPARTMENTS = {
                   'fasah_importer_phone', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
                   'runner_deny')},
     'transport': {
+        'person': 'خالد', 'model': 'casual_male',
         'name': 'النقل والحمولات', 'manager': 'مدير النقل', 'icon': '🚚',
         'aliases': ('النقل', 'الحمولات', 'الشحن البري', 'السواقين', 'السائقين'),
         'role': 'تدير الحمولات من نقليات وملاك الحمولات، وعروض الحمولات للسائقين وأسعار السوق والإسناد.',
         'tools': ('add_driver', 'broadcast_load', 'negotiate_owner', 'assign_driver', 'load_acceptances', 'approve_owner_load',
                   'owner_load_status', 'broadcast_status', 'driver_price_request', 'driver_prices', 'send_whatsapp')},
     'containers': {
+        'person': 'سلطان', 'model': 'classy_male',
         'name': 'الحاويات ووكلاء الملاحة', 'manager': 'مدير الحاويات والملاحة', 'icon': '🚢',
         'aliases': ('الحاويات', 'الملاحة', 'وكلاء الملاحة', 'الغرامات', 'الشحن البحري'),
         'role': 'تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول.',
@@ -49,22 +52,26 @@ DEPARTMENTS = {
                   'free_time_extension', 'free_time_result', 'detention_claim', 'detention_exposure', 'port_storage',
                   'track_shipment', 'send_email')},
     'finance': {
+        'person': 'نورة', 'model': 'suit_female',
         'name': 'المالية والحسابات', 'manager': 'المدير المالي', 'icon': '💰',
         'aliases': ('المالية', 'الحسابات', 'المحاسبة', 'المالي'),
         'role': 'تسجل البيانات في الحسابات بقواعد الفوترة المعتمدة، والكشوفات والأرصدة والسدادات. لا ترحيل مالي إلا بموافقة المالك.',
         'tools': ('record_declaration_billing', 'customer_balance', 'record_payment', 'party_statement', 'fasah_billing')},
     'sales': {
+        'person': 'ريم', 'model': 'casual_female',
         'name': 'المبيعات والتسويق', 'manager': 'مدير المبيعات والتسويق', 'icon': '📈',
         'aliases': ('المبيعات', 'التسويق', 'العملاء المحتملين', 'المبيعات والتسويق'),
         'role': 'تتابع العملاء المحتملين وردودهم، وبرنامج العملاء الحاليين، والمحتوى التسويقي وقوالب واتساب.',
         'tools': ('add_customer', 'prospect_replies', 'customer_care', 'stock_video', 'whatsapp_templates', 'send_email',
                   'send_whatsapp')},
     'service': {
+        'person': 'لمى', 'model': 'casual3_female',
         'name': 'خدمة العملاء', 'manager': 'مدير خدمة العملاء', 'icon': '🎧',
         'aliases': ('خدمة العملاء', 'العملاء', 'الدعم', 'الشكاوى'),
         'role': 'تتابع محادثات العملاء: الوعود والانتظار والعملاء المنزعجين، وتعليم الوكيل الإجابات الصحيحة، وحالة شحنات العملاء.',
         'tools': ('customer_waiting', 'teach_answer', 'learned_answers', 'shipment_status', 'track_shipment', 'send_whatsapp')},
     'admin': {
+        'person': 'هند', 'model': 'classy_female',
         'name': 'الإدارة والموظفين', 'manager': 'مدير الإدارة', 'icon': '🗂️',
         'aliases': ('الإدارة', 'الادارة', 'الموظفين', 'الموارد البشرية'),
         'role': 'تدير سجل الموظفين وصلاحياتهم على واتساب، والتواصل الداخلي، وتقارير النشاط العامة.',
@@ -100,6 +107,9 @@ def route(raw):
                 or re.match(r'^(?:يا\s+)?(?:مدير\s+|قسم\s+)?' + a + r'\s*[:：]\s*', folded)
             if not m:
                 m = re.match(r'^' + re.escape(_fold(d['manager'])) + r'(?:\s*[:،,\-]\s*|\s+|$)', folded)
+            if not m and d.get('person'):
+                n = re.escape(_fold(d['person']))
+                m = re.match(r'^(?:يا\s+)?' + n + r'\s*[:：،,]\s*', folded) or re.match(r'^يا\s+' + n + r'(?:\s+|$)', folded)
             if m:
                 return key, text[m.end():].strip() or 'وش وضع القسم اليوم؟'
     return None
@@ -110,8 +120,8 @@ def scope(key):
     d = DEPARTMENTS[key]
     names = set(d['tools']) | set(COMMON) | {'office_report'}
     names &= {t['name'] for t in TOOLS}
-    others = '، '.join(x['name'] for k, x in DEPARTMENTS.items() if k != key)
-    system = (f"\n\nأنت الآن «{d['manager']}» في المكتب الافتراضي لآفاق طويق — قسم {d['name']}. مهمتك: {d['role']} "
+    others = '، '.join(f"{x['name']} ({x.get('person', '')})" for k, x in DEPARTMENTS.items() if k != key)
+    system = (f"\n\nأنت الآن {d.get('person', '')}، «{d['manager']}» في المكتب الافتراضي لآفاق طويق — قسم {d['name']}. مهمتك: {d['role']} "
               'تكلم كمدير قسم يرفع تقريره للمالك: النتيجة أولًا، أرقام دقيقة من الأدوات فقط، ثم ما يحتاج قراره. '
               f'إذا كان الطلب خارج قسمك فقل باختصار أي قسم يتولاه ({others}) وكيف يكتب له، مثل «مدير المالية: …». '
               '\nأرقام القسم الآن:\n' + snapshot_text(key))
@@ -122,7 +132,7 @@ def sign(key, reply):
     if not reply:
         return reply
     d = DEPARTMENTS[key]
-    return f"{d['icon']} {d['manager']}:\n{reply}"
+    return f"{d['icon']} {d.get('person', '')} — {d['manager']}:\n{reply}"
 
 
 def log(key, channel, author, command, reply):
@@ -214,9 +224,9 @@ def report_text(key=None):
     parts = ['🏢 تقرير الأقسام — ' + dt.datetime.now(RIYADH).strftime('%d/%m/%Y %H:%M')] if len(keys) > 1 else []
     for k in keys:
         d = DEPARTMENTS[k]
-        parts.append(f"\n{d['icon']} {d['name']} ({d['manager']})\n" + snapshot_text(k))
+        parts.append(f"\n{d['icon']} {d['name']} — {d.get('person', '')} ({d['manager']})\n" + snapshot_text(k))
     if len(keys) > 1:
-        parts.append('\nللتحدث مع أي مدير اكتب مثلًا: «مدير المالية: كشف عمران لهذا الشهر».')
+        parts.append('\nللتحدث مع أي مدير اكتب اسمه أو قسمه، مثلًا: «نورة: كشف عمران لهذا الشهر» أو «مدير المالية: …».')
     return '\n'.join(parts).strip()
 
 
@@ -268,6 +278,7 @@ def _state(session=None):
         alert = any(v and any(w in label for w in ('متأخرة', 'منزعج', 'انتظار')) for label, v in kpis)
         last = history(key, 1)
         out.append({'key': key, 'name': d['name'], 'manager': d['manager'], 'icon': d['icon'], 'role': d['role'],
+                    'person': d.get('person', ''), 'model': d.get('model', ''),
                     'kpis': [[label, v] for label, v in kpis], 'alert': bool(alert),
                     'last': ({'command': last[-1]['command'][:200], 'reply': last[-1]['reply'][:300]} if last else None)})
     data = {'departments': out}
