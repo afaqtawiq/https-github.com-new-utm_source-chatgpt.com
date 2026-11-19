@@ -84,7 +84,7 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}, 'group': {'type': 'string'}}, 'required': ['party']}},
     {'name': 'office_report', 'description': 'Virtual office: live numbers of every department (clearance, transport, containers & shipping lines, finance, sales & marketing, customer service, administration) or of one department. Use for «تقرير الأقسام», «وضع المكتب», «أرقام قسم النقل». To talk to a department manager the owner writes «مدير المالية: …».',
      'input_schema': {'type': 'object', 'properties': {'department': {'type': 'string'}}}},
-    {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines: vessel, loading port and date, ETA / actual discharge at the destination port, last event; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
+    {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines (ShipsGo when connected, otherwise the WORK COMPUTER opens the line public tracking page; the result is sent as a PDF report on WhatsApp): vessel, loading port and date, ETA / actual discharge at the destination port, last event; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'list': {'type': 'boolean'}}}},
     {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV, Word, image) this team member sent or uploaded in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs. If the file has no arrival date but has a bill of lading or container number, also call track_shipment with it.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}, 'name': {'type': 'string'}}, 'required': ['question']}},
@@ -575,7 +575,7 @@ def tool_track_shipment(c, a):
     if a.get('list') or not _clean(a.get('ref')):
         return shipment_tracking.list_text()
     return transport_desk.run_async(lambda: shipment_tracking.track(_clean(a.get('ref'), 40), _clean(a.get('carrier'), 60),
-                                                                    _member().get('name') or ''), timeout=90)
+                                                                    _member().get('name') or '', chat=CHAT.get()), timeout=90)
 
 
 def tool_ask_document(c, a):
