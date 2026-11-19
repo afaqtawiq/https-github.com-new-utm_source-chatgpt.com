@@ -54,7 +54,7 @@ DEPARTMENTS = {
         'role': 'تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول.',
         'tools': ('track_container', 'container_update', 'containers_status', 'container_line', 'line_tariff',
                   'free_time_extension', 'free_time_result', 'detention_claim', 'detention_exposure', 'port_storage',
-                  'track_shipment', 'send_email')},
+                  'track_shipment', 'ask_eta_by_email', 'send_email')},
     'finance': {
         'person': 'نورة', 'model': 'suit_female',
         'name': 'المالية والحسابات', 'manager': 'المدير المالي', 'icon': '💰',

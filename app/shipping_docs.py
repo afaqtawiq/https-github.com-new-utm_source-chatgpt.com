@@ -10,7 +10,8 @@ import re
 
 FIELDS_HINT = """
 For shipping_document (arrival notice / delivery order / bill of lading / إشعار وصول / إذن تسليم) also return:
-shipping_line, vessel, voyage (voyage number as written), bill_no, consignee, eta (YYYY-MM-DD arrival/discharge date), free_days (integer free time days for
+shipping_line, vessel, voyage (voyage number as written), delivery_agent (destination / delivery agent at the port of
+discharge as written), bill_no, consignee, eta (YYYY-MM-DD arrival/discharge date), free_days (integer free time days for
 container detention/demurrage), free_until (YYYY-MM-DD last free day if written), return_place (empty container return
 depot/yard if written), daily_cost (detention/demurrage per day per container in SAR if written), container_size (20, 40 or
 45 when all containers on the document have the same size). null when absent."""

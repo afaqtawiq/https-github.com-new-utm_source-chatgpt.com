@@ -189,6 +189,23 @@ def run():
             row = c.execute("SELECT * FROM shipment_tracks WHERE ref='SSATAOJED2609210'").fetchone()
         assert row['source'] == 'web' and row['eta'] is None and json.loads(row['hints'])['ais']['mmsi'] == '630001353'
 
+        # No confirmed date → an ETA question to the destination agent named on the B/L, prepared for «نفذ» only.
+        from app import eta_inquiry
+        staff_documents.save('966500000001', 'SHIPNER_BL.pdf', 'application/pdf', b'%PDF-1.4 y',
+                             {'document_kind': 'shipping_document', 'bill_no': 'SSATAOJED2609210', 'vessel': 'HAI TAO 205',
+                              'voyage': 'HT26001W', 'shipping_line': 'SHIPNER', 'container_numbers': ['DFSU7046619', 'FCIU9539014'],
+                              'key_facts': {'Destination Agent': 'GOODRICH ARABIA CO'}})
+        prepared = []
+        out = eta_inquiry.prepare('SSATAOJED2609210', '', lambda action: (prepared.append(action), 'C0DE42')[1])
+        assert 'نفذ C0DE42' in out and 'goodrich.jed@goodricharabia.com' in out, out
+        mail = prepared[-1]
+        assert mail['tool'] == 'send_email' and mail['to'] == 'goodrich.jed@goodricharabia.com'
+        assert 'SSATAOJED2609210' in mail['subject'] and 'HAI TAO 205 / V.HT26001W' in mail['subject']
+        assert 'DFSU7046619' in mail['body'] and 'Dear Goodrich Team' in mail['body'] and 'ETA' in mail['body']
+        assert 'اكتب اسم الوكيل' in eta_inquiry.prepare('UNKNOWN1234567', '', lambda action: 'X')
+        assert eta_inquiry.find_agent('UNKNOWN1234567', 'Maersk Line')[1] == 'sa.import@maersk.com'
+        assert 'ask_eta_by_email' in command_agent.HANDLERS
+
         # research() talks to the Claude API with web search + fetch and continues a paused turn.
         calls = []
 
