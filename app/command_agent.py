@@ -915,7 +915,7 @@ def run_agent(c, raw):
     # Actions mentioning SABER retain the existing tool and confirmation route.
     if command_ai.is_saber_information_question(raw):
         return command_ai.answer_saber_question(raw)
-    if not OFFICE.get():
+    if not OFFICE.get() and re.match(r'^\s*(?:يا\s+)?(?:(?:مدير|مديرة|قسم|إدارة|ادارة|اداره)\s|[^:：\n]{2,30}[:：])', str(raw or '')):
         # Virtual office: «مدير المالية: …» goes to that department manager (its tools, its role, its memory).
         from app import virtual_office
         routed = virtual_office.route(raw)
