@@ -12,11 +12,13 @@ needs the same «نفذ CODE» on WhatsApp.
 """
 import datetime as dt
 import html
+import json
 import re
+from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from app.storage import db, utcnow
 
@@ -254,7 +256,87 @@ def _page(title, body):
                         '</head><body><div class="w">' + body + '</div></body></html>')
 
 
+ASSETS = Path(__file__).resolve().parent / 'office_assets'
+TEMPLATE = Path(__file__).resolve().parent / 'office_3d.html'
+TYPES = {'.js': 'application/javascript', '.glb': 'model/gltf-binary'}
+
+
+def _state(session=None):
+    out = []
+    for key, d in DEPARTMENTS.items():
+        kpis = snapshot(key)
+        alert = any(v and any(w in label for w in ('متأخرة', 'منزعج', 'انتظار')) for label, v in kpis)
+        last = history(key, 1)
+        out.append({'key': key, 'name': d['name'], 'manager': d['manager'], 'icon': d['icon'], 'role': d['role'],
+                    'kpis': [[label, v] for label, v in kpis], 'alert': bool(alert),
+                    'last': ({'command': last[-1]['command'][:200], 'reply': last[-1]['reply'][:300]} if last else None)})
+    data = {'departments': out}
+    if session is not None:
+        data['csrf'] = session.get('csrf') or ''
+    return data
+
+
 @router.get('/office', response_class=HTMLResponse)
+def office_3d(request: Request):
+    """The 3D office: each department manager at a desk; tap one to talk to him."""
+    import json
+    session = _admin(request)
+    config = json.dumps(_state(session), ensure_ascii=False, default=str).replace('<', '\\u003c')
+    return HTMLResponse(TEMPLATE.read_text(encoding='utf-8').replace('__CONFIG__', config),
+                        headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/office/assets/{path:path}')
+def office_asset(path: str):
+    target = (ASSETS / path).resolve()
+    if ASSETS not in target.parents or not target.is_file() or target.suffix not in TYPES:
+        raise HTTPException(404, 'غير موجود')
+    return FileResponse(target, media_type=TYPES[target.suffix], headers={'Cache-Control': 'public, max-age=604800'})
+
+
+@router.get('/office/api/state')
+def office_state(request: Request):
+    _admin(request)
+    return JSONResponse(json.loads(json.dumps(_state(), ensure_ascii=False, default=str)))
+
+
+@router.get('/office/api/report')
+def office_report(request: Request):
+    _admin(request)
+    return {'text': report_text()}
+
+
+@router.get('/office/api/{key}/history')
+def office_history(key: str, request: Request):
+    _admin(request)
+    if key not in DEPARTMENTS:
+        raise HTTPException(404, 'قسم غير موجود')
+    return {'messages': [{'author': m['author'], 'channel': m['channel'], 'command': m['command'], 'reply': m['reply'],
+                          'at': m['created_at'].astimezone(RIYADH).strftime('%d/%m %H:%M')} for m in history(key)]}
+
+
+@router.post('/office/api/{key}/ask')
+async def office_ask(key: str, request: Request):
+    import secrets as _secrets
+    from starlette.concurrency import run_in_threadpool
+    session = _admin(request)
+    if key not in DEPARTMENTS:
+        raise HTTPException(404, 'قسم غير موجود')
+    expected = session.get('csrf') or ''
+    if not expected or not _secrets.compare_digest(request.headers.get('x-csrf-token', ''), expected):
+        raise HTTPException(403, 'أعد فتح الصفحة ثم حاول مجددًا.')
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    text = str((body or {}).get('text') or '').strip()[:2000]
+    if not text:
+        raise HTTPException(400, 'اكتب طلبك.')
+    reply = await run_in_threadpool(ask, key, text, session.get('name') or session.get('email') or 'المدير')
+    return {'reply': reply}
+
+
+@router.get('/office/cards', response_class=HTMLResponse)
 def office(request: Request):
     _admin(request)
     e = html.escape
@@ -263,7 +345,7 @@ def office(request: Request):
         kpis = ''.join(f'<div class="kpi"><span>{e(label)}</span><b>{"—" if v is None else e(str(v))}</b></div>' for label, v in snapshot(key))
         cards += (f'<div class="card"><h2>{d["icon"]} {e(d["name"])}</h2><div class="muted">{e(d["manager"])} — {e(d["role"])}</div>'
                   f'{kpis}<a class="btn" href="/office/{key}">تحدث مع {e(d["manager"])}</a></div>')
-    body = ('<p><a href="/dashboard">← النظام</a></p><h1>🏢 المكتب الافتراضي — آفاق طويق</h1>'
+    body = ('<p><a href="/office">← المكتب ثلاثي الأبعاد</a> · <a href="/dashboard">النظام</a></p><h1>🏢 المكتب الافتراضي — آفاق طويق</h1>'
             '<p class="muted">كل قسم له مدير يعمل بأدوات قسمه فقط. تقدر تكلمه هنا أو على واتساب: «مدير المالية: …»، '
             'و«تقرير الأقسام» يرسل لك أرقام كل الأقسام. أي إرسال خارج الشركة يبقى بتأكيد «نفذ» على واتساب.</p>'
             f'<div class="grid">{cards}</div>')
