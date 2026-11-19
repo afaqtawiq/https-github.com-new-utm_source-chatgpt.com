@@ -118,6 +118,75 @@ def run():
             text = st.after_page(task['id'], 'done')
         assert 'لم تعرض نتيجة' in text and 'captcha' in text
         assert 'جهاز آفاق طويق' in asyncio.run(st.after_document({'bill_no': 'MEDU5556667', 'shipping_line': 'MSC'}))
+
+        # 1b) Public sources on the server come first (no device needed): a DRAFT B/L found through its vessel and voyage.
+        from app import staff_documents
+        staff_documents.save('966500000001', 'KSA-C.462_BL.pdf', 'application/pdf', b'%PDF-1.4 x',
+                             {'document_kind': 'shipping_document', 'bill_no': 'SHZ8739334', 'vessel': 'CMA CGM LORENZACCIO',
+                              'shipping_line': 'CMA CGM', 'container_numbers': ['CAIU9727815'], 'key_facts': {'Voyage': '0RDPCW1MA'}})
+        hints = st.hints_for('SHZ8739334')
+        assert hints['vessel'] == 'CMA CGM LORENZACCIO' and hints['voyage'] == '0RDPCW1MA' and hints['containers'] == ['CAIU9727815']
+        seen = []
+
+        async def fake_research(ref, kind, carrier, h):
+            seen.append((ref, kind, h.get('vessel'), h.get('voyage')))
+            return {'found': True, 'method': 'vessel_schedule', 'carrier': 'CMA CGM', 'vessel': 'CMA CGM LORENZACCIO',
+                    'voyage': '0RDPCW1MA', 'pol': 'Shekou', 'etd': '2026-11-09', 'pod': 'Jeddah', 'eta': '2026-11-29',
+                    'arrived': False, 'last_event': 'Singapore', 'last_event_date': '2026-11-14',
+                    'containers': ['CAIU9727815'], 'sources': ['https://www.cma-cgm.com/x.pdf', 'https://service-finder.shipsgo.com/v']}
+        pdfs = []
+
+        async def fake_pdf(chat, ref, info, source):
+            pdfs.append((chat, ref, source, tracking_pdf.build(ref, info, source)[:5]))
+            return True
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture'}), patch.object(st, 'research', side_effect=fake_research), \
+                patch.object(tracking_pdf, 'send', side_effect=fake_pdf):
+            out = asyncio.run(st.track('SHZ8739334', 'CMA CGM', 'سلطان', chat=('966500000001', 'conv-m')))
+            assert '29/11/2026' in out and 'جدول رحلة السفينة' in out and 'cma-cgm.com' in out and 'مسودة' in out and '📎' in out, out
+            assert seen[-1] == ('SHZ8739334', 'bl', 'CMA CGM LORENZACCIO', '0RDPCW1MA') and pdfs[-1][1] == 'SHZ8739334'
+            with db() as c:
+                row = c.execute("SELECT * FROM shipment_tracks WHERE ref='SHZ8739334'").fetchone()
+            assert row['source'] == 'web' and row['eta'].astimezone(st.RIYADH).date() == dt.date(2026, 11, 29)
+            # Vessel and voyage alone.
+            out = asyncio.run(st.track('', vessel='CMA CGM LORENZACCIO', voyage='0RDPCW1MA'))
+            assert '29/11/2026' in out and seen[-1][1] == 'vessel'
+            # Twice-daily re-check: ETA moves → one alert.
+            with db() as c:
+                c.execute("UPDATE shipment_tracks SET checked_at = NOW() - INTERVAL '13 hours' WHERE ref='SHZ8739334'")
+            alerts = []
+
+            async def later(ref, kind, carrier, h):
+                d = await fake_research(ref, kind, carrier, h)
+                return dict(d, eta='2026-12-02')
+
+            async def collect(text):
+                alerts.append(text)
+            with patch.object(st, 'research', side_effect=later):
+                asyncio.run(st.refresh_web(deliver=collect))
+            assert any('SHZ8739334' in a and '02/12/2026' in a for a in alerts), alerts
+
+        # Nothing reliable in public sources → the work computer is asked next.
+        async def nothing(ref, kind, carrier, h):
+            return {'found': False, 'note': 'not found'}
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture'}), patch.object(st, 'research', side_effect=nothing):
+            out = asyncio.run(st.track('MEDU1112223', 'MSC'))
+        assert 'ما لقيت موعدًا مؤكدًا' in out and 'جهاز آفاق طويق' in out, out
+
+        # research() talks to the Claude API with web search + fetch and continues a paused turn.
+        calls = []
+
+        def api(request):
+            body = json.loads(request.content)
+            calls.append((request.headers.get('anthropic-beta'), [t['name'] for t in body['tools']], len(body['messages'])))
+            if len(calls) == 1:
+                return httpx.Response(200, json={'stop_reason': 'pause_turn', 'content': [{'type': 'text', 'text': 'searching'}]})
+            return httpx.Response(200, json={'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': 'نتيجة: {"found": true, "eta": "2026-11-29"}'}]})
+        real = httpx.AsyncClient
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture'}), \
+                patch('httpx.AsyncClient', lambda **k: real(transport=httpx.MockTransport(api))):
+            got = asyncio.run(st.research('SHZ8739334', 'bl', 'CMA CGM', {'vessel': 'CMA CGM LORENZACCIO'}))
+        assert got == {'found': True, 'eta': '2026-11-29'} and calls[0][0] == 'web-fetch-2025-09-10'
+        assert calls[0][1] == ['web_search', 'web_fetch'] and calls[1][2] == 2
         assert asyncio.run(st.after_document({'bill_no': 'SHZ8739334', 'eta': '2026-12-01'})) == ''
 
     os.environ['SHIPSGO_API_TOKEN'] = 'fixture-token'

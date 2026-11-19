@@ -84,8 +84,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}, 'group': {'type': 'string'}}, 'required': ['party']}},
     {'name': 'office_report', 'description': 'Virtual office: live numbers of every department (clearance, transport, containers & shipping lines, finance, sales & marketing, customer service, administration) or of one department. Use for «تقرير الأقسام», «وضع المكتب», «أرقام قسم النقل». To talk to a department manager the owner writes «مدير المالية: …».',
      'input_schema': {'type': 'object', 'properties': {'department': {'type': 'string'}}}},
-    {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines (ShipsGo when connected, otherwise the WORK COMPUTER opens the line public tracking page; the result is sent as a PDF report on WhatsApp): vessel, loading port and date, ETA / actual discharge at the destination port, last event; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
-     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'list': {'type': 'boolean'}}}},
+    {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines (ShipsGo when connected, otherwise the WORK COMPUTER opens the line public tracking page; the result is sent as a PDF report on WhatsApp): vessel, loading port and date, ETA / actual discharge at the destination port, last event; it tries EVERY way: ShipsGo, public sources on the server (the line tracking page, the line schedules, the vessel port calls — works for draft B/Ls through the vessel and voyage), then the work computer. Pass vessel and voyage (and containers) when known from the document — read them with ask_document first if a file was sent. A vessel and voyage alone can be tracked too; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'vessel': {'type': 'string'},
+                                                       'voyage': {'type': 'string'}, 'containers': {'type': 'array', 'items': {'type': 'string'}},
+                                                       'list': {'type': 'boolean'}}}},
     {'name': 'ask_document', 'description': 'Answer a question from a FILE (PDF, Excel, CSV, Word, image) this team member sent or uploaded in this WhatsApp chat in the last 3 days — the file is read again for the answer: arrival date/ETA, ETD, vessel, bill of lading, shipper, consignee, containers, weights, amounts, anything in it. Use it whenever the message refers to a file/document/invoice/bill/policy that was just sent («شوف لي تاريخ وصول الشحنة», «كم الوزن في الملف», «من الشاحن في البوليصة»). name = part of the file name only when the user names a specific file. You CAN read files with this tool — never say you cannot read PDFs. If the file has no arrival date but has a bill of lading or container number, also call track_shipment with it.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}, 'name': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'customer_waiting', 'description': '«لا أحد ينتظر»: promises made to customers (أرجع لك خلال ساعة…), customers waiting for a staff reply and upset customers. action list (default) shows them; action close with id closes a promise that was handled. e.g. «الوعود» «مين ينتظر رد» «العملاء المنزعجين» «تم الوعد 12».',
@@ -572,10 +574,12 @@ def tool_office_report(c, a):
 
 def tool_track_shipment(c, a):
     from app import shipment_tracking, transport_desk
-    if a.get('list') or not _clean(a.get('ref')):
+    if a.get('list') or not (_clean(a.get('ref')) or _clean(a.get('vessel'))):
         return shipment_tracking.list_text()
-    return transport_desk.run_async(lambda: shipment_tracking.track(_clean(a.get('ref'), 40), _clean(a.get('carrier'), 60),
-                                                                    _member().get('name') or '', chat=CHAT.get()), timeout=90)
+    return transport_desk.run_async(lambda: shipment_tracking.track(
+        _clean(a.get('ref'), 40), _clean(a.get('carrier'), 60), _member().get('name') or '', chat=CHAT.get(),
+        vessel=_clean(a.get('vessel'), 60), voyage=_clean(a.get('voyage'), 30),
+        containers=[_clean(x, 15) for x in (a.get('containers') or [])][:10]), timeout=240)
 
 
 def tool_ask_document(c, a):
