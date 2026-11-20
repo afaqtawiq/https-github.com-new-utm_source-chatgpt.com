@@ -75,3 +75,29 @@ def test_unapproved_wording_is_not_attempted(mods, monkeypatch):
         assert text and 'البريد:' not in text and ap.STOP_LINE in text
         current = [{'components': ap.template_spec()['components']}]
         assert 'البريد:' in ap.sendable(current, ap.message_options('شركة أغذية', pitch))
+
+
+def test_approved_template_body_is_used_as_is(mods, monkeypatch):
+    """Production (20 Nov): the approved Meta wording is neither the current nor the guessed older text. With the
+    owner switch on, the approved body itself is filled with the company and pitch, so it always matches."""
+    dp, ap, extra = mods
+    from app.zernio_whatsapp import template_parameters
+    pitch = dp.classify('شركة أغذية', '', '')[3]
+    body = ('مرحبًا فريق {{1}}،\nمعكم آفاق طويق للتخليص الجمركي والنقل. {{2}}\n'
+            'هل لديكم شحنات قادمة؟ للتواصل: 0507665873')
+    approved = [{'name': 'afaaq_marketing_v1', 'language': 'ar', 'status': 'APPROVED',
+                 'components': [{'type': 'BODY', 'text': body}, {'type': 'FOOTER', 'text': ap.STOP_LINE}]},
+                {'name': 'afaaq_marketing_other', 'language': 'ar', 'status': 'APPROVED',
+                 'components': [{'type': 'BODY', 'text': 'عرض {{1}} {{2}} {{3}}'}]}]
+    with patch.dict(sys.modules, extra):
+        ap._approved[:] = approved
+        try:
+            monkeypatch.delenv('AUTO_OUTREACH_APPROVED_TEXT', raising=False)
+            assert ap.sendable(approved, ap.message_options('شركة أغذية\nالمحدودة', pitch)) is None
+            monkeypatch.setenv('AUTO_OUTREACH_APPROVED_TEXT', '1')
+            text = ap.sendable(approved, ap.message_options('شركة أغذية\nالمحدودة', pitch))
+            assert text and text.startswith('مرحبًا فريق شركة أغذية المحدودة') and ap.STOP_LINE in text
+            assert template_parameters(approved[0], text) == ['شركة أغذية المحدودة', ' '.join(pitch.split())]
+            assert ap.rendered(approved[1], 'x', 'y') is None
+        finally:
+            ap._approved[:] = []
