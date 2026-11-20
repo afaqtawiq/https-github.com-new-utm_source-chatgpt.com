@@ -40,7 +40,7 @@ def url(vid):
     return base_url() + '/media/team-video/' + str(vid) + '.mp4'
 
 
-@router.get('/media/team-video/{name}')
+@router.api_route('/media/team-video/{name}', methods=['GET', 'HEAD'])  # platforms probe the file with HEAD before pulling it
 def public_video(name: str):
     stem, _, ext = name.partition('.')
     if ext != 'mp4' or not stem.isdigit():

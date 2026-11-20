@@ -77,6 +77,11 @@ try:
     assert client.get('/media/daily-poster-en/2070-01-01.mp4').content == b'fixture-mp4'
     assert client.get('/media/daily-poster-en/not-a-date.jpg').status_code == 404
     assert client.get('/media/daily-poster-en/2070-01-01.txt').status_code == 404
+    # TikTok / YouTube / Instagram probe the video with HEAD first (production logged 405 before).
+    head = client.head('/media/daily-poster-en/2070-01-01.mp4')
+    assert head.status_code == 200 and head.headers['content-type'] == 'video/mp4' and head.content == b''
+    assert client.head('/media/daily-poster/2070-01-01.mp4').status_code in (200, 404)
+    assert client.head('/media/daily-poster/not-a-date.mp4').status_code == 404
     print('PASS: additive schema, 8 concurrent claims, one provider pass, same-day Arabic isolation, saved drafts, morning cutoff, public media and admin protection.')
 finally:
     os.environ.update(ENABLE_EXTERNAL_ACTIONS='0', AFAQ_DAILY_POSTER_EN='0')
