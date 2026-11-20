@@ -97,8 +97,23 @@ async def send_all(broadcast_id):
         if not claimed:
             continue
         status, error = 'sent', None
+        localized = None
         try:
-            await z.send(row['phone'], item['message'])
+            from app import driver_language as dl
+            dl.init()
+            with db() as c:
+                lang = dl.driver_language(c, row['phone'])
+            localized = dl.offer_for(lang, 'AFT-' + str(broadcast_id), item)
+        except Exception:
+            localized = None
+        try:
+            if localized:
+                try:  # free text works only inside an open 24h window; else fall back to the Arabic template
+                    await z.send(row['phone'], localized)
+                except z.WhatsAppBlocked:
+                    await z.send(row['phone'], item['message'])
+            else:
+                await z.send(row['phone'], item['message'])
         except Exception as exc:  # never retried automatically
             status, error = ('failed' if isinstance(exc, z.WhatsAppBlocked) else 'uncertain'), str(exc)[:200]
         with db() as c:

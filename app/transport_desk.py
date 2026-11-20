@@ -316,11 +316,11 @@ async def notify_capture(load_id):
 
 # ---------- 4. driver acceptance and linking ----------
 
-ACCEPT = re.compile(r'(موافق|اوافق|أوافق|تمام|نعم|ابغاها|أبغاها|ابيها|أبيها|ok)', re.I)
+ACCEPT = re.compile(r'(موافق|اوافق|أوافق|تمام|نعم|ابغاها|أبغاها|ابيها|أبيها|ok|okay|yes|ready|done|ٹھیک|ہاں|منظور|جی)', re.I)
 REF = re.compile(r'AFT\s*-?\s*(\d+)', re.I)
 
 
-def driver_accept(phone, text):
+def driver_accept(phone, text, lang=''):
     """«موافق AFT-n» from a driver who received that load. Returns (driver_reply, manager_text) or None."""
     m = REF.search(str(text or ''))
     if not m or not ACCEPT.search(str(text)):
@@ -335,7 +335,15 @@ def driver_accept(phone, text):
         if not b or not rec:
             return None
         ref = 'AFT-' + str(bid)
+        from app import driver_language as dl
+        dl.init()
+        if lang in ('ur', 'en'):
+            dl.set_language(c, phone, lang)
+        lang = dl.driver_language(c, phone) or ''
         if b.get('assigned_phone'):
+            state = 'yours' if b['assigned_phone'][-9:] == d[-9:] else 'taken'
+            if dl.accept_reply(lang, ref, state):
+                return (dl.accept_reply(lang, ref, state), None)
             if b['assigned_phone'][-9:] == d[-9:]:
                 return ('الحمولة ' + ref + ' مسندة لك ✅ وتفاصيل صاحب الحمولة أرسلناها لك. للاستفسار: ' + SUPPORT, None)
             return ('شكرًا لتجاوبك 🙏 الحمولة ' + ref + ' أُسندت لسائق آخر، ونرسل لك الحمولات القادمة أولًا بأول.', None)
@@ -343,7 +351,7 @@ def driver_accept(phone, text):
         c.execute("UPDATE load_broadcast_recipients SET status='accepted',replied_at=%s WHERE broadcast_id=%s AND phone=%s",
                   (utcnow(), bid, rec['phone']))
         count = c.execute("SELECT COUNT(*) n FROM load_broadcast_recipients WHERE broadcast_id=%s AND status='accepted'", (bid,)).fetchone()['n']
-    reply = ('تم تسجيل موافقتك على الحمولة ' + ref + ' 👍 ننسق الآن مع صاحب الحمولة ونرجع لك بالتأكيد خلال وقت قصير. '
+    reply = dl.accept_reply(lang, ref) or ('تم تسجيل موافقتك على الحمولة ' + ref + ' 👍 ننسق الآن مع صاحب الحمولة ونرجع لك بالتأكيد خلال وقت قصير. '
              'للاستفسار: ' + SUPPORT)
     manager = None
     if first:
@@ -394,9 +402,17 @@ def prepare_assign(c, sender, conversation_id, ref, driver_phone=''):
     if b.get('assigned_phone'):
         return f"الحمولة AFT-{b['id']} مسندة مسبقًا للسائق +{b['assigned_phone']}."
     accepted = accepted_list(c, b['id'])
+    want = digits(driver_phone)
+    if want and len(want) >= 9 and not any(a['phone'][-9:] == want[-9:] for a in accepted):
+        # The manager saw the driver agree on WhatsApp (e.g. «موافق» without the AFT number): trust the named recipient.
+        named = c.execute('''SELECT r.phone,dr.driver_name,dr.vehicle_type FROM load_broadcast_recipients r LEFT JOIN drivers dr ON dr.id=r.driver_id
+            WHERE r.broadcast_id=%s AND right(r.phone,9)=%s''', (b['id'], want[-9:])).fetchone()
+        if named:
+            c.execute("UPDATE load_broadcast_recipients SET status='accepted',replied_at=COALESCE(replied_at,%s) WHERE broadcast_id=%s AND phone=%s",
+                      (utcnow(), b['id'], named['phone']))
+            accepted = accepted_list(c, b['id'])
     if not accepted:
         return f"لم يوافق أي سائق على AFT-{b['id']} بعد."
-    want = digits(driver_phone)
     driver = next((a for a in accepted if want and a['phone'][-9:] == want[-9:]), None) if want else accepted[0]
     if not driver:
         return 'هذا الرقم ليس من السائقين الموافقين. الموافقون: ' + '، '.join('+' + a['phone'] for a in accepted)

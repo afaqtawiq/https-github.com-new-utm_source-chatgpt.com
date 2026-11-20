@@ -165,6 +165,9 @@ def accept_inbound(payload):
             'question_reason':decision.reason,'attachments':snapshots,
             'attachment_count':len(attachments),'quoted_reference_present':quote_present,
             'quoted_platform_message_id':quoted_id}
+    if not snapshots:
+        from app.driver_language import lang_hint
+        data['lang_hint'] = lang_hint(message.get('text'))
     if '_takeover_generation' in payload:
         # Receiver supplies the database generation after validating the event.
         data['takeover_expected_generation'] = payload['_takeover_generation']
@@ -244,11 +247,22 @@ async def processing(job):
     if job['account_id'] != z.account_id() or not enabled(settings,job['sender']):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
+    if not data.get('attachments') and data.get('question_allowed') and data.get('question') and 'AFT' not in str(data['question']).upper():
+        def implicit():
+            try:
+                from app import driver_language
+                return driver_language.implicit_ref(job['sender'], data['question'])
+            except Exception as exc:
+                print('DRIVER_IMPLICIT_ACCEPT', type(exc).__name__, str(exc)[:160], flush=True)
+                return None
+        ref = await run_in_threadpool(implicit)
+        if ref:
+            data = dict(data, question=str(data['question']) + ' ' + ref)
     if not data.get('attachments') and data.get('question_allowed') and data.get('question') and 'AFT' in str(data['question']).upper():
         def driver_accept():
             try:
                 from app import transport_desk
-                return transport_desk.driver_accept(job['sender'], data['question'])
+                return transport_desk.driver_accept(job['sender'], data['question'], data.get('lang_hint') or '')
             except Exception as exc:
                 print('TRANSPORT_DRIVER_ACCEPT', type(exc).__name__, str(exc)[:160], flush=True)
                 return None
@@ -265,6 +279,22 @@ async def processing(job):
                     await deliver(accepted[1])
                 except Exception as exc:
                     print('TRANSPORT_MANAGER_NOTICE', type(exc).__name__, flush=True)
+            return
+    if not data.get('attachments') and data.get('lang_hint') in ('ur', 'en', 'unclear') and 'AFT' not in str(data.get('question') or '').upper():
+        def language_reply():
+            try:
+                from app import driver_language
+                return driver_language.driver_reply(job['sender'], data['lang_hint'])
+            except Exception as exc:
+                print('DRIVER_LANGUAGE', type(exc).__name__, str(exc)[:160], flush=True)
+                return None
+        translated = await run_in_threadpool(language_reply)
+        if translated:
+            if not await run_in_threadpool(store.reserve_model, jid, lease):
+                return
+            await run_in_threadpool(store.save_model, jid, lease, reply_text=translated,
+                                    diagnostics={'model_success': True, 'model_attempted': False, 'model_reason': 'driver_language'})
+            await run_in_threadpool(store.prepare_reply, jid, lease)
             return
     if (not data.get('attachments') and data.get('question_allowed') and data.get('question')
             and 'AFT' not in str(data['question']).upper()):
