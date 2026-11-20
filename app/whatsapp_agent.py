@@ -247,6 +247,17 @@ async def processing(job):
     if job['account_id'] != z.account_id() or not enabled(settings,job['sender']):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
+    if not data.get('attachments') and data.get('question_allowed') and data.get('question') and 'AFT' not in str(data['question']).upper():
+        def implicit():
+            try:
+                from app import driver_language
+                return driver_language.implicit_ref(job['sender'], data['question'])
+            except Exception as exc:
+                print('DRIVER_IMPLICIT_ACCEPT', type(exc).__name__, str(exc)[:160], flush=True)
+                return None
+        ref = await run_in_threadpool(implicit)
+        if ref:
+            data = dict(data, question=str(data['question']) + ' ' + ref)
     if not data.get('attachments') and data.get('question_allowed') and data.get('question') and 'AFT' in str(data['question']).upper():
         def driver_accept():
             try:

@@ -23,3 +23,17 @@ def test_offer_texts():
 def test_accept_words():
     for t in ('OK AFT-2', 'ٹھیک ہے AFT-2', 'yes AFT-2', 'موافق AFT-2'):
         assert ACCEPT.search(t)
+
+
+def test_implicit_ref_skips_long_or_numbered(monkeypatch):
+    from app import driver_language as dl
+    assert dl.implicit_ref('971500000000', 'موافق AFT-2') is None
+    assert dl.implicit_ref('971500000000', 'ابغى اعرف عن التخليص الجمركي في جدة لو سمحت') is None
+    monkeypatch.setattr(dl, 'init', lambda: None)
+    class C:
+        def __enter__(s): return s
+        def __exit__(s, *a): return False
+    monkeypatch.setattr(dl, 'db', lambda: C())
+    monkeypatch.setattr(dl, 'latest_offer', lambda c, p: {'id': 2})
+    assert dl.implicit_ref('971522287320', 'موافق') == 'AFT-2'
+    assert dl.implicit_ref('971522287320', 'ٹھیک ہے') == 'AFT-2'

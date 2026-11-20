@@ -402,9 +402,17 @@ def prepare_assign(c, sender, conversation_id, ref, driver_phone=''):
     if b.get('assigned_phone'):
         return f"الحمولة AFT-{b['id']} مسندة مسبقًا للسائق +{b['assigned_phone']}."
     accepted = accepted_list(c, b['id'])
+    want = digits(driver_phone)
+    if want and len(want) >= 9 and not any(a['phone'][-9:] == want[-9:] for a in accepted):
+        # The manager saw the driver agree on WhatsApp (e.g. «موافق» without the AFT number): trust the named recipient.
+        named = c.execute('''SELECT r.phone,dr.driver_name,dr.vehicle_type FROM load_broadcast_recipients r LEFT JOIN drivers dr ON dr.id=r.driver_id
+            WHERE r.broadcast_id=%s AND right(r.phone,9)=%s''', (b['id'], want[-9:])).fetchone()
+        if named:
+            c.execute("UPDATE load_broadcast_recipients SET status='accepted',replied_at=COALESCE(replied_at,%s) WHERE broadcast_id=%s AND phone=%s",
+                      (utcnow(), b['id'], named['phone']))
+            accepted = accepted_list(c, b['id'])
     if not accepted:
         return f"لم يوافق أي سائق على AFT-{b['id']} بعد."
-    want = digits(driver_phone)
     driver = next((a for a in accepted if want and a['phone'][-9:] == want[-9:]), None) if want else accepted[0]
     if not driver:
         return 'هذا الرقم ليس من السائقين الموافقين. الموافقون: ' + '، '.join('+' + a['phone'] for a in accepted)

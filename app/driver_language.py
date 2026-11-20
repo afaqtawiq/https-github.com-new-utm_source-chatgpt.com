@@ -127,3 +127,15 @@ def driver_reply(phone, hint):
         return offer_for(lang, ref, b)
     # Only «????» and no known language: Urdu first, then English.
     return offer_ur(ref, b) + '\n\n' + offer_en(ref, b)
+
+
+def implicit_ref(phone, text):
+    """«موافق» / «OK» / «ٹھیک ہے» alone (no AFT number) from a driver with a recent offer -> 'AFT-n' of that offer."""
+    from app.transport_desk import ACCEPT
+    t = str(text or '').strip()
+    if not t or 'AFT' in t.upper() or len(t.split()) > 4 or not ACCEPT.search(t):
+        return None
+    init()
+    with db() as c:
+        b = latest_offer(c, phone)
+    return 'AFT-' + str(b['id']) if b else None
