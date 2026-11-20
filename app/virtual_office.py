@@ -37,7 +37,7 @@ DEPARTMENTS = {
                  'وتعطي النتيجة كاملة: التناقضات أولًا (مثل أن المورد مصنع سعودي = شراء محلي لا استيراد)، البند والرسم، سابر، الجهات '
                  'والتصاريح، القيود، المستندات، ثم رسالة جاهزة للعميل. لا تقل «لم أستطع التحقق» قبل أن تشغّل الأداة، وما لم يتأكد '
                  'من مصدر رسمي تضعه تحت «غير متحقق».'),
-        'tools': ('tariff', 'import_requirements', 'saber_exemptions', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
+        'tools': ('tariff', 'import_requirements', 'saber_exemptions', 'clearance_expert', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
                   'fasah_importer_phone', 'fasah_authorizations', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
                   'runner_deny', 'fasah_billing'),
         'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
@@ -139,6 +139,11 @@ def route(raw):
     return None
 
 
+def clearance_notes():
+    from app.clearance_expert import NOTES
+    return NOTES
+
+
 def scope(key):
     from app.command_agent import TOOLS
     d = DEPARTMENTS[key]
@@ -157,7 +162,8 @@ def scope(key):
               'إذا نقصت معلومة من العميل (مثل وصف المنتج لسابر أو التعرفة) فجهّز له رسالة طلب البيانات الناقصة بالتحديد '
               '(الاسم التجاري، المادة، الاستخدام، بلد المنشأ، البند من المورد، صورة أو كتالوج) مع رمز «نفذ» بدل أن تتوقف. '
               'إذا أعادت أداة نتيجة بديلة (مثل فتح الصفحة على جهاز آفاق طويق) فاعرضها كما هي ولا تقل إن الأمر غير متاح. '
-              '\nأرقام القسم الآن:\n' + snapshot_text(key))
+              + (('\n\n' + clearance_notes()) if key == 'clearance' else '')
+              + '\nأرقام القسم الآن:\n' + snapshot_text(key))
     return {'key': key, 'tools': names, 'system': system}
 
 
