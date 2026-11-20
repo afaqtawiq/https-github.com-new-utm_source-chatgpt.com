@@ -496,6 +496,94 @@ class Task:
         self.step(f'قرأت {len(rows)} بيان (قراءة فقط)')
         return self.upload(path, page.url)
 
+    AUTH_MENUS = ('التفاويض', 'تفويض المخلص', 'التفويضات')
+    AUTH_LISTS = ('قائمة التفاويض', 'التفاويض المستلمة', 'التفاويض الواردة', 'استعراض التفاويض', 'تفاويض المخلص', 'إدارة التفاويض')
+
+    def fasah_signed_in(self):
+        """The signed-in FASAH window (the owner signs in himself; never a password or code from here)."""
+        page = next((p for p in self.context.pages if 'fasah.zatca.gov.sa' in p.url and not p.is_closed()), None)
+        if page is None:
+            page = self.open(FASAH)
+        else:
+            page.bring_to_front()
+        self.keep.add(page)
+        asked = False
+        end = time.time() + 10 * 60
+        while time.time() < end:
+            self.wait(page, 3)
+            if '/login' in page.url:
+                if not asked:
+                    self.step('فسح يطلب تسجيل الدخول: سجّل دخولك بنفسك في نافذة الجهاز (لن أكتب كلمة المرور أو الرمز). أنتظرك 10 دقائق.', False)
+                    asked = True
+                continue
+            if page.get_by_text('البيان الجمركي و الفسح', exact=True).count() or page.get_by_text('التفاويض').count():
+                return page
+        raise ValueError('لم يكتمل تسجيل الدخول في فسح خلال 10 دقائق')
+
+    def click_text(self, page, names):
+        for name in names:
+            for loc in (page.get_by_role('link', name=name, exact=True), page.get_by_role('button', name=name, exact=True),
+                        page.get_by_text(name, exact=True)):
+                try:
+                    for i in range(min(loc.count(), 4)):
+                        if loc.nth(i).is_visible():
+                            loc.nth(i).click(timeout=8000)
+                            self.wait(page, 4)
+                            return name
+                except Stop:
+                    raise
+                except Exception:
+                    continue
+        return None
+
+    def do_fasah_authorizations(self):
+        """Read-only: the broker authorizations list (importer, number, start/end, status) on all pages."""
+        page = self.fasah_signed_in()
+        try:
+            decline = page.get_by_role('button', name='رفض', exact=True)
+            if decline.count() and decline.first.is_visible():
+                decline.first.click(timeout=5000)
+        except Exception:
+            pass
+        opened = None
+        for attempt in range(4):
+            self.poll()
+            menu = self.click_text(page, self.AUTH_MENUS)
+            sub = self.click_text(page, self.AUTH_LISTS)
+            opened = sub or menu
+            text = page.locator('body').inner_text()
+            if opened and re.search(r'\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2}', text):
+                break
+            if attempt == 1:
+                page.goto(FASAH, wait_until='domcontentloaded', timeout=60000)
+                self.wait(page, 5)
+        texts = []
+        body = page.locator('main') if page.locator('main').count() else page.locator('body')
+        texts.append(body.first.inner_text())
+        self.step('فتحت ' + (opened or 'الصفحة الحالية') + ' في فسح (قراءة فقط)', page=page)
+        for number in range(2, max(2, min(int(self.params.get('pages') or 10), 30)) + 1):
+            target = page.locator('ul.pagination, nav, .pagination').get_by_text(str(number), exact=True)
+            if not target.count():
+                break
+            before = texts[-1][:300]
+            target.last.click(timeout=8000)
+            for _ in range(8):
+                self.wait(page, 1.5)
+                now = body.first.inner_text()
+                if now[:300] != before:
+                    break
+            texts.append(now)
+        if not opened:
+            links = [t.strip() for t in page.locator('a, button').all_inner_texts() if t.strip()][:120]
+            texts.append('\n[قائمة الروابط الظاهرة]\n' + '\n'.join(links))
+        path = self.dir / 'fasah-authorizations.txt'
+        path.write_text(('\n\n----- صفحة -----\n\n'.join(texts)).strip(), encoding='utf-8')
+        self.step(f'قرأت {len(texts)} صفحة من التفاويض (قراءة فقط)')
+        if not opened:
+            self.upload(path, page.url)
+            raise ValueError('لم أجد قائمة التفاويض في فسح؛ حفظت الروابط الظاهرة للمراجعة')
+        return self.upload(path, page.url)
+
     DETAIL_SECTIONS = ('معلومات البيان الأساسية', 'الفواتير', 'تفاصيل فاتورة البيان الجمركي',
                        'الفواتير المصدرة على البيان الجمركي من جميع الجهات', 'الأصناف')
 

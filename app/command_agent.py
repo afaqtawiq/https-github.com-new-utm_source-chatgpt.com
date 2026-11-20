@@ -120,6 +120,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'party': {'type': 'string'}, 'since': {'type': 'string'}, 'pages': {'type': 'string'}, 'number': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
     {'name': 'fasah_tracking', 'description': 'Live status of open FASAH declarations read by the work computer every 2 hours (under review, waiting duties, inspection, released). Optional filter (number or importer name). e.g. «حالة البيانات في فسح» «وش وضع بيانات سلة».',
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
+    {'name': 'fasah_authorizations', 'description': 'When do the importers\' broker authorizations (تفاويض) in FASAH expire. Optional company name (e.g. «بروميت»). Answers from the last read of the FASAH authorizations list; if older than a day the work computer reads it again (read-only) and the result is sent when ready. e.g. «تفويض شركة بروميت متى ينتهي» «التفاويض اللي قربت تنتهي».',
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}}},
     {'name': 'fasah_importer_phone', 'description': 'Manager only. Save the WhatsApp number of an importer AS ITS NAME APPEARS IN FASAH, so status-change messages to that customer can be prepared (sent only after «نفذ»). e.g. «رقم المستورد سلة الرحائب 0551234567».',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}}, 'required': ['name', 'phone']}},
     {'name': 'prospect_replies', 'description': 'Which contacted prospect companies replied to the agent outreach and how (interested, asked price, not interested, stop), with quotes prepared. Optional days (default 7). e.g. «مين رد من العملاء المحتملين» «ردود حملة التعريف».',
@@ -784,6 +786,11 @@ def tool_runner_task(c, a):
     return agent_runner.create_task(a.get('kind'), {'url': a.get('url'), 'which': a.get('which'), 'fields': a.get('fields'),
                                                     'submit_label': a.get('submit_label'), 'party': a.get('party'), 'since': a.get('since'),
                                                     'pages': a.get('pages'), 'number': a.get('number')}, _member().get('name') or '')[1]
+
+
+def tool_fasah_authorizations(c, a):
+    from app import fasah_authorizations
+    return fasah_authorizations.answer(str(a.get('name') or '').strip(), _member().get('name') or '')
 
 
 def tool_runner_deny(c, a):
