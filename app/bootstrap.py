@@ -267,6 +267,8 @@ from app.driver_quotes import register_worker as register_driver_quotes
 register_driver_quotes(app)
 from app.invoice_collection import register_worker as register_invoice_collection
 register_invoice_collection(app)
+from app.daily_statements import register_worker as register_daily_statements
+register_daily_statements(app)
 from app.prospect_followups import register_worker as register_prospect_followups
 register_prospect_followups(app)
 from app.price_calculator import router as price_calculator_router, init as init_price_calculator
