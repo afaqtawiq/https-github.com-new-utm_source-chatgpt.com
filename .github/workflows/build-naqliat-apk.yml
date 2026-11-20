@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     paths: ['android-naqliat-connector/**']
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,3 +22,14 @@ jobs:
         with:
           name: Afaaq-Naqliat-Connector
           path: android-naqliat-connector/app/build/outputs/apk/debug/app-debug.apk
+      # A plain .apk the phone can install directly (the artifact above is a zip).
+      - name: Publish the APK as a release download
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -o 'versionName = "[^"]*"' android-naqliat-connector/app/build.gradle.kts | cut -d'"' -f2)
+          cp android-naqliat-connector/app/build/outputs/apk/debug/app-debug.apk "Afaq-Naqliat-Connector-$VERSION.apk"
+          gh release delete "naqliat-connector-v$VERSION" --yes --cleanup-tag || true
+          gh release create "naqliat-connector-v$VERSION" "Afaq-Naqliat-Connector-$VERSION.apk" \
+            --title "موصل نقليات $VERSION" --notes "تثبيت مباشر على أندرويد." --target "$GITHUB_SHA"
