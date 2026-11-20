@@ -158,6 +158,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}},
     {'name': 'ask_colleague', 'description': 'Ask a COLLEAGUE in the virtual office to do or check something in THEIR department and get the answer back: فيصل (التخليص/التعرفة/سابر/فسح)، خالد (النقل والسائقين)، سلطان (الحاويات والوكلاء الملاحيين والتتبع)، نورة (المالية والكشوفات)، ريم (المبيعات)، لمى (خدمة العملاء)، دانة (البريد والمراسلات)، هند (الإدارة والموظفين). Use it instead of telling the owner to go to another department. Anything sent outside the company still needs the owner «نفذ CODE».',
      'input_schema': {'type': 'object', 'properties': {'colleague': {'type': 'string'}, 'request': {'type': 'string'}}, 'required': ['colleague', 'request']}},
+    {'name': 'group_requests', 'description': 'WhatsApp GROUP request inbox: action list (default) = open requests from partner/customer groups with owner, arrival time and last action; action ack with id = «استلمت 12» (confirm receipt, stops the backup alert); action close with id = «أقفل الطلب 12» / «تم الرد على 12».',
+     'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'ack', 'close']}, 'id': {'type': 'string'}}}},
     {'name': 'send_email', 'description': 'Prepare an email from the official mailbox. It is sent only after the manager confirms with the code.',
      'input_schema': {'type': 'object', 'properties': {'to': {'type': 'string'}, 'subject': {'type': 'string'}, 'body': {'type': 'string'}}, 'required': ['to', 'subject', 'body']}},
 ]
@@ -869,6 +871,20 @@ def tool_ask_colleague(c, a):
     finally:
         COLLEAGUE_DEPTH.reset(depth)
     return f"رد {virtual_office.DEPARTMENTS[key].get('person')}:\n{reply}"
+
+
+def tool_group_requests(c, a):
+    from app import group_requests
+    action = a.get('action') or 'list'
+    if action == 'list':
+        return group_requests.list_text()
+    m = re.search(r'\d+', str(a.get('id') or ''))
+    if not m:
+        return 'اكتب رقم الطلب، مثل: استلمت 12.'
+    who = _member().get('name') or 'الفريق'
+    if action == 'ack':
+        return f'✅ سُجل استلامك للطلب #{m.group()}.' if group_requests.acknowledge(int(m.group()), who) else f'لا يوجد طلب مفتوح برقم {m.group()}.'
+    return f'✅ أُقفل الطلب #{m.group()}.' if group_requests.close(int(m.group()), who) else f'لا يوجد طلب مفتوح برقم {m.group()}.'
 
 
 def tool_send_email(c, a):

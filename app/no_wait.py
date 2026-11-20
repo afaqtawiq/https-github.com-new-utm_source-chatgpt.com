@@ -453,7 +453,7 @@ async def tick(now=None, deliver=None):
                 VALUES(%s,%s,%s,2,'answered',%s) ON CONFLICT DO NOTHING''', (w['account'], w['cid'], w['since'], now))
     try:
         from app import group_watch
-        if group_watch.enabled():
+        if group_watch.enabled() and os.getenv('GROUP_REQUESTS_ENABLED', '0') != '1':  # the request inbox polls itself
             await run_in_threadpool(group_watch.flush)
             await group_watch.poll(now)
             sent += await group_watch.check(now, deliver, reads_left=max(0, MAX_PROVIDER_READS - reads))

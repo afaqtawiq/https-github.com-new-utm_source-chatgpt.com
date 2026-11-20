@@ -53,7 +53,52 @@ def init():
         c.execute('CREATE INDEX IF NOT EXISTS whatsapp_group_messages_conv ON whatsapp_group_messages(conversation_id, received_at)')
         c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_group_poll(conversation_id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
             polled_at TIMESTAMPTZ)''')
+        # Request inbox (group_requests): which message a reply quotes, and the attached file names.
+        c.execute("ALTER TABLE whatsapp_group_messages ADD COLUMN IF NOT EXISTS quoted_id TEXT")
+        c.execute("ALTER TABLE whatsapp_group_messages ADD COLUMN IF NOT EXISTS files TEXT NOT NULL DEFAULT '[]'")
+        # Intake health: last successful read of the group conversations / last webhook event.
+        c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_group_health(key TEXT PRIMARY KEY, ok_at TIMESTAMPTZ,
+            error TEXT NOT NULL DEFAULT '', error_at TIMESTAMPTZ)''')
     _READY = True
+
+
+def health_mark(key, ok, error='', at=None):
+    """Record a successful (or failed) intake read: 'poll' for the provider read, 'webhook' for pushed events."""
+    init()
+    at = at or utcnow()
+    with db() as c:
+        if ok:
+            c.execute('''INSERT INTO whatsapp_group_health(key,ok_at) VALUES(%s,%s)
+                ON CONFLICT(key) DO UPDATE SET ok_at=EXCLUDED.ok_at''', (key, at))
+        else:
+            c.execute('''INSERT INTO whatsapp_group_health(key,error,error_at) VALUES(%s,%s,%s)
+                ON CONFLICT(key) DO UPDATE SET error=EXCLUDED.error, error_at=EXCLUDED.error_at''', (key, str(error)[:300], at))
+
+
+def quoted_of(m):
+    """The id of the message this one replies to (provider shapes differ)."""
+    for key in ('replyTo', 'reply_to', 'quotedMessageId', 'quotedId', 'replyToMessageId', 'contextMessageId'):
+        v = m.get(key)
+        if isinstance(v, dict):
+            v = v.get('id') or v.get('messageId') or v.get('platformMessageId')
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:255]
+    for key in ('context', 'quoted', 'quotedMessage', 'replyContext'):
+        v = m.get(key)
+        if isinstance(v, dict):
+            inner = v.get('id') or v.get('message_id') or v.get('messageId') or v.get('platformMessageId')
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()[:255]
+    return None
+
+
+def files_of(atts):
+    out = []
+    for a in atts:
+        if isinstance(a, dict):
+            name = a.get('fileName') or a.get('filename') or a.get('name') or a.get('caption') or a.get('type') or 'ملف'
+            out.append(' '.join(str(name).split())[:120])
+    return out
 
 
 def _digits(v):
@@ -81,17 +126,20 @@ def _when(value):
         return utcnow()
 
 
-def store(account, cid, name, mid, direction, sender, sender_name, text, media, at):
+def store(account, cid, name, mid, direction, sender, sender_name, text, media, at, quoted_id=None, files=None):
     """Insert one group message (idempotent). Returns True when it was new."""
+    import json as _json
     init()
     team = direction != 'incoming' or (_digits(sender) in _team())
     imp = direction == 'incoming' and not team and important(text, media)
     with db() as c:
         row = c.execute('''INSERT INTO whatsapp_group_messages(account_id,conversation_id,group_name,message_id,direction,sender,
-            sender_name,text,media,team,important,received_at,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            sender_name,text,media,team,important,received_at,created_at,quoted_id,files)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT(message_id) DO NOTHING RETURNING id''',
                         (account, cid, (name or '')[:200], str(mid)[:255], direction, _digits(sender)[:20], (sender_name or '')[:120],
-                         str(text or '')[:4000], int(media or 0), team, imp, at, utcnow())).fetchone()
+                         str(text or '')[:4000], int(media or 0), team, imp, at, utcnow(), quoted_id,
+                         _json.dumps(list(files or [])[:10], ensure_ascii=False))).fetchone()
         if row and team:
             # Someone from Afaq spoke in the group: earlier open messages there count as answered.
             c.execute('''UPDATE whatsapp_group_messages SET answered_at=%s WHERE conversation_id=%s AND important
@@ -138,10 +186,13 @@ def _store_event(payload):
             text = text.get('body') or ''
         captions = ' '.join(str(a.get('caption') or a.get('fileName') or a.get('filename') or '') for a in atts if isinstance(a, dict))
         account = (payload.get('account') or {}).get('accountId') or (payload.get('account') or {}).get('id') or ''
-        return store(account, conv.get('id') or '', conv.get('name') or conv.get('participantName') or conv.get('title') or '',
-                     msg.get('platformMessageId') or msg.get('id') or payload.get('id'), 'incoming',
-                     sender.get('phoneNumber') or sender.get('id') or '', sender.get('name') or sender.get('displayName') or '',
-                     (str(text) + (' ' + captions if captions else '')).strip(), len(atts), _when(msg.get('createdAt')))
+        ok = store(account, conv.get('id') or '', conv.get('name') or conv.get('participantName') or conv.get('title') or '',
+                   msg.get('platformMessageId') or msg.get('id') or payload.get('id'), 'incoming',
+                   sender.get('phoneNumber') or sender.get('id') or '', sender.get('name') or sender.get('displayName') or '',
+                   (str(text) + (' ' + captions if captions else '')).strip(), len(atts), _when(msg.get('createdAt')),
+                   quoted_of(msg), files_of(atts))
+        health_mark('webhook', True)
+        return ok
     except Exception as exc:
         print('GROUP_WATCH_CAPTURE', type(exc).__name__, str(exc)[:120], flush=True)
         return False
@@ -157,7 +208,8 @@ def _msg_fields(m):
     who = (sender.get('phoneNumber') or sender.get('id') or m.get('senderPhone') or m.get('from') or m.get('participantId') or '')
     name = sender.get('name') or sender.get('displayName') or m.get('senderName') or ''
     return (m.get('platformMessageId') or m.get('id'), 'incoming' if m.get('direction') == 'incoming' else 'outgoing',
-            who, name, (str(text) + (' ' + captions if captions else '')).strip(), len(atts), _when(m.get('createdAt')))
+            who, name, (str(text) + (' ' + captions if captions else '')).strip(), len(atts), _when(m.get('createdAt')),
+            quoted_of(m), files_of(atts))
 
 
 async def poll(now=None):
@@ -171,6 +223,7 @@ async def poll(now=None):
         found = await statement_groups.groups()
     except Exception as exc:
         print('GROUP_WATCH_LIST', type(exc).__name__, str(exc)[:120], flush=True)
+        await run_in_threadpool(health_mark, 'poll', False, type(exc).__name__ + ': ' + str(exc)[:200])
         return 0
 
     def plan():
@@ -180,8 +233,26 @@ async def poll(now=None):
                     ON CONFLICT(conversation_id) DO UPDATE SET name=EXCLUDED.name''', (cid, name or ''))
             ids = [cid for cid, _ in found]
             return c.execute('''SELECT * FROM whatsapp_group_poll WHERE conversation_id = ANY(%s)
-                ORDER BY polled_at NULLS FIRST LIMIT %s''', (ids, POLL_GROUPS)).fetchall() if ids else []
-    stored = 0
+                ORDER BY polled_at NULLS FIRST LIMIT %s''', (ids, poll_groups())).fetchall() if ids else []
+    stored, failed = 0, 0
+    if os.getenv('GROUP_WATCH_DEBUG_KEYS') == '1':
+        print('GROUP_WATCH_GROUPS', len(found), [n[:30] for _, n in found][:12], flush=True)
+        if not found and not getattr(poll, '_shape_logged', False):
+            poll._shape_logged = True
+            try:
+                async with z.client() as c:
+                    data = await z.read(c, '/inbox/conversations', {'accountId': z.account_id(), 'platform': 'whatsapp', 'limit': 100})
+                rows = [r for r in (data.get('data') or []) if isinstance(r, dict)]
+                keys = sorted({k for r in rows for k in r.keys()})
+                kinds = {}
+                for r in rows:
+                    pid = str(r.get('participantId') or '')
+                    kind = (str(r.get('isGroup')), str(r.get('type') or r.get('conversationType') or r.get('chatType') or ''),
+                            'g.us' if pid.endswith('@g.us') else ('long-id' if len(re.sub(r'\D', '', pid)) > 15 else 'phone'))
+                    kinds[kind] = kinds.get(kind, 0) + 1
+                print('GROUP_WATCH_SHAPE', len(rows), keys[:40], kinds, (data.get('pagination') or {}).get('hasMore'), flush=True)
+            except Exception as exc:
+                print('GROUP_WATCH_SHAPE_ERR', type(exc).__name__, str(exc)[:160], flush=True)
     for g in await run_in_threadpool(plan):
         try:
             async with z.client() as c:
@@ -189,15 +260,28 @@ async def poll(now=None):
                                     {'accountId': z.account_id(), 'sortOrder': 'desc', 'limit': 25})
         except Exception as exc:
             print('GROUP_WATCH_READ', type(exc).__name__, str(exc)[:120], flush=True)
+            failed += 1
+            await run_in_threadpool(health_mark, 'poll', False, type(exc).__name__ + ': ' + str(exc)[:200])
             continue
         msgs = [m for m in (data.get('messages') or []) if isinstance(m, dict)] if isinstance(data, dict) else []
+        if msgs and os.getenv('GROUP_WATCH_DEBUG_KEYS') == '1':
+            print('GROUP_WATCH_KEYS', sorted(msgs[0].keys())[:40], flush=True)
         for m in sorted(msgs, key=lambda m: str(m.get('createdAt') or '')):
-            mid, direction, who, name, text, media, at = _msg_fields(m)
+            mid, direction, who, name, text, media, at, quoted, files = _msg_fields(m)
             if mid and now - at < dt.timedelta(days=2):
                 stored += await run_in_threadpool(store, z.account_id(), g['conversation_id'], g['name'], mid, direction,
-                                                  who, name, text, media, at)
+                                                  who, name, text, media, at, quoted, files)
         await run_in_threadpool(lambda: _touch(g['conversation_id'], now))
+    if not failed:
+        await run_in_threadpool(health_mark, 'poll', True, '', now)
     return stored
+
+
+def poll_groups():
+    try:
+        return max(1, min(20, int(os.getenv('GROUP_WATCH_POLL_GROUPS', str(POLL_GROUPS)))))
+    except ValueError:
+        return POLL_GROUPS
 
 
 def _touch(cid, now):
@@ -239,7 +323,10 @@ def alert_text(m, burst, now):
 
 
 async def check(now=None, deliver=None, reads_left=3):
-    """Alert on important group messages nobody answered. Returns the texts delivered."""
+    """Alert on important group messages nobody answered. Returns the texts delivered.
+    When the request inbox (group_requests) is on, it owns the alerts and this returns nothing."""
+    if os.getenv('GROUP_REQUESTS_ENABLED', '0') == '1':
+        return []
     from starlette.concurrency import run_in_threadpool
     from app.no_wait import answered_after
     if deliver is None:
