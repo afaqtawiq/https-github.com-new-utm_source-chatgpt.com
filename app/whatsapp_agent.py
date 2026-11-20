@@ -27,6 +27,9 @@ from app import whatsapp_operator_context as operator_context_reader
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+CUSTOMER_STATUS_REVIEW_REPLY = ('لحماية بيانات الشحنات، يلزم التحقق قبل مشاركة تفاصيل الحالة. '
+                                'فضلاً تواصل مع فريق عمليات آفاق طويق للمراجعة.')
+
 
 def identity(payload):
     if not isinstance(payload, dict) or payload.get('event') != 'message.received':
@@ -206,43 +209,17 @@ async def fetch_document(job):
     return content
 
 
-def customer_declaration_status(sender):
-    """Latest recorded stage of this customer's open declarations (matched by WhatsApp number), or None."""
-    digits = re.sub(r'\D', '', str(sender or ''))[-9:]
-    if len(digits) < 9:
-        return None
-    try:
-        from app.declarations import STAGE_LABELS
-        from app.storage import rows
-        found = rows('''SELECT d.id,d.declaration_number,d.bill_number,d.port,
-            (SELECT stage FROM customs_declaration_events e WHERE e.declaration_id=d.id ORDER BY e.id DESC LIMIT 1) stage
-            FROM customs_declarations d WHERE right(regexp_replace(d.customer_phone,'\\D','','g'),9)=? ORDER BY d.id DESC LIMIT 5''', (digits,))
-    except Exception:
-        return None
-    found = [r for r in found if r.get('stage') not in ('closed',)]
-    try:
-        from app.fasah_tracking import customer_lines
-        live = customer_lines(sender)
-    except Exception:
-        live = []
-    if not found and not live:
-        return None
-    lines = ['هذه آخر حالة مسجلة لشحناتك لدينا:']
-    for r in found:
-        ref = r.get('declaration_number') or r.get('bill_number') or ('ملف ' + str(r['id']))
-        lines.append('• ' + str(ref) + (' — ' + r['port'] if r.get('port') else '') + ': ' + STAGE_LABELS.get(r.get('stage'), 'قيد المتابعة'))
-    if live:
-        lines.append('الحالة في منصة فسح:' if found else 'الحالة الحالية في منصة فسح:')
-        lines.extend(live)
-    lines.append('لأي تفاصيل إضافية تواصل مع فريق العمليات على 0507665873.')
-    return '\n'.join(lines)
-
-
 async def processing(job):
     jid, lease, data = job['id'], job['lease_token'], job['payload']
     settings = await run_in_threadpool(store.get_settings,job['account_id'])
     if job['account_id'] != z.account_id() or not enabled(settings,job['sender']):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
+        return
+    if not data.get('question_allowed') and data.get('question_reason') == 'live_status_unavailable':
+        # A WhatsApp sender or importer name is not a shipment-specific authorization.
+        # Do not look up shipments or forward documents or chat history on this path.
+        await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=CUSTOMER_STATUS_REVIEW_REPLY,
+            diagnostics={'model_attempted':False,'model_success':False,'model_reason':'status_requires_operations_review'})
         return
     if not data.get('attachments') and data.get('question_allowed') and data.get('question') and 'AFT' in str(data['question']).upper():
         def driver_accept():
@@ -426,12 +403,6 @@ async def processing(job):
             document_status = 'ok' if text else 'none'
         await run_in_threadpool(store.checkpoint_document,jid,lease,text=text,sha256=digest,status=document_status,context_source_job_id=source_id,review_id=review_id,
             diagnostics={'document_context_reason':'prior_unread_attachment','unread_source_job_id':unread['id']} if unread and document_status in ('unavailable','quarantined') else {})
-    if not data.get('question_allowed') and data.get('question_reason') == 'live_status_unavailable':
-        status_reply = await run_in_threadpool(customer_declaration_status, job['sender'])
-        if status_reply:
-            await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=status_reply,
-                diagnostics={'model_attempted':False,'model_success':False,'model_reason':'declaration_status'})
-            return
     if not data.get('question_allowed'):
         if data.get('question_reason') == 'broker_execution_request':
             reply = privacy.BROKER_EXECUTION_REPLY
@@ -507,6 +478,12 @@ async def processing(job):
 
 
 async def dispatch(job):
+    # Older workers tagged phone/name-derived replies when preparing the outbox.
+    # A newly claimed tagged reply is blocked before any provider request; do not retry it.
+    if (job.get('diagnostics') or {}).get('model_reason') == 'declaration_status':
+        await run_in_threadpool(store.finish_send,job['id'],job['send_token'],status='blocked',
+                                diagnostics={'reason':'legacy_declaration_status_not_authorized'})
+        return
     async def guard():
         if (z.account_id() != job['account_id'] or not await run_in_threadpool(store.send_authorized,job['id'],job['send_token'])):
             raise z.WhatsAppBlocked('Reply scope changed')
