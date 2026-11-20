@@ -133,10 +133,14 @@ def pending_today(limit):
 
 
 def contacted_today():
-    from app.daily_prospects import today
+    """Companies the autopilot contacted TODAY (Riyadh), whatever list day they came from — the cap is per sending day
+    (20 Nov 2026: earlier-day companies waiting for the template were not counted and 40 went out in one day)."""
+    import datetime as _dt
+    start = _dt.datetime.combine(_dt.datetime.now(_dt.timezone(_dt.timedelta(hours=3))).date(), _dt.time(0),
+                                 _dt.timezone(_dt.timedelta(hours=3)))
     with db() as c:
-        return c.execute('''SELECT COUNT(*) n FROM daily_prospects WHERE batch_date=%s AND (outcome_note LIKE 'autopilot: whatsapp%%' OR outcome_note LIKE 'autopilot: email%%') ''',
-                         (today(),)).fetchone()['n']
+        return c.execute('''SELECT COUNT(*) n FROM daily_prospects WHERE updated_at >= %s
+            AND (outcome_note LIKE 'autopilot: whatsapp%%' OR outcome_note LIKE 'autopilot: email%%') ''', (start,)).fetchone()['n']
 
 
 async def run():
