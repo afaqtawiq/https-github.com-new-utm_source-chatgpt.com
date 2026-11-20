@@ -4,8 +4,6 @@ The owner can add more items through Faisal («سجّل مادة مستثناة 
 """
 import re
 
-from app.storage import db, utcnow
-
 DEFAULTS = (
     ('الفحم النباتي', r'فحم\s*(ال)?(نباتي|خشبي|شجر|شيشه|شيشة)|charcoal', ''),
     ('سلندر (أسطوانة) غاز الطهي', r'(سلندر|سلندرات|اسطوان[ةه]|أسطوان[ةه]|اسطوانات|أسطوانات|جر[ةه])\s*(ال)?غاز|gas\s*cylinder|lpg\s*cylinder', ''),
@@ -21,6 +19,7 @@ def init():
     global _READY
     if _READY:
         return
+    from app.storage import db
     with db() as c:
         c.execute('''CREATE TABLE IF NOT EXISTS saber_exemptions(id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE,
             note TEXT, added_by TEXT, created_at TIMESTAMPTZ NOT NULL)''')
@@ -34,6 +33,7 @@ def _norm(text):
 
 def _added():
     try:
+        from app.storage import db
         init()
         with db() as c:
             return c.execute('SELECT name,note FROM saber_exemptions ORDER BY id').fetchall()
@@ -63,6 +63,7 @@ def add(name, note='', actor=''):
     name = ' '.join(str(name or '').split())[:120]
     if len(name) < 3:
         return 'اكتب اسم المادة.'
+    from app.storage import db, utcnow
     init()
     with db() as c:
         c.execute('INSERT INTO saber_exemptions(name,note,added_by,created_at) VALUES(%s,%s,%s,%s) ON CONFLICT(name) DO UPDATE SET note=EXCLUDED.note',
