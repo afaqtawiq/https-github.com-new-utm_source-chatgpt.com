@@ -26,7 +26,7 @@ router = APIRouter()
 RIYADH = dt.timezone(dt.timedelta(hours=3))
 _READY = False
 
-COMMON = ('search', 'list_recent', 'report', 'ask_document', 'ask_colleague')
+COMMON = ('search', 'list_recent', 'report', 'ask_document', 'ask_colleague', 'group_requests')
 DEPARTMENTS = {
     'clearance': {
         'person': 'فيصل', 'model': 'suit_male',
@@ -78,7 +78,7 @@ DEPARTMENTS = {
         'name': 'خدمة العملاء', 'manager': 'مدير خدمة العملاء', 'icon': '🎧',
         'aliases': ('خدمة العملاء', 'العملاء', 'الدعم', 'الشكاوى'),
         'role': 'تتابع محادثات العملاء والقروبات (رسائل مهمة بلا رد تنبه عليها بعد 30 دقيقة): الوعود والانتظار والعملاء المنزعجين، وتعليم الوكيل الإجابات الصحيحة، وحالة شحنات العملاء.',
-        'tools': ('customer_waiting', 'teach_answer', 'learned_answers', 'shipment_status', 'track_shipment', 'send_whatsapp')},
+        'tools': ('customer_waiting', 'group_requests', 'teach_answer', 'learned_answers', 'shipment_status', 'track_shipment', 'send_whatsapp')},
     'email': {
         'person': 'دانة', 'model': 'suit_female',
         'name': 'البريد والمراسلات', 'manager': 'مديرة البريد', 'icon': '📧',
@@ -427,6 +427,34 @@ def office(request: Request):
             'و«تقرير الأقسام» يرسل لك أرقام كل الأقسام. أي إرسال خارج الشركة يبقى بتأكيد «نفذ» على واتساب.</p>'
             f'<div class="grid">{cards}</div>')
     return _page('المكتب الافتراضي', body)
+
+
+@router.get('/office/requests', response_class=HTMLResponse)
+def requests_page(request: Request):
+    """Group request inbox: one card per request (owner, backup, arrival, last action, alert delivery states)."""
+    from app import group_requests
+    session = _admin(request)
+    csrf = html.escape(session.get('csrf') or '')
+    return HTMLResponse(group_requests.page_html(group_requests.cards(), group_requests.health(),
+                                                 lambda rid, act: f'/office/requests/{rid}/{act}',
+                                                 f"<input type=hidden name=csrf value='{csrf}'>"))
+
+
+@router.post('/office/requests/{rid}/{action}')
+async def requests_action(rid: int, action: str, request: Request):
+    from app import group_requests
+    from app.social_publishing import csrf
+    session = _admin(request)
+    data = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
+    csrf(session, data)
+    who = session.get('name') or session.get('email') or 'المدير'
+    if action == 'ack':
+        group_requests.acknowledge(rid, who)
+    elif action == 'close':
+        group_requests.close(rid, who)
+    else:
+        raise HTTPException(404)
+    return RedirectResponse('/office/requests', 303)
 
 
 @router.get('/office/{key}', response_class=HTMLResponse)

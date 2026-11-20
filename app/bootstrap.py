@@ -279,6 +279,8 @@ app.include_router(precheck_router)
 from app.agent_learning import register_worker as register_agent_learning
 register_agent_learning(app)
 from app.no_wait import register_worker as register_no_wait
+from app.group_requests import register_worker as register_group_requests
+register_group_requests(app)
 register_no_wait(app)
 from app.shipment_tracking import register_worker as register_shipment_tracking
 register_shipment_tracking(app)
