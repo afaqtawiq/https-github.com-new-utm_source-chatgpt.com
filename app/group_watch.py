@@ -237,6 +237,22 @@ async def poll(now=None):
     stored, failed = 0, 0
     if os.getenv('GROUP_WATCH_DEBUG_KEYS') == '1':
         print('GROUP_WATCH_GROUPS', len(found), [n[:30] for _, n in found][:12], flush=True)
+        if not found and not getattr(poll, '_shape_logged', False):
+            poll._shape_logged = True
+            try:
+                async with z.client() as c:
+                    data = await z.read(c, '/inbox/conversations', {'accountId': z.account_id(), 'platform': 'whatsapp', 'limit': 100})
+                rows = [r for r in (data.get('data') or []) if isinstance(r, dict)]
+                keys = sorted({k for r in rows for k in r.keys()})
+                kinds = {}
+                for r in rows:
+                    pid = str(r.get('participantId') or '')
+                    kind = (str(r.get('isGroup')), str(r.get('type') or r.get('conversationType') or r.get('chatType') or ''),
+                            'g.us' if pid.endswith('@g.us') else ('long-id' if len(re.sub(r'\D', '', pid)) > 15 else 'phone'))
+                    kinds[kind] = kinds.get(kind, 0) + 1
+                print('GROUP_WATCH_SHAPE', len(rows), keys[:40], kinds, (data.get('pagination') or {}).get('hasMore'), flush=True)
+            except Exception as exc:
+                print('GROUP_WATCH_SHAPE_ERR', type(exc).__name__, str(exc)[:160], flush=True)
     for g in await run_in_threadpool(plan):
         try:
             async with z.client() as c:
