@@ -129,7 +129,12 @@ def _saber_line(saber):
     return lines
 
 
-def render(product, tariff, saber, found):
+def saber_office_line(office):
+    from app.saber_exemptions import NOTE
+    return f"«{office['name']}» — {NOTE}" + (f" {office['note']}" if office.get('note') else '')
+
+
+def render(product, tariff, saber, found, office=None):
     from app.tariff_lookup import format_code
     out = [f'🛃 متطلبات استيراد: {product}']
     f = found or {}
@@ -142,8 +147,11 @@ def render(product, tariff, saber, found):
     for t in tariff[:3]:
         out.append(f"• {format_code(t['code'])} {t.get('desc_ar') or ''} — رسم {t.get('duty') or 'غير مذكور'}")
     out.append('\n✅ سابر:')
-    out += ['• ' + x for x in _saber_line(saber)] or ['• لم يُحدد بند كامل للبحث في سابر']
-    if f.get('saber'):
+    if office:
+        out.append('• ' + saber_office_line(office))
+    else:
+        out += ['• ' + x for x in _saber_line(saber)] or ['• لم يُحدد بند كامل للبحث في سابر']
+    if f.get('saber') and not office:
         out.append('• ' + f['saber'])
     if f.get('authorities'):
         out.append('\n🏛️ الجهات المختصة:')
@@ -172,14 +180,17 @@ async def requirements(product, product_en='', hs='', origin='', use=''):
     hs_digits = re.sub(r'\D', '', str(hs or ''))
     if len(hs_digits) == 12 and hs_digits not in codes:
         codes.insert(0, hs_digits)
-    saber = await saber_for(codes)
+    from app import saber_exemptions
+    office = saber_exemptions.match(product + ' ' + str(product_en or ''))
+    saber = {} if office else await saber_for(codes)
     found = None
     if enabled():
         try:
             found = await research({'product': product + (f' / {product_en}' if product_en else ''), 'hs': hs or 'not given',
                                     'origin': origin or 'not given', 'use': use or 'not given',
                                     'tariff': json.dumps(tariff[:3], ensure_ascii=False, default=str),
-                                    'saber': json.dumps(saber, ensure_ascii=False, default=str)[:3000]})
+                                    'saber': ('OFFICE-APPROVED: cleared WITHOUT SABER (owner decision) — do not contradict; '
+                                              'still list the other authorities.' if office else json.dumps(saber, ensure_ascii=False, default=str)[:3000])})
         except Exception as exc:
             print('IMPORT_REQ_RESEARCH', type(exc).__name__, str(exc)[:160], flush=True)
-    return render(product, tariff, saber, found)
+    return render(product, tariff, saber, found, office)

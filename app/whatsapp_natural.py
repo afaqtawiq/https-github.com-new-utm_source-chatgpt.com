@@ -313,6 +313,11 @@ async def reply(question, history=()):
     if privacy.identity_requested(str(question)):
         return None
     saber_needed = needs_saber_search(question)
+    if saber_needed:
+        from app import saber_exemptions
+        office = saber_exemptions.match(question)
+        if office:
+            return saber_exemptions.reply(office)
     mixed_tariff = saber_needed and needs_tariff_search(question)
     lookup = {'codes': [], 'query': ''}  # filled by the SABER tool call; reused for the separate tariff lookup
     # Keep certificate evidence deterministic while answering an explicit fee

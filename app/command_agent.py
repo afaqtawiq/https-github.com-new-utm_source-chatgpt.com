@@ -44,6 +44,8 @@ TOOLS = [
         '(pass the product name, HS code if known, origin/supplier and use from the file).'),
      'input_schema': {'type': 'object', 'properties': {'product': {'type': 'string'}, 'product_en': {'type': 'string'},
         'hs_code': {'type': 'string'}, 'origin': {'type': 'string'}, 'use': {'type': 'string'}}, 'required': ['product']}},
+    {'name': 'saber_exemptions', 'description': 'Office-approved goods cleared WITHOUT SABER (owner decision). Without name: list them. With name (manager only): add a new item, optional note. e.g. «وش المواد المستثناة من سابر» «سجّل مادة مستثناة من سابر: ...».',
+     'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'note': {'type': 'string'}}}},
     {'name': 'customs_question', 'description': 'Answer a question about customs procedures, documents or requirements from the approved knowledge.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'add_driver', 'description': 'Register a driver for load offers.',
@@ -264,6 +266,15 @@ def tool_import_requirements(c, a):
     from app import import_requirements, transport_desk
     return transport_desk.run_async(lambda: import_requirements.requirements(
         a.get('product'), a.get('product_en', ''), a.get('hs_code', ''), a.get('origin', ''), a.get('use', '')), timeout=240)
+
+
+def tool_saber_exemptions(c, a):
+    from app import saber_exemptions
+    if not str(a.get('name') or '').strip():
+        return saber_exemptions.listing()
+    if not _member().get('manager'):
+        return 'إضافة مادة مستثناة للمدير فقط.'
+    return saber_exemptions.add(a.get('name'), a.get('note', ''), _member().get('name') or '')
 
 
 def tool_customs_question(c, a):
