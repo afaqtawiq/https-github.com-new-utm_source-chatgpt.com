@@ -70,6 +70,11 @@ TOOLS = [
         'required': ['vendor', 'amount', 'description']}},
     {'name': 'expenses_list', 'description': 'Expenses recorded in the last N days (default 30), with draft/posted status.',
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}},
+    {'name': 'collect_invoice', 'description': 'Follow up collection of an ISSUED invoice on WhatsApp with the person responsible for paying it: registers the invoice (number, customer, amount incl. VAT, date, payer phone and name) and prepares the reminder message (approved template text) with a «نفذ» code. Also use it for the next reminder of an already registered invoice (only invoice_no needed). Read the invoice file with ask_document first if attached.',
+     'input_schema': {'type': 'object', 'properties': {'invoice_no': {'type': 'string'}, 'customer': {'type': 'string'}, 'amount': {'type': 'string'},
+        'invoice_date': {'type': 'string'}, 'phone': {'type': 'string'}, 'contact_name': {'type': 'string'}, 'notes': {'type': 'string'}}, 'required': ['invoice_no']}},
+    {'name': 'collections_followup', 'description': 'Invoices under collection follow-up (amount, age, reminders sent), or mark one as paid with paid_invoice.',
+     'input_schema': {'type': 'object', 'properties': {'paid_invoice': {'type': 'string'}}}},
     {'name': 'record_payment', 'description': 'Record money RECEIVED from a customer as a finance draft receipt (owner posts it later). e.g. «استلمنا 50000 من الياسمين حوالة 123». date YYYY-MM-DD optional; ref = transfer/cheque reference.',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'amount': {'type': 'string'}, 'date': {'type': 'string'}, 'ref': {'type': 'string'}}, 'required': ['name', 'amount']}},
     {'name': 'load_offer', 'description': 'ONE-APPROVAL load flow (owner decision 20 Nov 2026): from a load (Naqliat card / owner chat) prepare BOTH the conversation with the load owner and the offer to all drivers; one «نفذ CODE» does both. driver price = owner price minus Afaq commission (default 2.5% of the owner price, rounded down to 10 SAR; commission_percent overrides for this load only). Use this first whenever a load with an owner price arrives; never ask for the commission.',
@@ -401,6 +406,29 @@ def tool_expenses_list(c, a):
     except (TypeError, ValueError):
         days = 30
     return expenses_desk.recent_text(days)
+
+
+def tool_collect_invoice(c, a):
+    from app import invoice_collection as ic
+    row = ic.get(a.get('invoice_no'))
+    if a.get('phone') or a.get('amount') or not row:
+        try:
+            row = ic.add(a.get('invoice_no'), a.get('customer') or (row or {}).get('customer'), a.get('amount') or (row or {}).get('amount'),
+                         a.get('phone') or (row or {}).get('phone'), a.get('contact_name', ''), a.get('invoice_date'), a.get('notes', ''))
+        except ValueError as exc:
+            return str(exc)
+    if row['status'] != 'open':
+        return f"الفاتورة {row['invoice_no']} مغلقة كمسددة."
+    token = _pending(c, {'tool': 'collection_reminder', 'invoice_no': row['invoice_no']})
+    return (f"جاهز تذكير تحصيل الفاتورة {row['invoice_no']} — {row['customer']} ({float(row['amount']):,.2f} ريال) "
+            f"إلى {row.get('contact_name') or 'المسؤول عن السداد'} (+{row['phone']}):\n«{ic.message(row)}»\nللإرسال اكتب: نفذ {token}")
+
+
+def tool_collections_followup(c, a):
+    from app import invoice_collection as ic
+    if a.get('paid_invoice'):
+        return ic.mark_paid(a.get('paid_invoice'))
+    return ic.open_text()
 
 
 def tool_record_payment(c, a):
@@ -1100,6 +1128,9 @@ def _execute_action(c, action, member):
     if action.get('tool') == 'record_bank_payments':
         from app import bank_reconcile
         return bank_reconcile.record(int(action['batch']), 'مطابقة كشف البنك — ' + (member.get('name') or 'المدير'))
+    if action.get('tool') == 'collection_reminder':
+        from app import invoice_collection
+        return invoice_collection.send(action['invoice_no'])
     if action.get('tool') == 'customer_care_send':
         from app import customer_care
         return customer_care.start_send(action['batch'])
