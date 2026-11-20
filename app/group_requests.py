@@ -280,6 +280,10 @@ def _set(aid, **f):
     f['updated_at'] = utcnow()
     with db() as c:
         c.execute('UPDATE group_request_alerts SET ' + ', '.join(k + '=%s' for k in f) + ' WHERE id=%s', (*f.values(), aid))
+        row = c.execute('SELECT request_id, channel, attempt, state, attempted_at, sent_at, delivered_at, error FROM group_request_alerts WHERE id=%s',
+                        (aid,)).fetchone()
+    if row:
+        print('GROUP_REQUESTS_ALERT_STATE', {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in row.items()}, flush=True)
 
 
 async def send_whatsapp(phone, text):

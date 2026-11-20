@@ -15,6 +15,33 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from app import group_requests
 
 app = FastAPI(title='Afaq group requests — staging')
+
+
+@app.on_event('startup')
+def seed_alert_test():
+    """STAGING_TEST_REQUEST=<label>: one clearly-labelled test request, 16 minutes old, so the real alert chain runs
+    (WhatsApp to the backup → delivery receipt → e-mail fallback). Created once per label; nothing goes to any group."""
+    import datetime as dt
+    import json
+    label = os.getenv('STAGING_TEST_REQUEST', '').strip()[:40]
+    if not label:
+        return
+    from app.storage import db, utcnow
+    group_requests.init()
+    name = 'اختبار التنبيه — ' + label
+    now = utcnow()
+    with db() as c:
+        if c.execute('SELECT 1 FROM group_requests WHERE group_name=%s', (name,)).fetchone():
+            return
+        rid = c.execute('''INSERT INTO group_requests(account_id,conversation_id,group_name,sender,sender_name,text,files,topic,
+            owner_key,received_at,last_message_at,last_action,last_action_at,created_at)
+            VALUES('staging','staging-test',%s,'','نسخة الاختبار',%s,%s,'clearance','clearance',%s,%s,%s,%s,%s) RETURNING id''',
+                        (name, 'طلب اختبار (ليس من عميل): فحص البند والموافقات لمنتج تجريبي. هذا تنبيه تجريبي من نسخة الاختبار.',
+                         json.dumps(['ملف اختبار 1.pdf', 'ملف اختبار 2.pdf'], ensure_ascii=False), now - dt.timedelta(minutes=16),
+                         now - dt.timedelta(minutes=16), 'طلب اختبار أُنشئ في نسخة الاختبار', now, now)).fetchone()['id']
+    print('STAGING_TEST_REQUEST_CREATED', rid, label, flush=True)
+
+
 group_requests.register_worker(app)
 
 
