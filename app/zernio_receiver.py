@@ -127,6 +127,10 @@ async def receive(request: Request):
         return JSONResponse({"error":"Missing event or conversation identifiers"}, status_code=400)
     ensure_tables()
     ensure_intake_tables()
+    if (p.get("conversation") or {}).get("isGroup") or (p.get("message") or {}).get("isGroup"):
+        # Groups are watched (important messages nobody answered → owner alert); the agent never replies there.
+        from app import group_watch
+        group_watch.capture(p)
     takeover = await takeover_inbound(p) if takeover_inbound is not None else None
     if takeover and takeover.get('held'):
         return {'ok': True, 'held_for_operator': True, 'automatic_retry_of_send': False}
