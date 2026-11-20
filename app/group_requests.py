@@ -496,10 +496,14 @@ async def tick(now=None):
         return {}
     now = now or utcnow()
     await run_in_threadpool(group_watch.flush)
-    await group_watch.poll(now)
+    read = await group_watch.poll(now)
     built = await run_in_threadpool(build, now)
     sent = await alerts(now)
     await run_in_threadpool(health_alert, now)
+    if os.getenv('GROUP_WATCH_DEBUG_KEYS') == '1' or sent or any(built.values()):
+        h = await run_in_threadpool(health, now)
+        print('GROUP_REQUESTS_TICK_OK', {'new_messages': read, 'built': built, 'alerts': sent,
+                                         'last_sync': h['last_ok'].isoformat() if h['last_ok'] else None}, flush=True)
     return {'built': built, 'alerts': sent}
 
 

@@ -235,6 +235,8 @@ async def poll(now=None):
             return c.execute('''SELECT * FROM whatsapp_group_poll WHERE conversation_id = ANY(%s)
                 ORDER BY polled_at NULLS FIRST LIMIT %s''', (ids, poll_groups())).fetchall() if ids else []
     stored, failed = 0, 0
+    if os.getenv('GROUP_WATCH_DEBUG_KEYS') == '1':
+        print('GROUP_WATCH_GROUPS', len(found), [n[:30] for _, n in found][:12], flush=True)
     for g in await run_in_threadpool(plan):
         try:
             async with z.client() as c:
