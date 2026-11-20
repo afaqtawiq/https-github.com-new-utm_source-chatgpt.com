@@ -318,6 +318,16 @@ def run():
     assert st.scac_for('CMA CGM SAUDI') == 'CMDU' and st.scac_for('Mediterranean') is None
 
 
+def check_briefing():
+    """Morning briefing shows every department, including transport, containers/shipping and e-mail."""
+    from app import owner_briefing
+    text = owner_briefing.briefing_text()
+    for part in ('🚚 النقل (خالد)', '🚢 الحاويات والشحن (سلطان)', 'طلبات تمديد جاهزة', 'متوقع وصولها خلال 7 أيام', '📧 البريد (دانة)'):
+        assert part in text, (part, text)
+
+
+
+
 def main():
     import psycopg
     from psycopg import sql
@@ -335,6 +345,7 @@ def main():
                'ADMIN_PASSWORD': secrets.token_urlsafe(32), 'BROWSER_COOKIE_SECURE': '0', 'SHIPSGO_API_TOKEN': ''}
         with patch.dict(os.environ, env):
             run()
+            check_briefing()
     finally:
         with psycopg.connect(url, autocommit=True) as c:
             c.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))

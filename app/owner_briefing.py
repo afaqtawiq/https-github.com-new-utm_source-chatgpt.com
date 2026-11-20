@@ -145,12 +145,33 @@ def briefing_text(today=None):
             'broken': q('SELECT COUNT(*) FROM owner_health WHERE NOT ok'),
             'receivable': q('''SELECT COALESCE(SUM(e.signed_minor),0) FROM finance_entries e JOIN finance_documents d ON d.id=e.document_id
                              WHERE e.side='receivable' AND d.status IN ('posted','reversed') AND d.currency='SAR' '''),
+            # Transport, containers & shipping, e-mail (owner direction 20 Nov 2026: every department in one morning view).
+            'loads': q('SELECT COUNT(*) FROM naqliat_loads WHERE created_at::date=%s', (y,)),
+            'offers': q('SELECT COUNT(*) FROM load_broadcasts WHERE created_at::date=%s', (y,)),
+            'offer_sent': q('''SELECT COUNT(*) FROM load_broadcast_recipients r JOIN load_broadcasts b ON b.id=r.broadcast_id
+                             WHERE b.created_at::date=%s AND r.status='sent' ''', (y,)),
+            'overdue': q("SELECT COUNT(*) FROM container_returns WHERE status IN ('open','delivered','driver_reported') AND free_until < %s", (today,)),
+            'ending': q('''SELECT COUNT(*) FROM container_returns WHERE status IN ('open','delivered','driver_reported')
+                         AND free_until BETWEEN %s AND %s''', (today, today + dt.timedelta(days=2))),
+            'ext_drafts': q("SELECT COUNT(*) FROM free_time_requests WHERE status='draft'"),
+            'arriving': q('''SELECT COUNT(*) FROM shipment_tracks WHERE NOT arrived AND eta::date BETWEEN %s AND %s''',
+                          (today, today + dt.timedelta(days=7))),
+            'mail_wait': q("SELECT COUNT(*) FROM mail_agent_items WHERE action IN ('draft','preview','send_failed')"),
         }
     fmt = lambda v: '—' if v is None else str(v)
     lines = ['☀️ صباح الخير — ملخص آفاق طويق ليوم ' + y.isoformat(), '',
              '📋 العمليات',
              '• بيانات سُجلت في الفوترة: ' + fmt(data['billing']),
              '• بيانات مفتوحة: ' + fmt(data['open_decl']) + ' — منها بانتظار سداد الرسوم: ' + fmt(data['duties']),
+             '', '🚚 النقل (خالد)',
+             '• حمولات جديدة من نقليات: ' + fmt(data['loads']) + ' — عروض للسائقين: ' + fmt(data['offers'])
+             + ' (وصلت ' + fmt(data['offer_sent']) + ' سائق)',
+             '', '🚢 الحاويات والشحن (سلطان)',
+             '• حاويات متأخرة عن المدة المجانية: ' + fmt(data['overdue']) + ' — تنتهي خلال يومين: ' + fmt(data['ending']),
+             '• طلبات تمديد جاهزة بانتظار «نفذ»: ' + fmt(data['ext_drafts']),
+             '• شحنات متوقع وصولها خلال 7 أيام: ' + fmt(data['arriving']),
+             '', '📧 البريد (دانة)',
+             '• رسائل تنتظر رد: ' + fmt(data['mail_wait']),
              '', '💰 المالية',
              '• قيود بانتظار اعتمادك وترحيلك: ' + fmt(data['drafts']) + ' (صفحة المالية)',
              '• إجمالي المستحق لكم: ' + ('—' if data['receivable'] is None else format(data['receivable'] / 100, ',.2f')) + ' ريال (صفحة التحصيل)',
