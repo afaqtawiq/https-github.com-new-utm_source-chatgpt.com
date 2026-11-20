@@ -171,7 +171,15 @@ def media_urls(day):
     return prefix + '.jpg', prefix + '.mp4'
 
 
-@router.get('/media/daily-poster-en/{name}')
+@router.head('/media/daily-poster/{name}')
+def arabic_media_head(name: str):
+    """TikTok / YouTube / Instagram probe the Arabic daily video with HEAD before pulling it; the Arabic module stays
+    unchanged, so the HEAD route for its files lives here."""
+    from app.daily_poster import public_media as arabic
+    return arabic(name)
+
+
+@router.api_route('/media/daily-poster-en/{name}', methods=['GET', 'HEAD'])  # platforms probe the file with HEAD before pulling it
 def public_media(name: str):
     stem, _, ext = name.partition('.')
     try:
