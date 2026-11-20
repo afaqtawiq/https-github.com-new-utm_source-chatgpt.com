@@ -90,7 +90,21 @@ async def send_all(broadcast_id):
         targets = c.execute("SELECT phone FROM load_broadcast_recipients WHERE broadcast_id=%s AND status='pending'",
                             (broadcast_id,)).fetchall()
     sent = failed = 0
+    stop_after = int(os.getenv('LOAD_BROADCAST_STOP_AFTER', '5') or 0)
+    stopped = None
     for row in targets:
+        with db() as c:
+            state = c.execute('''SELECT b.status,b.assigned_phone,(SELECT COUNT(*) FROM load_broadcast_recipients r
+                WHERE r.broadcast_id=b.id AND r.status IN ('accepted','assigned')) a FROM load_broadcasts b WHERE b.id=%s''',
+                              (broadcast_id,)).fetchone()
+        if state['status'] == 'stop_requested':
+            stopped = 'أوقفه المدير'
+        elif state.get('assigned_phone'):
+            stopped = 'أُسندت الحمولة'
+        elif stop_after and state['a'] >= stop_after:
+            stopped = f"وصلت {state['a']} موافقات"
+        if stopped:
+            break
         with db() as c:
             claimed = c.execute("""UPDATE load_broadcast_recipients SET status='sending' WHERE broadcast_id=%s AND phone=%s
                 AND status='pending' RETURNING phone""", (broadcast_id, row['phone'])).fetchone()
@@ -123,9 +137,31 @@ async def send_all(broadcast_id):
         failed += status != 'sent'
         await asyncio.sleep(float(os.getenv('LOAD_BROADCAST_DELAY', '1.2')))
     with db() as c:
-        c.execute("UPDATE load_broadcasts SET status='done',sent=sent+%s,failed=failed+%s,finished_at=%s WHERE id=%s",
-                  (sent, failed, utcnow(), broadcast_id))
-    print('LOAD_BROADCAST', broadcast_id, 'sent', sent, 'failed', failed, flush=True)
+        if stopped:
+            c.execute("UPDATE load_broadcast_recipients SET status='skipped' WHERE broadcast_id=%s AND status='pending'", (broadcast_id,))
+        c.execute("UPDATE load_broadcasts SET status=%s,sent=sent+%s,failed=failed+%s,finished_at=%s WHERE id=%s",
+                  ('stopped' if stopped else 'done', sent, failed, utcnow(), broadcast_id))
+    print('LOAD_BROADCAST', broadcast_id, 'sent', sent, 'failed', failed, 'stopped' if stopped else 'done', stopped or '', flush=True)
+
+
+def interrupted_on_startup():
+    """The sender thread lives in the web process; after a restart nothing is sending any more. Say so honestly."""
+    init()
+    with db() as c:
+        c.execute("UPDATE load_broadcast_recipients SET status='uncertain',error='انقطع أثناء الإرسال (إعادة تشغيل)' "
+                  "WHERE status='sending' AND broadcast_id IN (SELECT id FROM load_broadcasts WHERE status IN ('sending','stop_requested'))")
+        c.execute("UPDATE load_broadcasts SET status='interrupted',finished_at=%s WHERE status IN ('sending','stop_requested')", (utcnow(),))
+
+
+def stop(ref):
+    m = re.search(r'(\d+)', str(ref or ''))
+    if not m:
+        return 'اذكر رقم الحمولة مثل AFT-7.'
+    with db() as c:
+        row = c.execute("UPDATE load_broadcasts SET status='stop_requested' WHERE id=%s AND status='sending' RETURNING id",
+                        (int(m.group(1)),)).fetchone()
+    return (f'⏹️ أوقفت إرسال AFT-{m.group(1)}؛ ما يُرسل لأي سائق جديد بعد الآن.' if row
+            else f'إرسال AFT-{m.group(1)} غير جارٍ أصلًا (منتهٍ أو متوقف).')
 
 
 def start(action, actor_name=''):
@@ -170,7 +206,12 @@ def status_text(ref):
             return 'لا يوجد إرسال حمولات مسجل.'
         counts = c.execute('''SELECT COUNT(*) FILTER (WHERE status='sent') s, COUNT(*) FILTER (WHERE status IN ('failed','uncertain')) f,
             COUNT(*) FILTER (WHERE status IN ('pending','sending')) p,
-            COUNT(*) FILTER (WHERE status IN ('accepted','assigned')) a FROM load_broadcast_recipients WHERE broadcast_id=%s''', (row['id'],)).fetchone()
-    return (f"الحمولة AFT-{row['id']} ({row['origin']} → {row['destination']}): أُرسلت {counts['s']}، "
-            f"تعذر {counts['f']}، متبقي {counts['p']}، وافق {counts['a']}."
+            COUNT(*) FILTER (WHERE status IN ('accepted','assigned')) a, COUNT(*) FILTER (WHERE status='skipped') k
+            FROM load_broadcast_recipients WHERE broadcast_id=%s''', (row['id'],)).fetchone()
+    label = {'sending': 'الإرسال جارٍ الآن', 'done': 'اكتمل الإرسال', 'stop_requested': 'جارٍ الإيقاف',
+             'stopped': f"توقف الإرسال تلقائيًا ({counts['k']} سائق لم يُرسل لهم)",
+             'interrupted': 'الإرسال متوقف (انقطع بإعادة تشغيل الخادم) — لا يُرسل شيء الآن'}.get(row['status'], row['status'])
+    pending = counts['p'] if row['status'] in ('sending', 'stop_requested') else 0
+    return (f"الحمولة AFT-{row['id']} ({row['origin']} → {row['destination']}): {label}. أُرسلت {counts['s']}، "
+            f"تعذر {counts['f']}، متبقي {pending}، وافق {counts['a']}."
             + (f" — مسندة للسائق +{row['assigned_phone']}" if row.get('assigned_phone') else ''))
