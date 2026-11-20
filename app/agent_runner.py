@@ -42,6 +42,7 @@ KINDS = {
     'fasah_declarations': 'قراءة قائمة البيانات في فسح وحفظها CSV — قراءة فقط',
     'fasah_details': 'قراءة تفاصيل بيان واحد في فسح (الفاتورة والرسوم) — قراءة فقط',
     'fasah_release_notice': 'تنزيل إشعار الفسح PDF لبيان مفسوح — قراءة فقط',
+    'fasah_authorizations': 'قراءة قائمة تفاويض المخلص في فسح (المستورد وتاريخ الانتهاء) — قراءة فقط',
 }
 FILE_TYPES = {'application/pdf', 'text/csv', 'text/plain', 'image/png', 'image/jpeg',
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
@@ -188,6 +189,8 @@ def create_task(kind, params, actor=''):
             label = str((f or {}).get('label') or '')
             if re.search(r'(password|كلمة\s*(ال)?(مرور|سر)|otp|رمز\s*(ال)?تحقق|cvv|iban|ايبان|بطاقة)', label, re.I):
                 return None, 'لا أعبئ كلمات المرور أو رموز التحقق أو بيانات البطاقات والحسابات البنكية.'
+    if kind == 'fasah_authorizations':
+        params['pages'] = max(1, min(int(re.sub(r'\D', '', str(params.get('pages') or '10')) or 10), 30))
     if kind in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
         params['which'] = 'export' if str(params.get('which', '')).startswith(('ex', 'تص')) else 'import'
         if params.get('since') and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(params['since'])):
@@ -406,7 +409,7 @@ async def finish(tid: int, request: Request):
             status = 'stopped'
         if status == 'done':
             verified = c.execute('SELECT COUNT(*) n FROM runner_files WHERE task_id=%s AND verified', (tid,)).fetchone()['n']
-            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'read_page') and not verified:
+            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'read_page') and not verified:
                 status = 'failed'  # never «done» without a verified result
         c.execute('UPDATE runner_tasks SET status=%s,result_json=%s,finished_at=%s WHERE id=%s',
                   (status, json.dumps(body.get('result') or {}, ensure_ascii=False)[:20000], utcnow(), tid))
@@ -442,6 +445,9 @@ async def finish(tid: int, request: Request):
     if status == 'done' and task['kind'] in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
         import threading
         threading.Thread(target=after_fasah, args=(tid,), daemon=True).start()
+    if status == 'done' and task['kind'] == 'fasah_authorizations':
+        import threading
+        threading.Thread(target=after_authorizations, args=(tid,), daemon=True).start()
     if task['kind'] == 'read_page' and json.loads(task['params_json'] or '{}').get('purpose') == 'tracking':
         import threading
         from app import shipment_tracking
@@ -616,6 +622,21 @@ def prepare_export_billing(rows):
         items.append({'number': number, 'kind': 'export', 'party': 'سلة الرحائب',
                       'date': next(iter(dates))})
     return items, review
+
+
+def after_authorizations(tid):
+    try:
+        with db() as c:
+            task = c.execute('SELECT * FROM runner_tasks WHERE id=%s', (tid,)).fetchone()
+            f = c.execute('SELECT data FROM runner_files WHERE task_id=%s AND verified ORDER BY id DESC LIMIT 1', (tid,)).fetchone()
+        if not f:
+            return
+        from app import fasah_authorizations
+        name = json.loads(task['params_json'] or '{}').get('name') or ''
+        notify(fasah_authorizations.after_read(tid, bytes(f['data']).decode('utf-8', 'replace'), name))
+    except Exception as exc:
+        print('RUNNER_AUTHORIZATIONS', tid, type(exc).__name__, str(exc)[:160], flush=True)
+        notify(f'تعذر تحليل قائمة التفاويض من فسح (المهمة #{tid}).')
 
 
 def after_fasah(tid):
