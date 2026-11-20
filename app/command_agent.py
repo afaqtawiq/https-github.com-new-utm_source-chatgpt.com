@@ -158,6 +158,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}},
     {'name': 'ask_colleague', 'description': 'Ask a COLLEAGUE in the virtual office to do or check something in THEIR department and get the answer back: فيصل (التخليص/التعرفة/سابر/فسح)، خالد (النقل والسائقين)، سلطان (الحاويات والوكلاء الملاحيين والتتبع)، نورة (المالية والكشوفات)، ريم (المبيعات)، لمى (خدمة العملاء)، دانة (البريد والمراسلات)، هند (الإدارة والموظفين). Use it instead of telling the owner to go to another department. Anything sent outside the company still needs the owner «نفذ CODE».',
      'input_schema': {'type': 'object', 'properties': {'colleague': {'type': 'string'}, 'request': {'type': 'string'}}, 'required': ['colleague', 'request']}},
+    {'name': 'set_employee_title', 'description': 'Set the job title of a registered HUMAN team member (by name or phone), e.g. «المسمى لناصر: مخلص المنافذ البحرية والجوية». Manager only; internal record, no message is sent.',
+     'input_schema': {'type': 'object', 'properties': {'who': {'type': 'string'}, 'title': {'type': 'string'}}, 'required': ['who', 'title']}},
     {'name': 'send_email', 'description': 'Prepare an email from the official mailbox. It is sent only after the manager confirms with the code.',
      'input_schema': {'type': 'object', 'properties': {'to': {'type': 'string'}, 'subject': {'type': 'string'}, 'body': {'type': 'string'}}, 'required': ['to', 'subject', 'body']}},
 ]
@@ -763,6 +765,24 @@ def tool_list_employees(c, a):
         return 'لا يوجد موظفون مسجلون.'
     return 'فريق آفاق المسجل على واتساب:\n' + '\n'.join(
         f"· {m['name'] or '—'}{' (' + m['role'] + ')' if m.get('role') else ''} · +{n}{' · مدير' if m.get('manager') else ''}" for n, m in members.items())
+
+
+def tool_set_employee_title(c, a):
+    if not _member().get('manager'):
+        return 'تعديل المسميات للمدير فقط.'
+    from app.employees import init
+    init()
+    who, title = _clean(a.get('who'), 100), _clean(a.get('title'), 100)
+    if len(who) < 2 or len(title) < 2:
+        return 'اذكر اسم الموظف أو جواله والمسمى الوظيفي.'
+    digits = re.sub(r'\D', '', who)
+    rows = (c.execute('SELECT id,name FROM team_employees WHERE active AND phone LIKE %s', ('%' + digits[-9:],)).fetchall() if len(digits) >= 9
+            else c.execute('SELECT id,name FROM team_employees WHERE active AND (name ILIKE %s OR short ILIKE %s)',
+                           ('%' + who + '%', '%' + who + '%')).fetchall())
+    if len(rows) != 1:
+        return f'لم أجد موظفًا واحدًا بهذا الاسم ({len(rows)} نتيجة). اكتب الاسم كاملًا أو رقم الجوال.'
+    c.execute('UPDATE team_employees SET title=%s, updated_at=NOW() WHERE id=%s', (title, rows[0]['id']))
+    return f"✅ مسمى {rows[0]['name']}: {title}."
 
 
 def tool_add_employee(c, a):
