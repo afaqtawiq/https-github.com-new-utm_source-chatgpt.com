@@ -454,6 +454,7 @@ async def tick(now=None, deliver=None):
     try:
         from app import group_watch
         if group_watch.enabled():
+            await run_in_threadpool(group_watch.flush)
             await group_watch.poll(now)
             sent += await group_watch.check(now, deliver, reads_left=max(0, MAX_PROVIDER_READS - reads))
     except Exception as exc:

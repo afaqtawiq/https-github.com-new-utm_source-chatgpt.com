@@ -9,6 +9,7 @@ posted in a group from here.
 Sources: the webhook (when the provider pushes group events) and a light polling fallback over the group conversations.
 GROUP_WATCH_ENABLED=0 turns it off.
 """
+import collections
 import datetime as dt
 import os
 import re
@@ -98,11 +99,35 @@ def store(account, cid, name, mid, direction, sender, sender_name, text, media, 
     return bool(row)
 
 
+_QUEUE = collections.deque(maxlen=2000)
+
+
 def capture(payload):
-    """Webhook hook (message.received). Never raises, never changes the normal flow."""
+    """Webhook hook (message.received): only queues the group event in memory — no database work inside the webhook.
+    The watch flushes the queue every round; the polling fallback covers anything lost on a restart."""
     try:
         if not enabled():
             return False
+        conv, msg = payload.get('conversation') or {}, payload.get('message') or {}
+        if not (conv.get('isGroup') or msg.get('isGroup')):
+            return False
+        _QUEUE.append(payload)
+        return True
+    except Exception as exc:
+        print('GROUP_WATCH_CAPTURE', type(exc).__name__, str(exc)[:120], flush=True)
+        return False
+
+
+def flush():
+    """Store the queued webhook group events. Returns how many were new."""
+    n = 0
+    while _QUEUE:
+        n += bool(_store_event(_QUEUE.popleft()))
+    return n
+
+
+def _store_event(payload):
+    try:
         conv, msg = payload.get('conversation') or {}, payload.get('message') or {}
         if not (conv.get('isGroup') or msg.get('isGroup')):
             return False

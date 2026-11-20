@@ -36,9 +36,10 @@ def run():
     assert gw.capture(event('m1', files=1, at=T0)) and gw.capture(event('m2', files=1, at=T0 + m))
     assert gw.capture(event('m3', 'This another shipment required 3rd party license charges.\n\ncan you pls check the HS CODE '
                                   'whether they required any approval.', at=T0 + 2 * m))
-    assert not gw.capture(event('m3', 'dup', at=T0 + 2 * m)), 'idempotent'
+    gw.capture(event('m3', 'dup', at=T0 + 2 * m))
     assert gw.capture(event('m4', 'Thanks', at=T0 + 3 * m, sender='971509998887', name='Ali', cid='grp-2', group='Other'))
     assert not gw.capture({'event': 'message.received', 'conversation': {'id': 'c', 'isGroup': False}, 'message': {}})
+    assert gw.flush() == 4 and gw.flush() == 0, 'duplicate stored once'
     with db() as c:
         flags = {r['message_id']: r['important'] for r in c.execute('SELECT message_id, important FROM whatsapp_group_messages')}
     assert flags == {'m1': True, 'm2': True, 'm3': True, 'm4': False}, flags
@@ -68,6 +69,7 @@ def run():
         T1 = T0 + dt.timedelta(hours=5)
         gw.capture(event('n1', 'Kindly share the rate for 2x40HC Jebel Ali to Riyadh', at=T1))
         gw.capture(event('n2', 'تمام نشيك ونرد عليك', at=T1 + 5 * m, sender=TEAM, name='رامي'))
+        gw.flush()
         with patch.object(no_wait, 'answered_after', side_effect=not_answered):
             assert asyncio.run(gw.check(T1 + 40 * m, deliver)) == []
         with db() as c:
@@ -76,6 +78,7 @@ def run():
     # Answered from the business number (provider shows an outgoing message) → closed silently.
     T2 = T0 + dt.timedelta(hours=8)
     gw.capture(event('p1', 'When is the ETA for the KMC containers?', at=T2))
+    gw.flush()
 
     async def answered(*a, **k):
         return True
