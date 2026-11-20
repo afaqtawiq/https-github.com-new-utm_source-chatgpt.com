@@ -48,6 +48,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'note': {'type': 'string'}}}},
     {'name': 'clearance_expert', 'description': 'Practical customs-clearance expertise approved by the owner: FASAH broker authorization, documents, declaration stages, certificates (SABER/SFDA, meat halal+health or notification), shipping-agent D/O and free days, rail to Riyadh dry port, port/inspection/X-ray/pallet fees, storage exemptions and the undeclared-goods rule, CIF vs FOB insurance. Use it for any practical clearance question.',
      'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'zatca_rules', 'description': 'ZATCA customs procedures rules with article numbers (documents, missing documents & 90-day undertaking, amendment/cancellation, inspection, samples, deferred payment, temporary admission, re-export, personal effects, transit, broker), advance declaration and 2-hour clearance, fee inquiry steps, duty/VAT basis, and Saudi port operators (Jeddah RSGT/DP World, Dammam SGP, Riyadh dry port).',
+     'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'customs_question', 'description': 'Answer a question about customs procedures, documents or requirements from the approved knowledge.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'add_driver', 'description': 'Register a driver for load offers.',
@@ -281,6 +283,11 @@ def tool_saber_exemptions(c, a):
 
 def tool_clearance_expert(c, a):
     from app.clearance_expert import NOTES
+    return NOTES
+
+
+def tool_zatca_rules(c, a):
+    from app.zatca_ports_knowledge import NOTES
     return NOTES
 
 
