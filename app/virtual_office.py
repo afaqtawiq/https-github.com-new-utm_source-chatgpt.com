@@ -54,7 +54,7 @@ DEPARTMENTS = {
                  'برمز «نفذ» واحد. العمولة الثابتة 2.5% من سعر صاحب الحمولة (قرار المالك) — لا تسأل عنها؛ يغيّرها المالك لحمولة '
                  'بعينها فقط إذا طلب. اقرأ السعر كاملًا (٥،٣٠٠ = 5,300).'),
         'tools': ('add_driver', 'load_offer', 'broadcast_load', 'negotiate_owner', 'assign_driver', 'load_acceptances', 'approve_owner_load',
-                  'owner_load_status', 'broadcast_status', 'driver_price_request', 'driver_prices', 'send_whatsapp')},
+                  'owner_load_status', 'broadcast_status', 'stop_broadcast', 'driver_price_request', 'driver_prices', 'send_whatsapp')},
     'containers': {
         'person': 'سلطان', 'model': 'classy_male',
         'name': 'الحاويات ووكلاء الملاحة', 'manager': 'مدير الحاويات والملاحة', 'icon': '🚢',

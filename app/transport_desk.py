@@ -548,6 +548,12 @@ def register_worker(app):
 
     @app.on_event('startup')
     async def start():
+        try:
+            from app import load_broadcast
+            from starlette.concurrency import run_in_threadpool
+            await run_in_threadpool(load_broadcast.interrupted_on_startup)
+        except Exception as exc:
+            print('LOAD_BROADCAST_STARTUP', type(exc).__name__, str(exc)[:160], flush=True)
         app.state.transport_repair_worker = asyncio.create_task(loop())
 
 

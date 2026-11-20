@@ -148,6 +148,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'file': {'type': 'string'}, 'commission': {'type': 'string'}}, 'required': ['file', 'commission']}},
     {'name': 'owner_load_status', 'description': 'Show what was collected so far from a load owner (file number).',
      'input_schema': {'type': 'object', 'properties': {'file': {'type': 'string'}}, 'required': ['file']}},
+    {'name': 'stop_broadcast', 'description': 'Stop an ongoing load offer broadcast to drivers (no more drivers get it). Internal action, no confirmation code needed.',
+     'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}, 'required': ['ref']}},
     {'name': 'broadcast_status', 'description': 'Delivery status of a load broadcast (e.g. «حالة الإرسال AFT-12»); latest if no reference.',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'approve_prospects', 'description': "Approve today's pending daily prospects for contact (all, or those whose company name contains a text).",
@@ -811,6 +813,11 @@ def tool_runner_stop(c, a):
 def tool_whatsapp_templates(c, a):
     from app import transport_desk
     return transport_desk.templates_text()
+
+
+def tool_stop_broadcast(c, a):
+    from app import load_broadcast
+    return load_broadcast.stop(a.get('ref'))
 
 
 def tool_broadcast_status(c, a):
