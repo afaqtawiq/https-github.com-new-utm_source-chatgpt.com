@@ -116,6 +116,30 @@ def run():
     assert '966509666097' in calls[1][-1]['content'][0]['content']
     print('PASS: employees added by the manager with confirmation, never as managers.')
 
+    # One-approval load offer (owner, 20 Nov 2026): 2.5% commission, one code → owner conversation + driver offer.
+    assert ca.driver_price_for(5300, 2.5) == 5160 and ca._amount('٥،٣٠٠ ر.س') == 5300 and ca._amount('5,300') == 5300
+    assert ca.commission_percent('3%') == 3.0
+    with db() as c:
+        c.execute('''INSERT INTO drivers(driver_name,whatsapp_phone,vehicle_type,offer_consent,created_at,updated_at)
+            VALUES('سائق تجربة','+966500000077','سطحة',1,NOW(),NOW()) ON CONFLICT DO NOTHING''')
+    model, calls = scripted([('load_offer', {'origin': 'جدة', 'destination': 'الرياض', 'weight': '27', 'owner_price': '٥،٣٠٠',
+                                             'owner_phone': '+966510784291', 'truck': 'سطحة تريلا'})], 'جاهز.')
+    run_as(manager, 'حمولة من نقليات', model)
+    offer = calls[1][-1]['content'][0]['content']
+    assert '5,300' in offer and '2.5%' in offer and '5,160' in offer and '+966510784291' in offer and 'نفذ' in offer, offer
+    pending = one("SELECT * FROM whatsapp_voice_pending WHERE command LIKE '%%load_offer%%' ORDER BY expires_at DESC LIMIT 1")
+    started = []
+    from app import load_broadcast, owner_negotiation
+    r = ROLE.set(manager)
+    try:
+        with patch.object(owner_negotiation, 'start', side_effect=lambda a, who: (started.append(('owner', a['phone'])), 'بدأت محادثة صاحب الحمولة')[1]), \
+                patch.object(load_broadcast, 'start', side_effect=lambda a, who: (started.append(('drivers', a['driver_price'])), 'بدأ العرض')[1]), db() as c:
+            out = admin.run_command(c, pending['command'], 'lo1')
+    finally:
+        ROLE.reset(r)
+    assert started == [('owner', '966510784291'), ('drivers', '5,160.00')] and 'بدأ العرض' in out, (started, out)
+    print('PASS: one-approval load offer with 2.5% commission.')
+
 
 def main():
     import psycopg

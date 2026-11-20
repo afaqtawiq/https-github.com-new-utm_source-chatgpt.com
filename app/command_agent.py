@@ -54,7 +54,13 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name']}},
     {'name': 'record_payment', 'description': 'Record money RECEIVED from a customer as a finance draft receipt (owner posts it later). e.g. «استلمنا 50000 من الياسمين حوالة 123». date YYYY-MM-DD optional; ref = transfer/cheque reference.',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'amount': {'type': 'string'}, 'date': {'type': 'string'}, 'ref': {'type': 'string'}}, 'required': ['name', 'amount']}},
-    {'name': 'broadcast_load', 'description': 'Offer a freight load to ALL registered drivers on WhatsApp (or only Saudi/UAE numbers). Use when staff send a load to be distributed to drivers. driver_price = the price offered to the driver. If only the owner price is given, ask the manager for the commission of this load (never assume a fixed commission). Needs the manager confirmation code before sending.',
+    {'name': 'load_offer', 'description': 'ONE-APPROVAL load flow (owner decision 20 Nov 2026): from a load (Naqliat card / owner chat) prepare BOTH the conversation with the load owner and the offer to all drivers; one «نفذ CODE» does both. driver price = owner price minus Afaq commission (default 2.5% of the owner price, rounded down to 10 SAR; commission_percent overrides for this load only). Use this first whenever a load with an owner price arrives; never ask for the commission.',
+     'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'weight': {'type': 'string', 'description': 'tons'},
+                                                       'owner_price': {'type': 'string', 'description': 'full amount in SAR, e.g. 5300'}, 'owner_phone': {'type': 'string'},
+                                                       'truck': {'type': 'string'}, 'unloading': {'type': 'string'}, 'payment': {'type': 'string'},
+                                                       'commission_percent': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']}},
+                      'required': ['origin', 'destination', 'weight', 'owner_price']}},
+    {'name': 'broadcast_load', 'description': 'Offer a freight load to ALL registered drivers on WhatsApp (or only Saudi/UAE numbers). Use when staff send a load to be distributed to drivers. driver_price = the price offered to the driver. If only the owner price is given use load_offer instead (default commission 2.5%). Needs the manager confirmation code before sending.',
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'weight': {'type': 'string', 'description': 'tons'}, 'driver_price': {'type': 'string'}, 'unloading': {'type': 'string'}, 'payment': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']}}, 'required': ['origin', 'destination', 'weight', 'driver_price']}},
     {'name': 'negotiate_owner', 'description': 'Start a natural WhatsApp conversation with a load owner (by phone) to collect the load details and price. origin/destination = the route if known. load_ref = a captured Naqliat load (e.g. «فاوض NQ-12») — then phone/route come from it. Needs the manager confirmation code before the first message.',
      'input_schema': {'type': 'object', 'properties': {'phone': {'type': 'string'}, 'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'load_ref': {'type': 'string'}}}},
@@ -337,6 +343,53 @@ def tool_record_payment(c, a):
     except ValueError:
         date = None
     return collections.record_payment(a.get('name'), a.get('amount'), system_user(), date=date, ref=_clean(a.get('ref'), 80))
+
+
+def commission_percent(value=None):
+    try:
+        p = float(str(value).replace('%', '').strip()) if value not in (None, '') else float(os.getenv('LOAD_COMMISSION_PERCENT', '2.5'))
+    except ValueError:
+        p = float(os.getenv('LOAD_COMMISSION_PERCENT', '2.5'))
+    return max(0.0, min(p, 30.0))
+
+
+def driver_price_for(owner_price, percent):
+    """Owner price minus the commission, rounded down to 10 SAR (5,300 at 2.5% → 5,160)."""
+    import math
+    return int(math.floor(owner_price * (1 - percent / 100) / 10) * 10)
+
+
+def _amount(value):
+    from app.load_broadcast import price_text
+    digits = re.sub(r'[^\d.]', '', str(price_text(value) or '').translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')))
+    try:
+        return float(digits) if digits else 0.0
+    except ValueError:
+        return 0.0
+
+
+def tool_load_offer(c, a):
+    from app import load_broadcast, owner_negotiation
+    owner_price = _amount(a.get('owner_price'))
+    if owner_price < 100:
+        return 'سعر صاحب الحمولة غير واضح؛ اكتبه كاملًا بالريال (مثل 5300).'
+    percent = commission_percent(a.get('commission_percent'))
+    driver = driver_price_for(owner_price, percent)
+    load, count, error = load_broadcast.prepare(dict(a, driver_price=str(driver)))
+    if error:
+        return error + '. أكمل البيانات وأعد الطلب.'
+    phone = owner_negotiation.digits(a.get('owner_phone'))
+    owner = {'phone': phone, 'origin': load['origin'], 'destination': load['destination']} if len(phone) >= 11 else None
+    if not count and not owner:
+        return 'لا يوجد سائقون مسجلون لهذه الفئة ولا رقم لصاحب الحمولة.'
+    token = _pending(c, {'tool': 'load_offer', 'load': load, 'owner': owner, 'owner_price': owner_price,
+                         'percent': percent, 'truck': _clean(a.get('truck'), 60)})
+    lines = [f"🚚 حمولة {load['origin']} → {load['destination']} — {load['weight']} طن" + (f" — {_clean(a.get('truck'), 60)}" if a.get('truck') else ''),
+             f"سعر صاحب الحمولة: {owner_price:,.0f} ريال · عمولة آفاق {percent:g}% = {owner_price - driver:,.0f} · سعر السائق: {driver:,} ريال"]
+    lines.append(f"1) محادثة صاحب الحمولة +{phone}" if owner else '1) لا يوجد رقم لصاحب الحمولة — العرض للسائقين فقط')
+    lines.append(f"2) عرض على {count} سائق" if count else '2) لا يوجد سائقون مسجلون لهذه الفئة')
+    lines.append(f"الاثنين معًا بأمر واحد: نفذ {token}")
+    return '\n'.join(lines)
 
 
 def tool_broadcast_load(c, a):
@@ -1026,6 +1079,19 @@ def _execute_action(c, action, member):
     if action.get('tool') == 'broadcast_load':
         from app import load_broadcast
         return load_broadcast.start(action, member.get('name') or '')
+    if action.get('tool') == 'load_offer':
+        from app import load_broadcast, owner_negotiation
+        out = []
+        if action.get('owner'):
+            try:
+                out.append(owner_negotiation.start({'tool': 'negotiate_owner', **action['owner']}, member.get('name') or ''))
+            except Exception as exc:
+                out.append(f'⚠️ تعذر بدء محادثة صاحب الحمولة: {str(exc)[:160]}')
+        try:
+            out.append(load_broadcast.start({'tool': 'broadcast_load', **action['load']}, member.get('name') or ''))
+        except Exception as exc:
+            out.append(f'⚠️ تعذر عرض الحمولة على السائقين: {str(exc)[:160]}')
+        return '\n'.join(x for x in out if x)
     if action.get('tool') == 'agent_email_send':
         from app import line_desk
         return line_desk.send(action['kind'], action['id'], member.get('name') or '')
