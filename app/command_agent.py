@@ -1189,7 +1189,7 @@ def scoped_tools():
 def call_model(messages, system):
     key = os.getenv('ANTHROPIC_API_KEY', '')
     body = {'model': MODEL, 'max_tokens': 1200, 'system': system, 'tools': scoped_tools(), 'messages': messages}
-    with httpx.Client(timeout=45) as client:
+    with httpx.Client(timeout=float(os.getenv('COMMAND_AGENT_TIMEOUT', '100'))) as client:
         response = client.post('https://api.anthropic.com/v1/messages', json=body,
                                headers={'x-api-key': key, 'anthropic-version': '2023-06-01'})
         response.raise_for_status()
@@ -1244,7 +1244,9 @@ def run_agent(c, raw):
     for _ in range(6):
         try:
             data = call_model(messages, system)
-        except (httpx.HTTPError, ValueError, KeyError):
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            detail = exc.response.text[:200] if isinstance(exc, httpx.HTTPStatusError) else str(exc)[:160]
+            print('COMMAND_AGENT_MODEL_FAILED', type(exc).__name__, detail, flush=True)
             return None
         content = data.get('content') or []
         uses = [b for b in content if b.get('type') == 'tool_use']
