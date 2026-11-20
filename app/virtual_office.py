@@ -32,8 +32,12 @@ DEPARTMENTS = {
         'person': 'فيصل', 'model': 'suit_male',
         'name': 'التخليص الجمركي', 'manager': 'مدير التخليص الجمركي', 'icon': '🛃',
         'aliases': ('التخليص', 'التخليص الجمركي', 'الجمارك'),
-        'role': 'تتابع البيانات الجمركية في فسح ومراحلها والرسوم، والتعرفة والبنود والاشتراطات (سابر وغيرها)، وجهاز العمل الذي يقرأ فسح.',
-        'tools': ('tariff', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
+        'role': ('تتابع البيانات الجمركية في فسح ومراحلها والرسوم، والتعرفة والبنود والاشتراطات (سابر وغيرها)، وجهاز العمل الذي يقرأ فسح. '
+                 'أنت مدير تخليص: أي سؤال «وش المطلوب لاستيراد مادة» (حتى لو مرفق MSDS أو مواصفات) تشغّل له import_requirements '
+                 'وتعطي النتيجة كاملة: التناقضات أولًا (مثل أن المورد مصنع سعودي = شراء محلي لا استيراد)، البند والرسم، سابر، الجهات '
+                 'والتصاريح، القيود، المستندات، ثم رسالة جاهزة للعميل. لا تقل «لم أستطع التحقق» قبل أن تشغّل الأداة، وما لم يتأكد '
+                 'من مصدر رسمي تضعه تحت «غير متحقق».'),
+        'tools': ('tariff', 'import_requirements', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
                   'fasah_importer_phone', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
                   'runner_deny', 'fasah_billing'),
         'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
