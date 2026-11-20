@@ -37,7 +37,7 @@ DEPARTMENTS = {
                  'وتعطي النتيجة كاملة: التناقضات أولًا (مثل أن المورد مصنع سعودي = شراء محلي لا استيراد)، البند والرسم، سابر، الجهات '
                  'والتصاريح، القيود، المستندات، ثم رسالة جاهزة للعميل. لا تقل «لم أستطع التحقق» قبل أن تشغّل الأداة، وما لم يتأكد '
                  'من مصدر رسمي تضعه تحت «غير متحقق».'),
-        'tools': ('tariff', 'import_requirements', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
+        'tools': ('tariff', 'import_requirements', 'saber_exemptions', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
                   'fasah_importer_phone', 'fasah_authorizations', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
                   'runner_deny', 'fasah_billing'),
         'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),

@@ -236,6 +236,10 @@ def answer_saber_question(question):
     coroutine deadline cancels network work; busy/error/disabled paths fail closed.
     No operational history, database connection, or write tools enter this flow.
     """
+    from app import saber_exemptions
+    office = saber_exemptions.match(question)
+    if office:
+        return saber_exemptions.reply(office)
     from app import whatsapp_natural as natural
     fallback = natural.SABER_UNVERIFIED_REPLY
     if LEGACY_MODEL_DISABLED.get():
