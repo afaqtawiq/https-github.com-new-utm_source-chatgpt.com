@@ -45,13 +45,28 @@ def approved_text_enabled():
     return os.getenv('AUTO_OUTREACH_APPROVED_TEXT', '0') == '1'
 
 
+def rendered(template, company_name, pitch):
+    """The approved template's own body with {{1}} = company and {{2}} = pitch; None when it takes other parameters."""
+    parts = template.get('components') or []
+    if not parts or any(str(p.get('type', '')).upper() not in ('BODY', 'FOOTER') for p in parts):
+        return None
+    text = '\n'.join(p.get('text', '') for p in parts)
+    if set(re.findall(r'\{\{(\d+)\}\}', text)) - {'1', '2'}:
+        return None
+    return text.replace('{{1}}', ' '.join(str(company_name).split())).replace('{{2}}', ' '.join(str(pitch).split()))
+
+
 def message_options(company_name, pitch):
-    """Wordings to try, newest first. The older one is the text of the template Meta approved (before the
-    e-mail line was added); it is offered only with AUTO_OUTREACH_APPROVED_TEXT=1."""
+    """Wordings to try, newest first. With AUTO_OUTREACH_APPROVED_TEXT=1 (owner decision, 20 Nov 2026: «نفذ التواصل»)
+    the text of each template Meta approved is also offered, filled with this company's name and pitch."""
     options = [standard_message(company_name, pitch)]
     if approved_text_enabled():
         from app.daily_prospects import _template_v2
         options.append(_template_v2(company_name, pitch) + '\n' + STOP_LINE)
+        for item in _approved:
+            text = rendered(item, company_name, pitch)
+            if text and text not in options:
+                options.append(text)
     return options
 
 
@@ -190,6 +205,8 @@ async def run():
                 c.execute("UPDATE daily_prospects SET outcome_note='autopilot: waiting_channel',updated_at=%s WHERE id=%s",
                           (utcnow(), item['id']))
     if stats.get('mismatch'):
+        print('AUTO_OUTREACH_TEMPLATES', [(t.get('name'), len(re.findall(r'\{\{\d+\}\}', ' '.join(p.get('text', '') for p in t.get('components') or []))))
+                                          for t in _approved][:6], flush=True)
         print('AUTO_OUTREACH_TEMPLATE_MISMATCH', stats['mismatch'],
               'القالب المعتمد في Meta لا يطابق نص الرسالة الحالي؛ لم تُجرَّب أي رسالة واتساب', flush=True)
     log(uid, 'prospect_autopilot_run', 'daily_prospect', None,
