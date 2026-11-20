@@ -451,6 +451,13 @@ async def tick(now=None, deliver=None):
         if checked:  # answered: never alert this wait again at any level
             await run_in_threadpool(_mark, '''INSERT INTO customer_wait_alerts(account_id,conversation_id,since,level,outcome,created_at)
                 VALUES(%s,%s,%s,2,'answered',%s) ON CONFLICT DO NOTHING''', (w['account'], w['cid'], w['since'], now))
+    try:
+        from app import group_watch
+        if group_watch.enabled():
+            await group_watch.poll(now)
+            sent += await group_watch.check(now, deliver, reads_left=max(0, MAX_PROVIDER_READS - reads))
+    except Exception as exc:
+        print('GROUP_WATCH_TICK', type(exc).__name__, str(exc)[:160], flush=True)
     return sent
 
 
@@ -513,6 +520,11 @@ def list_text(now=None):
     lines.append(f'عملاء منزعجون آخر يومين: {len(upset)}')
     for e in upset:
         lines.append(f"  • {_who(e['sender'])}: «{' '.join(str(e['text']).split())[:80]}»")
+    try:
+        from app import group_watch
+        lines.append(group_watch.list_text(now))
+    except Exception:
+        pass
     if promises:
         lines.append('لإقفال وعد: تم الوعد <الرقم>')
     return '\n'.join(lines)

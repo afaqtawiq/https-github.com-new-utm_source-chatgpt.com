@@ -110,6 +110,10 @@ async def receive(request: Request):
             return JSONResponse({"error":"Comment storage unavailable"}, status_code=503)
     if p.get("event") != "message.received":
         return {"ok":True,"ignored":"not_inbound_message"}
+    if (p.get("conversation") or {}).get("isGroup") or (p.get("message") or {}).get("isGroup"):
+        # Groups are watched (important messages nobody answered → owner alert); the agent never replies there.
+        from app import group_watch
+        await run_in_threadpool(group_watch.capture, p)
     metadata = p.get("metadata") or {}
     account = p.get("account") or {}
     message = p.get("message") or {}
