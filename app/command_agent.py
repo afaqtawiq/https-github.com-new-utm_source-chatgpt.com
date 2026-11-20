@@ -38,6 +38,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'reference': {'type': 'string'}}, 'required': ['reference']}},
     {'name': 'tariff', 'description': 'Saudi customs tariff (HS code and duty) lookup; give up to 3 Arabic and 3 English phrasings.',
      'input_schema': {'type': 'object', 'properties': {'ar': {'type': 'array', 'items': {'type': 'string'}}, 'en': {'type': 'array', 'items': {'type': 'string'}}}}},
+    {'name': 'import_requirements', 'description': ('Full import requirements of ONE product into Saudi Arabia: tariff code+duty, live SABER '
+        'result, competent authorities/permits/restrictions from official Saudi sources, documents, blockers, and a customer-ready '
+        'message. Use for ANY «what is required to import X / شروط استيراد» question, including when an MSDS/spec is attached '
+        '(pass the product name, HS code if known, origin/supplier and use from the file).'),
+     'input_schema': {'type': 'object', 'properties': {'product': {'type': 'string'}, 'product_en': {'type': 'string'},
+        'hs_code': {'type': 'string'}, 'origin': {'type': 'string'}, 'use': {'type': 'string'}}, 'required': ['product']}},
     {'name': 'customs_question', 'description': 'Answer a question about customs procedures, documents or requirements from the approved knowledge.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'add_driver', 'description': 'Register a driver for load offers.',
@@ -248,6 +254,12 @@ def tool_shipment_status(c, a):
 def tool_tariff(c, a):
     from app import tariff_lookup
     return tariff_lookup.as_text(tariff_lookup.search_many(a.get('ar'), a.get('en')))
+
+
+def tool_import_requirements(c, a):
+    from app import import_requirements, transport_desk
+    return transport_desk.run_async(lambda: import_requirements.requirements(
+        a.get('product'), a.get('product_en', ''), a.get('hs_code', ''), a.get('origin', ''), a.get('use', '')), timeout=240)
 
 
 def tool_customs_question(c, a):
