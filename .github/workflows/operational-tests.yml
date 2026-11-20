@@ -150,6 +150,9 @@ jobs:
       - run: python tests/group_watch_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python tests/naqliat_list_acceptance.py
+        env:
+          AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python tests/staff_documents_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test

@@ -10,6 +10,8 @@ import android.text.InputType;
 import android.util.Base64;
 import android.view.Gravity;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.provider.Settings;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -38,7 +40,15 @@ public class MainActivity extends Activity {
         token = new EditText(this); token.setHint("رمز ربط الجهاز"); token.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); token.setText(prefs().getString("token", "")); box.addView(token);
         Button save = new Button(this); save.setText("حفظ إعدادات الربط"); save.setOnClickListener(v -> { prefs().edit().putString("server", server.getText().toString().trim()).putString("token", token.getText().toString().trim()).apply(); Toast.makeText(this,"تم الحفظ",Toast.LENGTH_SHORT).show(); }); box.addView(save);
         Button pick = new Button(this); pick.setText("اختيار لقطة شاشة الحمولة وإرسالها"); pick.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), 42)); box.addView(pick);
+        TextView auto = new TextView(this); auto.setText("القراءة التلقائية لقائمة الحمولات (إصدار 0.4): فعّل «قارئ قائمة نقليات» من إعدادات إمكانية الوصول، ثم افتح قائمة الحمولات في نقليات واترك الجوال مفتوحًا. يقرأ النص فقط وينزل في القائمة عدة صفحات، ولا يضغط على أي حمولة ولا يتصل ولا يحجز."); auto.setTextSize(15); auto.setPadding(0,28,0,8); box.addView(auto);
+        CheckBox enable = new CheckBox(this); enable.setText("تشغيل قراءة القائمة تلقائيًا"); enable.setChecked(prefs().getBoolean("auto_list", false));
+        enable.setOnCheckedChangeListener((b, on) -> prefs().edit().putBoolean("auto_list", on).apply()); box.addView(enable);
+        EditText pages = new EditText(this); pages.setHint("عدد الصفحات في كل جولة (3)"); pages.setInputType(InputType.TYPE_CLASS_NUMBER); pages.setText(String.valueOf(prefs().getInt("pages", 3))); box.addView(pages);
+        EditText interval = new EditText(this); interval.setHint("كل كم دقيقة (60)"); interval.setInputType(InputType.TYPE_CLASS_NUMBER); interval.setText(String.valueOf(prefs().getInt("interval", 60))); box.addView(interval);
+        Button keep = new Button(this); keep.setText("حفظ إعدادات القراءة"); keep.setOnClickListener(v -> { try { prefs().edit().putInt("pages", Integer.parseInt(pages.getText().toString().trim())).putInt("interval", Integer.parseInt(interval.getText().toString().trim())).apply(); Toast.makeText(this,"تم الحفظ",Toast.LENGTH_SHORT).show(); } catch (Exception e) { Toast.makeText(this,"اكتب أرقامًا",Toast.LENGTH_SHORT).show(); } }); box.addView(keep);
+        Button access = new Button(this); access.setText("فتح إعدادات إمكانية الوصول"); access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))); box.addView(access);
         status = new TextView(this); status.setTextSize(17); status.setPadding(0,28,0,0); box.addView(status);
+        String last = prefs().getString("last_list", ""); if (!last.isEmpty()) status.setText("آخر قراءة للقائمة: " + last);
         setContentView(box);
         handleShare(getIntent());
     }

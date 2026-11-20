@@ -58,8 +58,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'weight': {'type': 'string', 'description': 'tons'},
                                                        'owner_price': {'type': 'string', 'description': 'full amount in SAR, e.g. 5300'}, 'owner_phone': {'type': 'string'},
                                                        'truck': {'type': 'string'}, 'unloading': {'type': 'string'}, 'payment': {'type': 'string'},
-                                                       'commission_percent': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']}},
-                      'required': ['origin', 'destination', 'weight', 'owner_price']}},
+                                                       'commission_percent': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']},
+                                                       'load_ref': {'type': 'string', 'description': 'a captured Naqliat load, e.g. NQ-12 («اعرض NQ-12»): route, weight, truck, price and owner phone come from it'}}}},
     {'name': 'broadcast_load', 'description': 'Offer a freight load to ALL registered drivers on WhatsApp (or only Saudi/UAE numbers). Use when staff send a load to be distributed to drivers. driver_price = the price offered to the driver. If only the owner price is given use load_offer instead (default commission 2.5%). Needs the manager confirmation code before sending.',
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'weight': {'type': 'string', 'description': 'tons'}, 'driver_price': {'type': 'string'}, 'unloading': {'type': 'string'}, 'payment': {'type': 'string'}, 'audience': {'type': 'string', 'enum': ['all', 'saudi', 'uae']}}, 'required': ['origin', 'destination', 'weight', 'driver_price']}},
     {'name': 'negotiate_owner', 'description': 'Start a natural WhatsApp conversation with a load owner (by phone) to collect the load details and price. origin/destination = the route if known. load_ref = a captured Naqliat load (e.g. «فاوض NQ-12») — then phone/route come from it. Needs the manager confirmation code before the first message.',
@@ -370,6 +370,19 @@ def _amount(value):
 
 def tool_load_offer(c, a):
     from app import load_broadcast, owner_negotiation
+    ref = re.search(r'NQ\s*-?\s*(\d+)', str(a.get('load_ref') or ''), re.I)
+    if ref:
+        row = c.execute('SELECT * FROM naqliat_loads WHERE id=%s', (int(ref.group(1)),)).fetchone()
+        if not row:
+            return f'لا توجد حمولة NQ-{ref.group(1)}.'
+        price = re.search(r'السعر:\s*([\d,.]+)', row.get('description') or '')
+        a = dict(a)
+        for k, v in (('origin', row['origin']), ('destination', row['destination']),
+                     ('weight', f"{row['weight_tons']:g}" if row.get('weight_tons') else ''),
+                     ('truck', row.get('vehicle_type') or ''), ('owner_phone', row.get('owner_phone') or ''),
+                     ('owner_price', price.group(1) if price else '')):
+            if not a.get(k) and v:
+                a[k] = v
     owner_price = _amount(a.get('owner_price'))
     if owner_price < 100:
         return 'سعر صاحب الحمولة غير واضح؛ اكتبه كاملًا بالريال (مثل 5300).'
