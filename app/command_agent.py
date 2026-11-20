@@ -64,6 +64,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'number': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['import', 'export']}, 'supplier': {'type': 'string'}, 'invoice_no': {'type': 'string'}, 'invoice_value': {'type': 'string'}, 'duty': {'type': 'string'}, 'other': {'type': 'string'}, 'party': {'type': 'string'}, 'date': {'type': 'string', 'description': 'YYYY-MM-DD, or just the day number if only a day was given'}}, 'required': ['number']}},
     {'name': 'customer_balance', 'description': 'Outstanding receivable balance of a customer/counterparty in finance (posted only), oldest claim, last payment, drafts awaiting approval. e.g. «كم على الياسمين».',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name']}},
+    {'name': 'record_expense', 'description': 'Record a company EXPENSE paid or owed to a supplier (rent, salaries, subscriptions like Anthropic/Railway/Zernio, fuel, government fees...) as finance drafts: an expense, plus its payment when already paid (paid=true default). currency SAR/USD/AED/EUR, date YYYY-MM-DD optional (today), method e.g. بطاقة/تحويل. e.g. «سددنا اليوم 100 دولار رصيد Anthropic بالبطاقة».',
+     'input_schema': {'type': 'object', 'properties': {'vendor': {'type': 'string'}, 'amount': {'type': 'string'}, 'currency': {'type': 'string'},
+        'date': {'type': 'string'}, 'description': {'type': 'string'}, 'ref': {'type': 'string'}, 'paid': {'type': 'boolean'}, 'method': {'type': 'string'}},
+        'required': ['vendor', 'amount', 'description']}},
+    {'name': 'expenses_list', 'description': 'Expenses recorded in the last N days (default 30), with draft/posted status.',
+     'input_schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}},
     {'name': 'record_payment', 'description': 'Record money RECEIVED from a customer as a finance draft receipt (owner posts it later). e.g. «استلمنا 50000 من الياسمين حوالة 123». date YYYY-MM-DD optional; ref = transfer/cheque reference.',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'amount': {'type': 'string'}, 'date': {'type': 'string'}, 'ref': {'type': 'string'}}, 'required': ['name', 'amount']}},
     {'name': 'load_offer', 'description': 'ONE-APPROVAL load flow (owner decision 20 Nov 2026): from a load (Naqliat card / owner chat) prepare BOTH the conversation with the load owner and the offer to all drivers; one «نفذ CODE» does both. driver price = owner price minus Afaq commission (default 2.5% of the owner price, rounded down to 10 SAR; commission_percent overrides for this load only). Use this first whenever a load with an owner price arrives; never ask for the commission.',
@@ -373,6 +379,28 @@ def tool_record_declaration_billing(c, a):
 def tool_customer_balance(c, a):
     from app import collections_desk as collections
     return collections.customer_balance_text(a.get('name'))
+
+
+def tool_record_expense(c, a):
+    import datetime as _dt
+    from app import expenses_desk
+    from app.prospect_autopilot import system_user
+    try:
+        date = _dt.date.fromisoformat(str(a.get('date'))) if a.get('date') else None
+    except ValueError:
+        date = None
+    return expenses_desk.record(a.get('vendor'), a.get('amount'), system_user(), currency=a.get('currency') or 'SAR', date=date,
+                                description=_clean(a.get('description'), 200), ref=_clean(a.get('ref'), 80),
+                                paid=a.get('paid', True) is not False, method=_clean(a.get('method'), 60))
+
+
+def tool_expenses_list(c, a):
+    from app import expenses_desk
+    try:
+        days = max(1, min(int(a.get('days') or 30), 365))
+    except (TypeError, ValueError):
+        days = 30
+    return expenses_desk.recent_text(days)
 
 
 def tool_record_payment(c, a):
