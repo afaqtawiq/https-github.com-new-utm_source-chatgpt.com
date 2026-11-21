@@ -406,7 +406,7 @@ def runner_track(ref, kind, carrier_name, actor, chat):
                 f'الخطوط المتاحة: {names}.')
     name, bl_url, cn_url = CARRIER_PAGES[scac]
     url = (cn_url if kind == 'container' else bl_url).format(ref=ref)
-    params = {'url': url, 'purpose': 'tracking', 'ref': ref, 'ref_kind': kind, 'carrier': name, 'wait': 30}
+    params = {'url': url, 'purpose': 'tracking', 'ref': ref, 'ref_kind': kind, 'carrier': name, 'wait': 60}
     if chat and chat[0] and chat[1]:
         params['chat'] = [str(chat[0]), str(chat[1])]
     tid, text = agent_runner.create_task('read_page', params, actor or 'تتبع شحنة')
