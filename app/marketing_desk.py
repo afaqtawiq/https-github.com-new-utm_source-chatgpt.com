@@ -27,9 +27,10 @@ SEGMENTS = {
     'transport': ('شركات النقل البري والشاحنات', 'land transport and trucking companies in Saudi Arabia (Jeddah, Riyadh, Dammam)'),
     'importer': ('مستوردون (تجارة جملة ومواد بناء وسيراميك وأغذية)', 'importers and wholesale trading companies in Saudi Arabia that import containers (ceramics, building materials, food, furniture, electronics)'),
     'china': ('وكلاء شحن وموردون في الصين يشحنون للسعودية', 'freight forwarders and sourcing agents in China that ship to Saudi Arabia / GCC'),
+    'uae': ('شركات الشحن البري الإماراتية (منفذ البطحاء)', 'UAE land freight / trucking / cargo companies (Dubai, Sharjah, Ajman, Abu Dhabi, Ras Al Khaimah) that truck goods to Saudi Arabia through the Al Batha (Ghuwaifat) border'),
     'gcc': ('شركات خليجية تصدّر أو تعبر إلى السعودية', 'GCC (Kuwait, Bahrain, Oman, Qatar — not UAE) trading and logistics companies that export to or transit through Saudi Arabia'),
 }
-ROTATION = ('forwarder', 'transport', 'importer', 'china', 'forwarder', 'gcc', 'transport')
+ROTATION = ('uae', 'forwarder', 'transport', 'uae', 'importer', 'china', 'gcc')
 DAILY_LEADS = int(os.getenv('LEADS_PER_DAY', '15'))
 PROMPT = """Find {count} real, currently operating companies: {target}{area}.
 Use web search on public sources only (company websites, chamber of commerce / Maroof / Google business listings,

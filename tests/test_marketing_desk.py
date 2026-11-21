@@ -38,3 +38,10 @@ def test_store_and_report():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     r = subprocess.run([sys.executable, '-c', SCRIPT], cwd=root, capture_output=True, text=True, timeout=60)
     assert r.stdout.strip().endswith('OK'), r.stderr[-2500:] + r.stdout[-500:]
+
+
+def test_uae_carriers_back_in_outreach(monkeypatch):
+    from app import daily_prospects as dp
+    key, label, score, pitch = dp.classify('Mega Al Sahar Cargo', 'FTL Dubai to Saudi Arabia', '')
+    assert key == 'uae_carrier' and score == 45 and 'البطحاء' in pitch
+    assert 'uae' in SEGMENTS and ROTATION[0] == 'uae'
