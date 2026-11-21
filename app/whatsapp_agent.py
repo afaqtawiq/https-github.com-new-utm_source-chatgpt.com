@@ -168,6 +168,8 @@ def accept_inbound(payload):
     if not snapshots:
         from app.driver_language import lang_hint
         data['lang_hint'] = lang_hint(message.get('text'))
+    from app.reply_language import detect  # the customer's language for the reply (owner, 21 Nov 2026)
+    data['lang'] = detect(message.get('text'))
     if '_takeover_generation' in payload:
         # Receiver supplies the database generation after validating the event.
         data['takeover_expected_generation'] = payload['_takeover_generation']
@@ -537,6 +539,12 @@ async def processing(job):
 
 
 async def dispatch(job):
+    try:
+        from app.reply_language import localized_reply
+        job = dict(job, reply_text=await run_in_threadpool(localized_reply, job))
+    except Exception as exc:
+        print('WA_AGENT_TRANSLATE', type(exc).__name__, str(exc)[:120], flush=True)
+
     async def guard():
         if (z.account_id() != job['account_id'] or not await run_in_threadpool(store.send_authorized,job['id'],job['send_token'])):
             raise z.WhatsAppBlocked('Reply scope changed')
