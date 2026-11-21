@@ -30,6 +30,10 @@ BLOCKED = {'unsubscribed', 'do_not_contact', 'opted_out', 'محظور', 'إيق�
 
 SEGMENTS = [
     # key, label, score, patterns, pitch
+    # Owner, 21 Nov 2026: «حملة الشركات الصينية رجعها لقسم المبيعات» — forwarders/sourcing agents located IN China.
+    ('china_partner', 'وكيل شحن أو مورد في الصين (شريك)', 42,
+     r'في الصين|وكلاء شحن وموردون في الصين|guangzhou|shenzhen|yiwu|ningbo|shanghai|qingdao|xiamen|foshan|中国|广州|深圳|义乌|宁波|上海',
+     'نبحث عن شركاء في الصين يشحنون للسعودية: نخلّص شحنات عملائكم في كل منافذ المملكة عبر حسابنا على فسح، ونوفر المستورد السعودي عند الحاجة والنقل حتى باب العميل.'),
     # Owner, 21 Nov 2026: «حملة شركات الشحن البري الإماراتي خليها تواصل فيها» — the agent works the UAE carriers again.
     ('uae_carrier', 'شركة شحن إماراتية (منفذ البطحاء)', 45,
      r'الإمارات|الامارات|دبي|الشارقة|عجمان|أبوظبي|ابوظبي|أبو ظبي|ابو ظبي|رأس الخيمة|راس الخيمة|البطحاء|uae|dubai|sharjah|ajman|abu dhabi|ras al khaimah|batha|ghuwaifat',

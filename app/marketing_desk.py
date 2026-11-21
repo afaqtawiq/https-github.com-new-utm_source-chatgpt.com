@@ -30,7 +30,7 @@ SEGMENTS = {
     'uae': ('شركات الشحن البري الإماراتية (منفذ البطحاء)', 'UAE land freight / trucking / cargo companies (Dubai, Sharjah, Ajman, Abu Dhabi, Ras Al Khaimah) that truck goods to Saudi Arabia through the Al Batha (Ghuwaifat) border'),
     'gcc': ('شركات خليجية تصدّر أو تعبر إلى السعودية', 'GCC (Kuwait, Bahrain, Oman, Qatar — not UAE) trading and logistics companies that export to or transit through Saudi Arabia'),
 }
-ROTATION = ('uae', 'forwarder', 'transport', 'uae', 'importer', 'china', 'gcc')
+ROTATION = ('uae', 'china', 'forwarder', 'transport', 'uae', 'china', 'importer')
 DAILY_LEADS = int(os.getenv('LEADS_PER_DAY', '15'))
 PROMPT = """Find {count} real, currently operating companies: {target}{area}.
 Use web search on public sources only (company websites, chamber of commerce / Maroof / Google business listings,
@@ -39,7 +39,7 @@ Exclude: Afaq Tuwaiq itself, government entities, individuals, and anything alre
 Return ONE JSON array only:
 [{{"company": "...", "city": "...", "activity": "short Arabic description", "phone": "+966... or ''", "email": "... or ''",
    "website": "... or ''", "source": "url where the contact appears"}}]
-Only include a company if at least a phone or an email was found on a public page. Never invent contacts."""
+Only include a company if at least a phone or an email was found on a public page{email_rule}. Never invent contacts."""
 
 
 def _digits(phone):
@@ -57,6 +57,7 @@ async def _research(segment, area, count, exclude):
         raise ValueError('البحث غير مفعّل على الخادم')
     target = SEGMENTS[segment][1]
     prompt = PROMPT.format(count=count, target=target, area=(' — focus on ' + area) if area else '',
+                           email_rule=' — for companies in China an EMAIL address is required (they are contacted by email)' if segment == 'china' else '',
                            exclude=', '.join(exclude[:60]) or 'none')
     model = os.getenv('LEADS_MODEL') or os.getenv('TRACKING_RESEARCH_MODEL') or os.getenv('LOAD_VISION_MODEL', 'claude-sonnet-5')
     tools = [{'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 8}]

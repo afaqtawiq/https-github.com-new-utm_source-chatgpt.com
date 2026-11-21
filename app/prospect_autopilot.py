@@ -15,6 +15,30 @@ from app.storage import db, log, one, utcnow
 TEMPLATE = 'afaaq_marketing_prospect_intro_v1_ar'
 STOP_LINE = 'لإيقاف الرسائل أرسل: إيقاف'
 SUBJECT = 'آفاق طويق — التخليص الجمركي والنقل البري لشحناتكم'
+CHINA_SUBJECT = 'Saudi customs clearance partner for your KSA shipments | 沙特清关合作伙伴 — Afaq Tuwaiq'
+
+
+def china_message(company):
+    """China partner campaign (owner, 21 Nov 2026): English + Chinese, by email (WhatsApp templates are Arabic)."""
+    return (f'Hello {company},\n\n'
+            'We are Afaq Tuwaiq Customs Clearance & Logistics, a licensed customs broker in Saudi Arabia (licence no. 2513). '
+            'We are looking for partner freight forwarders and sourcing agents in China who ship to Saudi Arabia and the GCC.\n\n'
+            'For your customers\' shipments we provide:\n'
+            '- Customs clearance at all Saudi ports (Jeddah, Dammam, Riyadh Dry Port and land borders) through our own FASAH account\n'
+            '- SABER / SFDA compliance follow-up\n'
+            '- Importer-of-record service through our registered Saudi company when the consignee needs it\n'
+            '- Inland trucking to the customer\'s door in any Saudi city, with daily status updates\n\n'
+            'If you ship FCL or LCL to Saudi Arabia, we would be glad to be your clearing partner. '
+            'Reply to this email or WhatsApp +966 50 766 5873.\n\n'
+            '您好，\n\n'
+            '我们是沙特阿拉伯的 Afaq Tuwaiq 清关及物流公司（持牌报关行，执照号 2513）。我们正在寻找向沙特及海湾地区发货的中国货代和采购代理合作伙伴。\n\n'
+            '我们可为贵司客户的货物提供：\n'
+            '- 沙特所有口岸（吉达港、达曼港、利雅得陆港及陆路口岸）清关，使用我们自己的 FASAH 账户\n'
+            '- SABER / SFDA 合规跟进\n'
+            '- 如收货人需要，可由我们在沙特注册的公司担任进口商（IOR）\n'
+            '- 送货上门至沙特任何城市，并每日更新货物状态\n\n'
+            '如贵司有发往沙特的整柜或拼箱货物，欢迎与我们合作。请直接回复本邮件，或通过 WhatsApp 联系 +966 50 766 5873。\n\n'
+            'Best regards / 此致\nAfaq Tuwaiq Customs Clearance & Logistics — info@afaqtawiqs.net')
 
 
 def enabled():
@@ -167,6 +191,23 @@ async def run():
             reason = already_contacted(c, item['phone'], item['email'])
         if reason:
             decide([item['id']], 'reject', uid, note='autopilot: ' + reason)
+            stats['skipped'] += 1
+            continue
+        if item.get('segment') == 'china_partner':
+            # China partner campaign: bilingual email only; never an Arabic WhatsApp template to a Chinese company.
+            if item['status'] == 'pending':
+                decide([item['id']], 'approve', uid)
+            if item['email'] and item['status'] == 'pending':
+                try:
+                    await run_in_threadpool(mail_send, uid, item['email'], CHINA_SUBJECT, china_message(item['company_name']))
+                    stats['email'] += 1
+                    decide([item['id']], 'contacted', uid, note='autopilot: email china')
+                    continue
+                except Exception as exc:
+                    print('AUTO_OUTREACH_EMAIL_FAILED', item['id'], type(exc).__name__, str(exc)[:160], flush=True)
+            with db() as c:
+                c.execute("UPDATE daily_prospects SET outcome_note='china: needs email or WeChat',updated_at=%s WHERE id=%s",
+                          (utcnow(), item['id']))
             stats['skipped'] += 1
             continue
         pitch = pitch_of(item['message'])
