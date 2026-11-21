@@ -141,6 +141,11 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}}}},
     {'name': 'fasah_importer_phone', 'description': 'Manager only. Save the WhatsApp number of an importer AS ITS NAME APPEARS IN FASAH, so status-change messages to that customer can be prepared (sent only after «نفذ»). e.g. «رقم المستورد سلة الرحائب 0551234567».',
      'input_schema': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'phone': {'type': 'string'}}, 'required': ['name', 'phone']}},
+    {'name': 'find_leads', 'description': 'Sales: research NEW prospect companies on the public web and add them (with their public business phone/email) to the prospects directory, so the daily approved outreach contacts them. segment: forwarder (شركات الشحن/وكلاء الشحن) | transport (شركات النقل والشاحنات) | importer (مستوردون) | china (وكلاء شحن في الصين) | gcc (شركات خليجية). Optional area (city/country) and count (≤25). e.g. «ابحثي عن شركات نقل في الدمام».',
+     'input_schema': {'type': 'object', 'properties': {'segment': {'type': 'string', 'enum': ['forwarder', 'transport', 'importer', 'china', 'gcc']},
+        'area': {'type': 'string'}, 'count': {'type': 'integer'}}, 'required': ['segment']}},
+    {'name': 'marketing_report', 'description': 'Sales & marketing funnel report: posters published per platform, companies contacted, replies, interested, new leads found. days default 1 (today), up to 30.',
+     'input_schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}},
     {'name': 'prospect_replies', 'description': 'Which contacted prospect companies replied to the agent outreach and how (interested, asked price, not interested, stop), with quotes prepared. Optional days (default 7). e.g. «مين رد من العملاء المحتملين» «ردود حملة التعريف».',
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'string'}}}},
     {'name': 'driver_price_request', 'description': 'Collect MARKET prices from registered drivers for a real shipment: ask matching drivers on WhatsApp «بكم تحملها؟» (price request, not an assignment). Use for «اجمع أسعار من السواقين» «اسأل السواقين بكم ينقلون». cargo = what is carried (e.g. حاوية 40 قدم على سطحة 22 طن). vehicle_type optional (سطحة، جوانب، براد، دينا…). limit = max drivers (default 40). Needs the manager confirmation code before sending.',
@@ -608,6 +613,19 @@ def tool_fasah_importer_phone(c, a):
         return 'حفظ أرقام العملاء للمتابعة للمدير فقط.'
     from app import fasah_tracking
     return fasah_tracking.save_contact(a.get('name'), a.get('phone'), _member().get('name') or '')
+
+
+def tool_find_leads(c, a):
+    from app import marketing_desk
+    try:
+        return marketing_desk.find_leads(a.get('segment') or 'forwarder', a.get('area') or '', a.get('count') or 15)
+    except Exception as exc:
+        return 'تعذر البحث الآن: ' + type(exc).__name__
+
+
+def tool_marketing_report(c, a):
+    from app import marketing_desk
+    return marketing_desk.report(a.get('days') or 1)
 
 
 def tool_prospect_replies(c, a):
