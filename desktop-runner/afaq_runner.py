@@ -306,18 +306,59 @@ class Task:
         self.step(f'نزل الملف ({len(r.body()):,} بايت)')
         return self.upload(path, url)
 
+    CONSENT_DECLINE = ('Reject all', 'Reject All', 'Reject', 'Decline', 'Decline all', 'Allow selection', 'Allow necessary',
+                       'Only necessary', 'Necessary only', 'Use necessary cookies only', 'Continue without accepting',
+                       'رفض الكل', 'رفض', 'الضرورية فقط')
+    TRACK_WORDS = re.compile(r'(vessel arrival|arrives|arrival|eta|estimated time|discharg|وصول|التفريغ)', re.I)
+
+    def dismiss_consent(self, page):
+        """Close a cookie banner choosing the privacy-preserving option (never «accept all» on our own)."""
+        for name in self.CONSENT_DECLINE:
+            for loc in (page.get_by_role('button', name=name, exact=True), page.get_by_text(name, exact=True)):
+                try:
+                    if loc.count() and loc.first.is_visible():
+                        loc.first.click(timeout=4000)
+                        self.wait(page, 2)
+                        return name
+                except Stop:
+                    raise
+                except Exception:
+                    continue
+        return None
+
     def do_read_page(self):
         page = self.open(self.params['url'])
-        # Shipping-line tracking pages draw their results with scripts: wait until the text stops growing (max 'wait' s).
-        limit, size = max(3, min(int(self.params.get('wait') or 3), 45)), -1
-        self.wait(page, 3)
-        for _ in range((limit - 3) // 3):
-            now = len(page.inner_text('body') or '')
-            if now == size and now > 400:
+        tracking = self.params.get('purpose') == 'tracking'
+        ref = str(self.params.get('ref') or '')
+        # Shipping-line tracking pages draw their results with scripts: wait until the text stops growing (max 'wait' s),
+        # and for tracking until the reference and an arrival line show.
+        limit, size = max(3, min(int(self.params.get('wait') or 3), 75 if tracking else 45)), -1
+        self.wait(page, 4)
+        closed = self.dismiss_consent(page)
+        if closed:
+            self.step('أغلقت نافذة الكوكيز («' + closed + '»)')
+        found = False
+        for _ in range(max(1, (limit - 4) // 3)):
+            self.poll()
+            try:
+                text = page.inner_text('body') or ''
+            except Exception:
+                text = ''
+            if tracking and (not ref or ref in text) and self.TRACK_WORDS.search(text) and len(text) > 400:
+                found = True
+                self.wait(page, 3)  # let the remaining events finish drawing
                 break
-            size = now
+            if not tracking and len(text) == size and len(text) > 400:
+                break
+            if tracking and len(text) == size and len(text) > 400 and _ % 4 == 3:
+                try:
+                    page.mouse.wheel(0, 1500)  # some pages draw the events lazily
+                except Exception:
+                    pass
+            size = len(text)
             self.wait(page, 3)
-        self.step('فتحت الصفحة: ' + (page.title() or page.url), page=page)
+        self.step('فتحت الصفحة: ' + (page.title() or page.url)
+                  + ('' if not tracking else (' — ظهرت بيانات التتبع' if found else ' — لم تظهر بيانات الوصول بعد؛ حفظت ما ظهر')), page=page)
         text = page.inner_text('body').strip()
         if not text:
             self.step('الصفحة لا تحتوي نصًا يمكن حفظه', False)
