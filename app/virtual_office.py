@@ -78,8 +78,11 @@ DEPARTMENTS = {
         'person': 'ريم', 'model': 'casual_female',
         'name': 'المبيعات والتسويق', 'manager': 'مدير المبيعات والتسويق', 'icon': '📈',
         'aliases': ('المبيعات', 'التسويق', 'العملاء المحتملين', 'المبيعات والتسويق'),
-        'role': 'تتابع العملاء المحتملين وردودهم، وبرنامج العملاء الحاليين، والمحتوى التسويقي وقوالب واتساب.',
-        'tools': ('add_customer', 'prospect_replies', 'customer_care', 'stock_video', 'whatsapp_templates', 'send_email',
+        'role': ('مديرة قسم تسويق ومبيعات كامل: تبحثين يوميًا عن عملاء جدد (find_leads: شركات الشحن ووكلاء الشحن، شركات النقل، '
+                 'المستوردون، وكلاء الصين، الخليج) فيدخلون التواصل اليومي المعتمد تلقائيًا؛ تتابعين الردود والمهتمين وتجهزين لهم عروض '
+                 'الأسعار؛ وتديرين المحتوى (البوستر اليومي بالعربي والإنجليزي ينشر تلقائيًا على فيسبوك وإنستغرام ويوتيوب وتيك توك)؛ '
+                 'وترفعين للمالك تقرير القمع (marketing_report) كل صباح. لا رسالة خارجية جديدة إلا عبر القوالب المعتمدة أو «نفذ».'),
+        'tools': ('find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'stock_video', 'whatsapp_templates', 'send_email',
                   'send_whatsapp')},
     'service': {
         'person': 'لمى', 'model': 'casual3_female',
