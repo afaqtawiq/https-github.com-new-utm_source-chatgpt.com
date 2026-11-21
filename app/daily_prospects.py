@@ -30,6 +30,11 @@ BLOCKED = {'unsubscribed', 'do_not_contact', 'opted_out', 'محظور', 'إيق�
 
 SEGMENTS = [
     # key, label, score, patterns, pitch
+    # Owner, 21 Nov 2026: «حملة شركات الشحن البري الإماراتي خليها تواصل فيها» — the agent works the UAE carriers again.
+    ('uae_carrier', 'شركة شحن إماراتية (منفذ البطحاء)', 45,
+     r'الإمارات|الامارات|دبي|الشارقة|عجمان|أبوظبي|ابوظبي|أبو ظبي|ابو ظبي|رأس الخيمة|راس الخيمة|البطحاء|uae|dubai|sharjah|ajman|abu dhabi|ras al khaimah|batha|ghuwaifat',
+     'نكمل رحلة شحناتكم بعد منفذ البطحاء: نخلّص الشحنات الواردة وشحنات الترانزيت عبر حسابنا الخاص على منصة فسح، '
+     'ولدينا شركة استيراد وتصدير مسجّلة في السعودية يمكن شحن البضاعة باسمها كمستورد عند الحاجة، ثم ننقلها حتى باب عميلكم في أي مدينة سعودية مع متابعة يومية.'),
     ('forwarder', 'شركات الشحن ووكلاء الشحن', 40, r'شحن دولي|وكيل شحن|وكلاء الشحن|فريت|فورورد|forward|freight|shipping agent|logistics|لوجست',
      'نتشرف بالتعاون معكم كشريك تخليص في المملكة: نخلّص شحنات عملائكم في ميناء جدة الإسلامي وميناء الملك عبدالعزيز بالدمام والميناء الجاف بالرياض '
      'عبر حسابنا على منصة فسح، مع متابعة سابر والجهات، والنقل الداخلي حتى مستودع العميل، بأسعار شراكة للوكلاء.'),
@@ -54,7 +59,7 @@ SEGMENTS = [
 DEFAULT_PITCH = ('نقدم التخليص الجمركي بميناء جدة والمنافذ البرية، واستقبال الشحنات والنقل البري والتخزين، '
                  'بخدمة واحدة من الميناء إلى مستودعكم.')
 CITY_SCORE = {'الرياض': 15, 'riyadh': 15, 'جدة': 8, 'جده': 8, 'jeddah': 8, 'الدمام': 8, 'dammam': 8, 'الخبر': 6, 'مكة': 6}
-# UAE carriers (Batha campaign) are handled directly by the sales team, not by the agent's daily list.
+# UAE carriers (Batha campaign): worked by the agent again (owner, 21 Nov 2026); UAE_CARRIERS_BY_SALES_TEAM=1 hands them back to the team.
 UAE_HANDLED = r'الإمارات|الامارات|دبي|الشارقة|عجمان|أبوظبي|ابوظبي|أبو ظبي|ابو ظبي|رأس الخيمة|راس الخيمة|البطحاء|\buae\b|dubai|sharjah|ajman|abu dhabi|ras al khaimah|batha|ghuwaifat|\+971|00971'
 
 
@@ -77,7 +82,8 @@ def init():
             created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)''')
         c.execute('CREATE INDEX IF NOT EXISTS daily_prospects_batch_idx ON daily_prospects(batch_date,status)')
         # UAE carriers are worked by the sales team directly; drop undecided agent drafts for them.
-        c.execute("DELETE FROM daily_prospects WHERE status='pending' AND segment='uae_carrier'")
+        if os.getenv('UAE_CARRIERS_BY_SALES_TEAM', '0') == '1':
+            c.execute("DELETE FROM daily_prospects WHERE status='pending' AND segment='uae_carrier'")
     refresh_pending_messages()
 
 
@@ -245,6 +251,12 @@ def candidates():
         UNION ALL
         SELECT 'directory:' || d.id::text, d.company_name, COALESCE(d.phone,''), COALESCE(d.email,''),
             COALESCE(d.city,''), COALESCE(d.activity,''), '', COALESCE(d.notes,''), '' FROM customer_directory d''')
+    if one("SELECT to_regclass('carrier_companies') t")['t']:
+        # Batha campaign: the registered UAE carrier companies are worked by the agent too (owner, 21 Nov 2026).
+        pool += rows('''SELECT 'carrier:' || k.id::text AS source_key, k.company_name, k.phone, k.email,
+                COALESCE(NULLIF(k.city,''),'الإمارات') city, 'شحن بري إماراتي إلى السعودية عبر البطحاء' activity, k.website,
+                '' notes, '' status FROM carrier_companies k
+            WHERE k.country='AE' AND COALESCE(k.contact_consent,'unknown')<>'declined' ''')
     suppressed = {(r['channel'], r['recipient']) for r in rows('SELECT channel,recipient FROM marketing_suppressions')} \
         if one("SELECT to_regclass('marketing_suppressions') t")['t'] else set()
     queued = {r['source_key'] for r in rows('SELECT source_key FROM daily_prospects')}
@@ -253,7 +265,7 @@ def candidates():
     for row in pool:
         if row['source_key'] in queued or str(row['status']).lower() in BLOCKED or not (row['company_name'] or '').strip():
             continue
-        if is_uae_handled(row):
+        if os.getenv('UAE_CARRIERS_BY_SALES_TEAM', '0') == '1' and is_uae_handled(row):
             continue
         info = score_contact(row)
         if not (info['phone'] or info['email']):
