@@ -45,3 +45,13 @@ def test_uae_carriers_back_in_outreach(monkeypatch):
     key, label, score, pitch = dp.classify('Mega Al Sahar Cargo', 'FTL Dubai to Saudi Arabia', '')
     assert key == 'uae_carrier' and score == 45 and 'البطحاء' in pitch
     assert 'uae' in SEGMENTS and ROTATION[0] == 'uae'
+
+
+def test_china_partner_campaign():
+    from app import daily_prospects as dp
+    from app.prospect_autopilot import china_message, CHINA_SUBJECT
+    assert dp.classify('Shenzhen Star Logistics', 'وكلاء شحن وموردون في الصين يشحنون للسعودية — forwarder', 'Shenzhen')[0] == 'china_partner'
+    assert dp.classify('يوبي للإستيراد من الصين', 'استيراد من الصين / وسيط توريد', 'الرياض')[0] == 'china'
+    t = china_message('Star')
+    assert 'FASAH' in t and '清关' in t and '2513' in t and '沙特' in CHINA_SUBJECT
+    assert ROTATION.count('china') == 2
