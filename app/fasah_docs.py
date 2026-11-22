@@ -185,7 +185,7 @@ def notice(name: str):
     init()
     with db() as c:
         row = c.execute('''SELECT d.number, d.expires_at, f.data, f.verified FROM fasah_documents d JOIN runner_files f ON f.id=d.file_id
-            WHERE d.token=%s AND d.doc='release_notice' ''', (token,)).fetchone()
+            WHERE d.token=%s AND d.doc IN ('release_notice','declaration') ''', (token,)).fetchone()
     if not row or not row['verified'] or (row['expires_at'] and row['expires_at'] < utcnow()) or not bytes(row['data']).startswith(b'%PDF'):
         raise HTTPException(404)
     return Response(bytes(row['data']), media_type='application/pdf',

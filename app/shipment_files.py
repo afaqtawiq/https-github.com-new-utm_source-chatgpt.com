@@ -143,7 +143,20 @@ def upsert_from_document(fields, source='مستند ملاحي'):
                       (bill, data['customer'], data['contact_name'], data['phone'], data['email'], data['shipper'],
                        data['goods'], data['hs_code'], data['shipping_line'], data['vessel'], data['voyage'], data['pol'],
                        data['pod'], eta, json.dumps(boxes), _log(None, f'فُتح الملف من {source}'), now, now))
+            _start_flow(bill)
         return c.execute('SELECT * FROM shipment_files WHERE bill_no=%s', (bill,)).fetchone()
+
+
+def _start_flow(bill):
+    """New file → run the clearance flow once in the background (authorization, documents, arrival...)."""
+    import threading
+
+    def go():
+        import time
+        time.sleep(2)  # let the inserting transaction commit
+        from app import shipment_workflow
+        shipment_workflow.kickoff(bill)
+    threading.Thread(target=go, daemon=True).start()
 
 
 def from_tracking(ref, info):
@@ -206,7 +219,7 @@ def lookup_text(query):
     return '\n\n'.join(card(r) for r in rows[:3])
 
 
-def update(query, stage='', declaration_no='', phone='', contact_name='', email='', note='', actor=''):
+def update(query, stage='', declaration_no='', phone='', contact_name='', email='', note='', actor='', docs_received=''):
     rows = find(query)
     if not rows:
         return f'ما لقيت ملف شحنة لـ«{query}».'
@@ -234,13 +247,29 @@ def update(query, stage='', declaration_no='', phone='', contact_name='', email=
     if note:
         sets['notes'] = (r['notes'] + ' | ' if r['notes'] else '') + _clean(note, 300)
         changes.append('ملاحظة')
+    extra = ''
+    if docs_received:
+        from app import shipment_workflow as sw
+        sw.init()
+        with db() as c:
+            have = json.loads(c.execute('SELECT docs FROM shipment_files WHERE id=%s', (r['id'],)).fetchone()['docs'] or '[]')
+        got = [k for k, words in sw.DOC_WORDS.items() if any(w in docs_received.lower() for w in words) and k not in have]
+        if got:
+            sets['docs'] = json.dumps(have + got)
+            changes.append('استلام ' + '، '.join(sw.DOC_AR[k] for k in got))
     if not sets:
-        return 'ما فيه تغيير واضح. حدد المرحلة أو رقم البيان أو جوال العميل أو ملاحظة.'
+        return 'ما فيه تغيير واضح. حدد المرحلة أو رقم البيان أو جوال العميل أو المستندات المستلمة أو ملاحظة.'
     with db() as c:
         c.execute('UPDATE shipment_files SET ' + ''.join(f'{k}=%s,' for k in sets) + 'history=%s,updated_at=%s WHERE id=%s',
                   tuple(sets.values()) + (_log(r, (actor + ': ' if actor else '') + '، '.join(changes)), utcnow(), r['id']))
         r = c.execute('SELECT * FROM shipment_files WHERE id=%s', (r['id'],)).fetchone()
-    return '✅ حدّثت الملف.\n\n' + card(r)
+    if declaration_no:
+        try:
+            from app import shipment_workflow
+            extra = '\n\n🖨 ' + shipment_workflow.request_declaration_print(r, actor or 'فيصل').split('\n')[0]
+        except Exception as exc:
+            extra = '\n\nتعذر طلب طباعة البيان: ' + type(exc).__name__
+    return '✅ حدّثت الملف.\n\n' + card(r) + extra
 
 
 def board_text():

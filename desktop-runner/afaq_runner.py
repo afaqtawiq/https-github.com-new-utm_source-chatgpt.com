@@ -756,7 +756,10 @@ class Task:
             raise ValueError('رقم البيان غير صالح')
         page = self.fasah_list(which)
         row = self.find_row(page, number, which)
-        labels = re.compile(r'(طباعة إشعار الفسح|إشعار الفسح|اشعار الفسح|طباعة الإشعار|طباعة)')
+        if self.params.get('doc') == 'declaration':  # print the customs declaration itself (owner, 22 Nov 2026)
+            labels = re.compile(r'(طباعة البيان|طباعة بيان|البيان الجمركي|عرض البيان|طباعة)')
+        else:
+            labels = re.compile(r'(طباعة إشعار الفسح|إشعار الفسح|اشعار الفسح|طباعة الإشعار|طباعة)')
         target = row.get_by_text(labels)
         if not target.count():
             row.get_by_text('إظهار التفاصيل').first.click(timeout=8000)
@@ -767,7 +770,7 @@ class Task:
         if not target.count():
             self.step('لم أجد زر إشعار الفسح للبيان ' + number, False, page=page)
             raise ValueError('زر إشعار الفسح غير ظاهر (قد لا يكون البيان مفسوحًا بعد)')
-        path = self.dir / f'release-{number}.pdf'
+        path = self.dir / (f'declaration-{number}.pdf' if self.params.get('doc') == 'declaration' else f'release-{number}.pdf')
         before = set(self.context.pages)
         try:
             with page.expect_download(timeout=45000) as info:

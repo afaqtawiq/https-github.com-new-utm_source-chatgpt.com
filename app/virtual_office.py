@@ -26,7 +26,7 @@ router = APIRouter()
 RIYADH = dt.timezone(dt.timedelta(hours=3))
 _READY = False
 
-COMMON = ('search', 'list_recent', 'report', 'ask_document', 'ask_colleague', 'shipment_file', 'shipment_file_update')
+COMMON = ('search', 'list_recent', 'report', 'ask_document', 'ask_colleague', 'shipment_file', 'shipment_file_update', 'shipment_workflow')
 DEPARTMENTS = {
     'clearance': {
         'person': 'فيصل', 'model': 'suit_male',
@@ -441,6 +441,8 @@ async def office_upload(key: str, request: Request):
             from app import load_vision, shipping_docs
             fields = await load_vision.extract_pdf(data)
             await run_in_threadpool(staff_documents.set_fields, doc_id, fields)
+            from app import shipment_workflow
+            await run_in_threadpool(shipment_workflow.note_document, fields)
             if fields.get('document_kind') == 'shipping_document' and fields.get('bill_no'):
                 registered = await run_in_threadpool(shipping_docs.register, fields, text)
                 text = (text + '\n\n' if text else '') + ('[سُجل المستند في ملف الشحنة ' + str(fields.get('bill_no')) +
