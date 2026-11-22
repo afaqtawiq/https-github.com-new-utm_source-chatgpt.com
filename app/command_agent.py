@@ -50,6 +50,11 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'zatca_rules', 'description': 'ZATCA customs procedures rules with article numbers (documents, missing documents & 90-day undertaking, amendment/cancellation, inspection, samples, deferred payment, temporary admission, re-export, personal effects, transit, broker), advance declaration and 2-hour clearance, fee inquiry steps, duty/VAT basis, and Saudi port operators (Jeddah RSGT/DP World, Dammam SGP, Riyadh dry port).',
      'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'shipment_file', 'description': 'The shared SHIPMENT FILE (one per bill of lading): customer/consignee and HOW TO CONTACT them (name, phone, email), shipper, goods, vessel, ETA, containers, declaration, current stage and next step with the responsible department. query = bill no, container no, declaration no, customer name or phone. query «اللوحة»/«board» = all open files by stage. Use it FIRST whenever someone asks who owns a shipment or how to reach the customer.',
+     'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
+    {'name': 'shipment_file_update', 'description': 'Update a shipment file: stage (booked/arriving/arrived/declared/inspection/duties/released/trucking/delivered/returned/closed or its Arabic label), declaration_no, customer phone/contact_name/email, or a note. query = bill/container/customer.',
+     'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_no': {'type': 'string'},
+        'phone': {'type': 'string'}, 'contact_name': {'type': 'string'}, 'email': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['query']}},
     {'name': 'customs_question', 'description': 'Answer a question about customs procedures, documents or requirements from the approved knowledge.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'add_driver', 'description': 'Register a driver for load offers.',
@@ -305,6 +310,18 @@ def tool_clearance_expert(c, a):
 def tool_zatca_rules(c, a):
     from app.zatca_ports_knowledge import NOTES
     return NOTES
+
+
+def tool_shipment_file(c, a):
+    from app import shipment_files
+    q = str(a.get('query') or '').strip()
+    return shipment_files.board_text() if q.lower() in ('اللوحة', 'لوحة', 'board', 'الكل', 'all') else shipment_files.lookup_text(q)
+
+
+def tool_shipment_file_update(c, a):
+    from app import shipment_files
+    return shipment_files.update(a.get('query'), a.get('stage') or '', a.get('declaration_no') or '', a.get('phone') or '',
+                                 a.get('contact_name') or '', a.get('email') or '', a.get('note') or '', _member().get('name') or '')
 
 
 def tool_customs_question(c, a):

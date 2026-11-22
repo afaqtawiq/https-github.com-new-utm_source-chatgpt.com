@@ -26,7 +26,7 @@ router = APIRouter()
 RIYADH = dt.timezone(dt.timedelta(hours=3))
 _READY = False
 
-COMMON = ('search', 'list_recent', 'report', 'ask_document', 'ask_colleague')
+COMMON = ('search', 'list_recent', 'report', 'ask_document', 'ask_colleague', 'shipment_file', 'shipment_file_update')
 DEPARTMENTS = {
     'clearance': {
         'person': 'فيصل', 'model': 'suit_male',
@@ -161,6 +161,8 @@ def scope(key):
               'ربط الحسابات والإعدادات التقنية (مثل رموز الخدمات في Railway) يتولاها المالك نفسه؛ لا تحيلها لمدير آخر. '
               'مدراء المكتب (فيصل، خالد، سلطان، نورة، ريم، لمى، دانة، هند) موظفون افتراضيون داخل الوكيل وليس لهم جوالات؛ '
               'الفريق البشري هو المسجل في list_employees، فلا تطلب تسجيل مدير افتراضي كموظف. '
+              'لكل شحنة ملف مشترك (shipment_file): صاحبها وجواله وإيميله والحاويات والبيان والمرحلة والخطوة التالية — '
+              'ارجع له أولًا لأي سؤال عن عميل أو شحنة، وحدّثه (shipment_file_update) عند أي تقدم. '
               'تستطيع قراءة أي ملف أرسله المالك أو رفعه هنا (PDF، صورة، إكسل، وورد) بأداة ask_document؛ إن لم يصلك الملف '
               'فاطلب منه رفعه هنا أو تحويله لرقم الوكيل بدل أن تقول إنك لا تملك أداة. '
               'إذا نقصت معلومة من العميل (مثل وصف المنتج لسابر أو التعرفة) فجهّز له رسالة طلب البيانات الناقصة بالتحديد '
@@ -431,8 +433,20 @@ async def office_upload(key: str, request: Request):
     if not kind:
         raise HTTPException(415, mime)
     owner = office_owner(session)
-    await run_in_threadpool(staff_documents.save, owner, name, mime, data)
+    doc_id = await run_in_threadpool(staff_documents.save, owner, name, mime, data)
     text = str(form.get('text') or '').strip()[:2000]
+    if data[:4] == b'%PDF':
+        # Every shipping document uploaded in the office opens/updates its shipment file (customer, contact, containers).
+        try:
+            from app import load_vision, shipping_docs
+            fields = await load_vision.extract_pdf(data)
+            await run_in_threadpool(staff_documents.set_fields, doc_id, fields)
+            if fields.get('document_kind') == 'shipping_document' and fields.get('bill_no'):
+                registered = await run_in_threadpool(shipping_docs.register, fields, text)
+                text = (text + '\n\n' if text else '') + ('[سُجل المستند في ملف الشحنة ' + str(fields.get('bill_no')) +
+                        (' وفي متابعة الحاويات: ' + registered if registered else '') + ' — اعرض الملف بأداة shipment_file.]')
+        except Exception as exc:
+            print('OFFICE_DOC_EXTRACT', type(exc).__name__, str(exc)[:160], flush=True)
     reply = await run_in_threadpool(ask, key, text, session.get('name') or session.get('email') or 'المدير',
                                     owner=owner, attached=(name, kind))
     return {'reply': reply, 'file': name, 'kind': KIND_AR.get(kind, kind)}

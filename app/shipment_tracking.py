@@ -322,6 +322,11 @@ def _save(ref, kind, carrier, info=None, provider_id=None, error=None, actor='',
                       ('arrived' if info['arrived'] else 'tracking', info['vessel'], info['voyage'], info['pol'], info['pod'],
                        info['etd'], info['eta'], info['arrived'], json.dumps(info['containers']), info['last_event'],
                        utcnow(), info['eta'], row['id']))
+            try:
+                from app import shipment_files
+                shipment_files.from_tracking(ref, info)
+            except Exception as exc:
+                print('SHIPMENT_FILE_TRACK', type(exc).__name__, str(exc)[:120], flush=True)
             touched = apply_to_desk(c, ref, kind, info)
             if touched and info.get('eta'):
                 _TOUCHED[ref] = touched
