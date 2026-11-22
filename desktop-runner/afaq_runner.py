@@ -577,8 +577,71 @@ class Task:
                     continue
         return None
 
+    AUTH_SHOW = ('عرض التفاويض', 'عرض', 'بحث')
+    AUTH_PORTS = ('جدة', 'الرياض', 'الدمام')       # Afaq's ports; params «ports» overrides
+
+    def port_picker(self, page):
+        """FASAH shows the authorizations only after choosing a port (المنفذ) and pressing «عرض التفاويض»
+        (ZATCA user guide). Returns (kind, locator, [option texts]) or None."""
+        sel = page.locator('select')
+        for i in range(min(sel.count(), 8)):
+            try:
+                opts = [o.strip() for o in sel.nth(i).locator('option').all_inner_texts() if o.strip()]
+            except Exception:
+                continue
+            if any(re.search(r'ميناء|منفذ|مطار|جمرك|جدة|الدمام|الرياض', o) for o in opts):
+                return 'native', sel.nth(i), opts
+        for name in ('اختر المنفذ', 'المنفذ', 'اختيار المنفذ', 'اختر'):
+            for loc in (page.get_by_role('combobox'), page.get_by_text(name, exact=True)):
+                try:
+                    if not loc.count() or not loc.first.is_visible():
+                        continue
+                    loc.first.click(timeout=6000)
+                    self.wait(page, 2)
+                    opts = [o.strip() for o in page.get_by_role('option').all_inner_texts() if o.strip()]
+                    if not opts:
+                        opts = [o.strip() for o in page.locator('li, .ng-option, mat-option').all_inner_texts()
+                                if re.search(r'ميناء|منفذ|مطار|جمرك', o)]
+                    page.keyboard.press('Escape')
+                    if opts:
+                        return 'custom', loc.first, opts
+                except Stop:
+                    raise
+                except Exception:
+                    continue
+        return None
+
+    def choose_port(self, page, picker, label):
+        kind, loc, _ = picker
+        if kind == 'native':
+            loc.select_option(label=label, timeout=8000)
+        else:
+            loc.click(timeout=6000)
+            self.wait(page, 1.5)
+            opt = page.get_by_role('option', name=label, exact=True)
+            (opt if opt.count() else page.get_by_text(label, exact=True)).first.click(timeout=6000)
+        self.wait(page, 1.5)
+
+    def read_pages(self, page, limit):
+        body = page.locator('main') if page.locator('main').count() else page.locator('body')
+        texts = [body.first.inner_text()]
+        for number in range(2, max(2, min(limit, 30)) + 1):
+            target = page.locator('ul.pagination, nav, .pagination').get_by_text(str(number), exact=True)
+            if not target.count():
+                break
+            before = texts[-1][:300]
+            target.last.click(timeout=8000)
+            now = before
+            for _ in range(8):
+                self.wait(page, 1.5)
+                now = body.first.inner_text()
+                if now[:300] != before:
+                    break
+            texts.append(now)
+        return texts
+
     def do_fasah_authorizations(self):
-        """Read-only: the broker authorizations list (importer, number, start/end, status) on all pages."""
+        """Read-only: the broker authorizations (importer, number, start/end, status) of each port Afaq works in."""
         page = self.fasah_signed_in()
         try:
             decline = page.get_by_role('button', name='رفض', exact=True)
@@ -586,43 +649,54 @@ class Task:
                 decline.first.click(timeout=5000)
         except Exception:
             pass
-        opened = None
+        opened, picker = None, None
         for attempt in range(4):
             self.poll()
             menu = self.click_text(page, self.AUTH_MENUS)
-            sub = self.click_text(page, self.AUTH_LISTS)
+            sub = self.click_text(page, self.AUTH_LISTS) or (self.click_text(page, ('التفاويض',)) if menu else None)
             opened = sub or menu
-            text = page.locator('body').inner_text()
-            if opened and re.search(r'\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2}', text):
+            picker = self.port_picker(page)
+            if picker or (opened and re.search(r'\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2}', page.locator('body').inner_text())):
                 break
             if attempt == 1:
                 page.goto(FASAH, wait_until='domcontentloaded', timeout=60000)
                 self.wait(page, 5)
+        limit = int(self.params.get('pages') or 10)
         texts = []
-        body = page.locator('main') if page.locator('main').count() else page.locator('body')
-        texts.append(body.first.inner_text())
-        self.step('فتحت ' + (opened or 'الصفحة الحالية') + ' في فسح (قراءة فقط)', page=page)
-        for number in range(2, max(2, min(int(self.params.get('pages') or 10), 30)) + 1):
-            target = page.locator('ul.pagination, nav, .pagination').get_by_text(str(number), exact=True)
-            if not target.count():
-                break
-            before = texts[-1][:300]
-            target.last.click(timeout=8000)
-            for _ in range(8):
-                self.wait(page, 1.5)
-                now = body.first.inner_text()
-                if now[:300] != before:
-                    break
-            texts.append(now)
-        if not opened:
-            links = [t.strip() for t in page.locator('a, button').all_inner_texts() if t.strip()][:120]
-            texts.append('\n[قائمة الروابط الظاهرة]\n' + '\n'.join(links))
+        if picker:
+            options = picker[2]
+            every = [o for o in options if re.search(r'الكل|جميع', o)]
+            wanted = [w for w in (self.params.get('ports') or self.AUTH_PORTS)]
+            ports = every[:1] or [o for o in options if any(w in o for w in wanted)] or \
+                [o for o in options if not re.search(r'اختر|^-', o)][:12]
+            self.step('صفحة التفاويض: أختار المنفذ ثم «عرض التفاويض» — ' + '، '.join(ports), page=page)
+            for label in ports:
+                self.poll()
+                try:
+                    self.choose_port(page, picker, label)
+                    self.click_text(page, self.AUTH_SHOW)
+                    self.wait(page, 4)
+                    texts += ['المنفذ: ' + label + '\n' + t for t in self.read_pages(page, limit)]
+                    self.step('قرأت تفاويض ' + label + ' (قراءة فقط)', page=page)
+                except Stop:
+                    raise
+                except Exception as exc:
+                    self.step('تعذر عرض تفاويض ' + label + ': ' + str(exc)[:80], False, page=page)
+                picker = self.port_picker(page) or picker
+        elif opened:
+            texts = self.read_pages(page, limit)
+            self.step('فتحت ' + opened + ' في فسح (قراءة فقط)', page=page)
         path = self.dir / 'fasah-authorizations.txt'
+        found = bool(texts) and bool(re.search(r'\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2}', '\n'.join(texts)))
+        if not found:
+            links = [t.strip() for t in page.locator('a, button').all_inner_texts() if t.strip()][:150]
+            texts.append('\n[لم تظهر تواريخ تفاويض — الروابط والأزرار الظاهرة]\n' + '\n'.join(links))
         path.write_text(('\n\n----- صفحة -----\n\n'.join(texts)).strip(), encoding='utf-8')
-        self.step(f'قرأت {len(texts)} صفحة من التفاويض (قراءة فقط)')
-        if not opened:
+        if not found:
+            self.step('لم تظهر قائمة التفاويض (حفظت ما ظهر في الصفحة للمراجعة)', False, page=page)
             self.upload(path, page.url)
-            raise ValueError('لم أجد قائمة التفاويض في فسح؛ حفظت الروابط الظاهرة للمراجعة')
+            raise ValueError('لم تظهر قائمة التفاويض في فسح بعد اختيار المنفذ؛ حفظت ما ظهر في الصفحة للمراجعة')
+        self.step(f'قرأت {len(texts)} صفحة من التفاويض (قراءة فقط)')
         return self.upload(path, page.url)
 
     DETAIL_SECTIONS = ('معلومات البيان الأساسية', 'الفواتير', 'تفاصيل فاتورة البيان الجمركي',
@@ -795,6 +869,27 @@ class Task:
         return self.upload(path, page.url)
 
 
+def self_update(api):
+    """While idle: fetch the latest runner from the system; if it changed and compiles, replace this file and restart."""
+    try:
+        r = requests.get(api.base + '/agent-runner/client/afaq_runner.py', timeout=30)
+        r.raise_for_status()
+        new = r.content
+        here = os.path.abspath(__file__)
+        with open(here, 'rb') as f:
+            if f.read() == new or b'def main()' not in new:
+                return False
+        compile(new, 'afaq_runner.py', 'exec')
+        with open(here + '.new', 'wb') as f:
+            f.write(new)
+        os.replace(here + '.new', here)
+        print('حُدّث برنامج الجهاز تلقائيًا؛ يعاد تشغيله الآن (قد يطلب فسح تسجيل الدخول مرة أخرى).', flush=True)
+        return True
+    except Exception as exc:
+        print('تعذر فحص التحديث:', str(exc)[:100], flush=True)
+        return False
+
+
 def run_one(api, got, context):
     task = Task(api, got['task'], got.get('allowed_domains') or [], context, got.get('allow_http_loopback', False))
     status, result = 'failed', {}
@@ -834,6 +929,7 @@ def main():
             context = pw.chromium.launch_persistent_context(channel='chrome', **kwargs)
         except Exception:
             context = pw.chromium.launch_persistent_context(**kwargs)
+        last_check = time.time()
         while True:
             try:
                 got = api.post('/api/runner/claim')
@@ -848,6 +944,11 @@ def main():
             elif args.once:
                 break
             else:
+                if time.time() - last_check > 15 * 60:
+                    last_check = time.time()
+                    if self_update(api):
+                        context.close()
+                        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
                 time.sleep(10)
         context.close()
 
