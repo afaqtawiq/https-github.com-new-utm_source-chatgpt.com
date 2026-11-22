@@ -55,8 +55,14 @@ def is_yasmen(supplier, invoice_no):
     return not s.strip() and str(invoice_no or '').strip().upper().startswith('AB')
 
 
+SALLA_WORDS = ('سله الرحايب', 'سله الرحاب', 'سله رحايب', 'سلة الرحائب', 'salla', 'sallah', 'al rahaib', 'alrahaib',
+               'al-rahaib', 'rahaeb', 'rahayeb')
+
+
 def is_salla(name):
-    return 'سله الرحايب' in fold(name).replace('ة', 'ه') or 'salla' in fold(name)
+    """سلة الرحائب however FASAH spells it (سلة/سله، الرحائب/الرحايب، English)."""
+    t = fold(name).replace('ة', 'ه')
+    return any(w in t for w in SALLA_WORDS) or bool(re.search(r'(^|\s)سله(\s|$)', t))
 
 
 # Flat-rate customers (owner, 22 Nov 2026): one fixed amount per declaration, all-inclusive.
