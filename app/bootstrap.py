@@ -271,6 +271,8 @@ from app.daily_statements import register_worker as register_daily_statements
 register_daily_statements(app)
 from app.marketing_desk import register_worker as register_marketing_desk
 register_marketing_desk(app)
+from app.ops_watch import register_worker as register_ops_watch
+register_ops_watch(app)
 from app.prospect_followups import register_worker as register_prospect_followups
 register_prospect_followups(app)
 from app.price_calculator import router as price_calculator_router, init as init_price_calculator
