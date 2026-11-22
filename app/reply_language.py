@@ -31,9 +31,26 @@ def detect(text):
     return ''
 
 
+def decisive(text, lang):
+    """A message only switches the conversation's language when it is real text in that language: «OK», «Hi», «👍»
+    or a number from a Saudi customer must not turn the next replies into English (owner, 22 Nov 2026)."""
+    text = str(text or '')
+    if lang in ('zh', 'hi'):
+        return True
+    latin, arabic = len(re.findall(r'[A-Za-z]', text)), len(re.findall(r'[؀-ۿ]', text))
+    words = len(re.findall(r'[A-Za-z؀-ۿ]{2,}', text))
+    if arabic > latin:
+        return lang in ('ar', 'ur') and arabic >= 2
+    return latin >= 8 and words >= 2
+
+
 def customer_language(job):
-    """Language of this message, else the one remembered for the conversation ('ar' by default)."""
-    lang = (job.get('payload') or {}).get('lang') or ''
+    """Language of this message when it is decisive, else the one remembered for the conversation, else Arabic.
+    A message with no readable text (edited/unsupported WhatsApp message, sticker, voice) never changes it."""
+    payload = job.get('payload') or {}
+    lang = payload.get('lang') or ''
+    if lang and payload.get('question') is not None and not decisive(payload.get('question'), lang):
+        lang = ''
     try:
         from app.storage import db
         with db() as c:

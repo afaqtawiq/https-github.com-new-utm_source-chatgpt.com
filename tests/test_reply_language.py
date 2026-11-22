@@ -31,3 +31,11 @@ def test_every_language_both_ways(monkeypatch):
     assert rl.localized_reply({'reply_text': 'Ref: AF-133 / رقم الطلب', 'conversation_id': 'c'}) == 'Ref: AF-133 / رقم الطلب'
     assert rl.detect('मेरा कंटेनर कब आएगा') == 'hi' and rl.detect('میرا کنٹینر کب آئے گا') == 'ur'
     assert rl.detect('bhai load kab hai') == 'ur' and rl.detect('مرحبا، باقي عندك حمولات لليوم؟') == 'ar'
+
+
+def test_short_latin_does_not_switch_to_english():
+    from app.reply_language import decisive
+    assert not decisive('OK', 'en') and not decisive('Hi', 'en')
+    assert decisive('Please send me the rate for Jeddah', 'en')
+    assert decisive('مرحبا', 'ar') and decisive('ٹھیک ہے', 'ur') and decisive('thik hai bhai jan', 'ur')
+    assert decisive('你好', 'zh') and decisive('ठीक है', 'hi')
