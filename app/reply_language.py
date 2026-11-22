@@ -4,20 +4,30 @@ import json
 import os
 import re
 
-NAMES = {'en': 'English', 'zh': 'Simplified Chinese'}
+NAMES = {'en': 'English', 'zh': 'Simplified Chinese', 'ar': 'Arabic (polite Saudi business Arabic)',
+         'hi': 'Hindi (Devanagari script)', 'ur': 'Urdu (Urdu script)'}
+URDU_STRONG = re.compile(r'[ٹڈڑںےۓہۂ]')
+URDU_WEAK = re.compile(r'[کیھگچپژ]')
+ROMAN_URDU = re.compile(r'\b(ki|kya|kia|hai|hain|nahi|nahin|bhai|kitna|kahan|theek|thik|haan|jani|yaar|mujhe|aap|apka|kab)\b', re.I)
 
 
 def detect(text):
+    """'ar' / 'en' / 'zh' / 'hi' / 'ur' of a message, '' when it has no readable words (sticker, emoji, number)."""
     text = str(text or '')
     cjk = len(re.findall(r'[一-鿿]', text))
+    deva = len(re.findall(r'[ऀ-ॿ]', text))
     arabic = len(re.findall(r'[؀-ۿ]', text))
     latin = len(re.findall(r'[A-Za-z]', text))
     if cjk >= 2 and cjk >= arabic:
         return 'zh'
+    if deva >= 2 and deva >= latin / 2:
+        return 'hi'
     if arabic >= 2 and arabic >= latin / 2:
+        if URDU_STRONG.search(text) or len(URDU_WEAK.findall(text)) >= 3:
+            return 'ur'
         return 'ar'
     if latin >= 3:
-        return 'en'
+        return 'ur' if len(ROMAN_URDU.findall(text)) >= 2 else 'en'
     return ''
 
 
@@ -67,11 +77,15 @@ def translate(text, target):
 
 
 def localized_reply(job):
-    """An Arabic reply to an English/Chinese customer goes out in the customer's language (Arabic if translation fails)."""
+    """Owner (21-22 Nov 2026): the customer gets the reply in HIS language — Arabic, English, Chinese, Hindi or Urdu —
+    whatever language the reply was drafted in (a voice note/sticker keeps the conversation's language, Arabic by
+    default). Codes, numbers and links are kept; if translation fails the original reply goes out."""
     text = job.get('reply_text') or ''
-    if len(re.findall(r'[؀-ۿ]', text)) < 3 or re.search(r'[ٹڈڑںے]', text):
+    plain = re.sub(r'(?:AFT?|NQ)-\d+|https?://\S+|\S+@\S+|Ref|Afaq Tuwaiq|آفاق طويق|رقم الطلب', ' ', text)
+    have = detect(plain)
+    if not have:
         return text
     lang = customer_language(job)
-    if lang not in NAMES:
+    if not lang or lang == have or lang not in NAMES:
         return text
     return translate(text, lang) or text

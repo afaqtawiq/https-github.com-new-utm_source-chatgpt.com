@@ -18,3 +18,16 @@ def test_arabic_customer_and_failures_keep_arabic(monkeypatch):
     urdu = {'reply_text': 'لوڈ کی پیشکش ہے آپ کے لیے', 'payload': {}, 'conversation_id': 'c'}
     assert rl.localized_reply(urdu) == urdu['reply_text']
     assert rl.detect('Can I call you') == 'en' and rl.detect('你好，我想清关') == 'zh' and rl.detect('ابغى اخلص') == 'ar'
+
+
+def test_every_language_both_ways(monkeypatch):
+    monkeypatch.setattr(rl, 'translate', lambda text, lang: 'T:' + lang)
+    for lang, reply in (('ar', 'Welcome! It seems the message did not come through correctly.'),
+                        ('en', 'وصلت رسالتك'), ('zh', 'وصلت رسالتك'), ('hi', 'Your shipment arrives tonight.'),
+                        ('ur', 'وصلت رسالتك')):
+        monkeypatch.setattr(rl, 'customer_language', lambda job, l=lang: l)
+        assert rl.localized_reply({'reply_text': reply, 'payload': {}, 'conversation_id': 'c'}) == 'T:' + lang
+    monkeypatch.setattr(rl, 'customer_language', lambda job: 'ar')
+    assert rl.localized_reply({'reply_text': 'Ref: AF-133 / رقم الطلب', 'conversation_id': 'c'}) == 'Ref: AF-133 / رقم الطلب'
+    assert rl.detect('मेरा कंटेनर कब आएगा') == 'hi' and rl.detect('میرا کنٹینر کب آئے گا') == 'ur'
+    assert rl.detect('bhai load kab hai') == 'ur' and rl.detect('مرحبا، باقي عندك حمولات لليوم؟') == 'ar'
