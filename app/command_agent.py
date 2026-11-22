@@ -52,6 +52,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'shipment_file', 'description': 'The shared SHIPMENT FILE (one per bill of lading): customer/consignee and HOW TO CONTACT them (name, phone, email), shipper, goods, vessel, ETA, containers, declaration, current stage and next step with the responsible department. query = bill no, container no, declaration no, customer name or phone. query «اللوحة»/«board» = all open files by stage. Use it FIRST whenever someone asks who owns a shipment or how to reach the customer.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
+    {'name': 'billing_gap', 'description': 'Match the declarations seen in FASAH this month with the accounts: how many are recorded and, for EACH unrecorded declaration, why (not a سلة الرحائب declaration / no billing rule, read failed, waiting for «نفذ», never read). Use it when the manager asks why the accounts show fewer declarations than FASAH. month = YYYY-MM (optional).',
+     'input_schema': {'type': 'object', 'properties': {'month': {'type': 'string'}}}},
     {'name': 'shipment_workflow', 'description': 'RUN THE CLEARANCE FLOW of one shipment (سيّر الشحنة) end to end: 1) FASAH authorization of the importer (active/expired/none → prepares the request to the importer with our establishment name and licence 2513), 2) documents check (prepares the request for missing ones), 3) arrival date → arrival report to the customer, 4) prints the declaration from FASAH via the desktop runner → sends it to the customer, 5) delivery order request email to the shipping line, 6) the remaining steps to empty-container return. Every send is prepared with a «نفذ CODE». query = bill/container/customer. Use it whenever the manager asks to process/follow a shipment.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
     {'name': 'shipment_file_update', 'description': 'Update a shipment file: stage (booked/arriving/arrived/declared/inspection/duties/released/trucking/delivered/returned/closed or its Arabic label), declaration_no, customer phone/contact_name/email, or a note. query = bill/container/customer.',
@@ -326,6 +328,12 @@ def tool_shipment_file_update(c, a):
     return shipment_files.update(a.get('query'), a.get('stage') or '', a.get('declaration_no') or '', a.get('phone') or '',
                                  a.get('contact_name') or '', a.get('email') or '', a.get('note') or '', _member().get('name') or '',
                                  a.get('docs_received') or '')
+
+
+def tool_billing_gap(c, a):
+    from app import billing_gap
+    month = str(a.get('month') or '').strip()
+    return billing_gap.report(month if re.fullmatch(r'\d{4}-\d{2}', month) else None)
 
 
 def tool_shipment_workflow(c, a):
