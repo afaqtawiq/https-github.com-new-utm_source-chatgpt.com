@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from app.storage import db, utcnow
 
@@ -330,7 +330,7 @@ def _state(session=None):
         alert = any(v and any(w in label for w in ('متأخرة', 'منزعج', 'انتظار')) for label, v in kpis)
         last = history(key, 1)
         out.append({'key': key, 'name': d['name'], 'manager': d['manager'], 'icon': d['icon'], 'role': d['role'],
-                    'person': d.get('person', ''), 'model': d.get('model', ''),
+                    'person': d.get('person', ''), 'model': d.get('model', ''), 'photo': photo_version(key),
                     'actions': [list(x) for x in d.get('actions', ())],
                     'kpis': [[label, v] for label, v in kpis], 'alert': bool(alert),
                     'last': ({'command': last[-1]['command'][:200], 'reply': last[-1]['reply'][:300]} if last else None)})
@@ -402,6 +402,99 @@ async def office_ask(key: str, request: Request):
 
 
 MAX_UPLOAD = 15 * 1024 * 1024
+
+
+# ---------- real staff photos (owner, 22 Nov 2026): kept in the DB (the repo is public), shown only inside the office ----------
+_PHOTO_CACHE = {}
+
+
+def _photo_table(c):
+    c.execute('''CREATE TABLE IF NOT EXISTS staff_photos(key TEXT PRIMARY KEY, mime TEXT NOT NULL, data BYTEA NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+
+
+def photo(key):
+    """(mime, bytes, version) of a manager's photo: an uploaded one, else STAFF_PHOTO_<KEY> (base64 JPEG) from the server
+    settings; None when there is none."""
+    import base64
+    import os
+    try:
+        from app.storage import db
+        with db() as c:
+            _photo_table(c)
+            row = c.execute('SELECT mime, data, updated_at FROM staff_photos WHERE key=%s', (key,)).fetchone()
+        if row:
+            return row['mime'], bytes(row['data']), str(int(row['updated_at'].timestamp()))
+    except Exception as exc:
+        print('STAFF_PHOTO', type(exc).__name__, str(exc)[:120], flush=True)
+    raw = os.getenv('STAFF_PHOTO_' + key.upper(), '').strip()
+    if raw:
+        try:
+            data = base64.b64decode(raw)
+            return ('image/png' if data[:4] == b'\x89PNG' else 'image/jpeg'), data, 'env' + str(len(raw))
+        except ValueError:
+            return None
+    return None
+
+
+def photo_version(key):
+    try:
+        got = photo(key)
+    except Exception:
+        return ''
+    return got[2] if got else ''
+
+
+def square_jpeg(data, size=320):
+    """Centre-crop to a square (faces sit in the upper middle of a portrait) and shrink to a small JPEG."""
+    import io
+    from PIL import Image, ImageOps
+    im = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert('RGB')
+    w, h = im.size
+    side = min(w, h)
+    left, top = (w - side) // 2, max(0, min(h - side, int(h * 0.12))) if h > w else 0
+    im = im.crop((left, top, left + side, top + side)).resize((size, size), Image.LANCZOS)
+    out = io.BytesIO()
+    im.save(out, 'JPEG', quality=84, optimize=True)
+    return out.getvalue()
+
+
+@router.get('/office/api/photo/{key}')
+def office_photo(key: str, request: Request):
+    _admin(request)
+    got = photo(key) if key in DEPARTMENTS else None
+    if not got:
+        raise HTTPException(404)
+    return Response(got[1], media_type=got[0], headers={'Cache-Control': 'private, max-age=600'})
+
+
+@router.post('/office/api/{key}/photo')
+async def office_photo_upload(key: str, request: Request):
+    """Set a manager's real photo (image file). Replaces the previous one."""
+    import secrets as _secrets
+    from starlette.datastructures import UploadFile
+    session = _admin(request)
+    if key not in DEPARTMENTS:
+        raise HTTPException(404, 'قسم غير موجود')
+    if not _secrets.compare_digest(request.headers.get('x-csrf-token', ''), session.get('csrf') or '-'):
+        raise HTTPException(403, 'أعد فتح الصفحة ثم حاول مجددًا.')
+    form = await request.form()
+    up = form.get('file')
+    if not isinstance(up, UploadFile):
+        raise HTTPException(400, 'أرفق صورة.')
+    data = await up.read(12_000_001)
+    if not data or len(data) > 12_000_000:
+        raise HTTPException(400, 'الصورة فارغة أو أكبر من 12 ميجابايت.')
+    try:
+        small = square_jpeg(data)
+    except Exception:
+        raise HTTPException(400, 'الملف ليس صورة صالحة.')
+    from app.storage import db
+    with db() as c:
+        _photo_table(c)
+        c.execute('''INSERT INTO staff_photos(key,mime,data,updated_at) VALUES(%s,'image/jpeg',%s,NOW())
+            ON CONFLICT(key) DO UPDATE SET mime=EXCLUDED.mime,data=EXCLUDED.data,updated_at=NOW()''', (key, small))
+    return {'ok': True, 'photo': photo_version(key)}
 
 
 @router.post('/office/api/{key}/upload')
