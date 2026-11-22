@@ -31,6 +31,9 @@ button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
 #panel.full #kpis{display:none}
 #grow{position:absolute;left:60px;top:10px;padding:4px 10px}
 #close{position:absolute;left:10px;top:10px;padding:4px 10px}
+.tag img.av{display:block;width:44px;height:44px;border-radius:50%;object-fit:cover;margin:0 auto 3px;border:2px solid var(--c,#28475d);box-shadow:0 2px 6px #0007}
+#ph{display:flex;gap:10px;align-items:center}#ph .txt{min-width:0;flex:1}#pav{width:56px;height:56px;border-radius:50%;object-fit:cover;border:2px solid var(--line);flex:0 0 auto}
+#pav[hidden]{display:none}#setphoto{font-size:12px;padding:4px 8px;margin-top:4px}
 #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--muted);pointer-events:none}
 @media (max-height:760px){#kpis{display:none}}
 @media (max-width:700px){#panel{top:auto;left:0;right:0;bottom:0;width:100%;max-width:100%;min-width:0;height:92%;border-radius:16px 16px 0 0}#kpis{display:none}#ph p{display:none}#actions{flex-wrap:nowrap;overflow-x:auto;padding-bottom:6px}#actions button{flex:0 0 auto}.m{font-size:15px}#bar h1{font-size:14px}
@@ -48,7 +51,8 @@ button.primary{background:var(--accent);color:#04130a;border:0;font-weight:bold}
   <a class="btn" href="/dashboard">← النظام</a>
 </div>
 <div id="panel"><button id="close">✕</button><button id="grow" title="تكبير المحادثة">⛶</button>
-  <div id="ph"><h2 id="pt"></h2><p id="pr"></p></div>
+  <div id="ph"><img id="pav" alt="" hidden><div class="txt"><h2 id="pt"></h2><p id="pr"></p>
+    <label class="btn" id="setphoto" hidden title="صورة حقيقية للموظف">📷 صورة الموظف<input id="photofile" type="file" accept="image/*" hidden></label></div></div>
   <div id="kpis"></div><div id="actions"></div><div id="msgs"></div>
   <div id="chip" hidden><span id="chipname"></span><button type="button" id="chipx" title="إزالة">✕</button></div>
   <form id="form"><label id="attach" title="إرفاق ملف: PDF، إكسل، وورد، صور">📎<input id="file" type="file" hidden
@@ -131,12 +135,24 @@ const pane = (w, x, z, alongX, color) => {            // glass pane + frosted ba
   box(alongX ? w : 0.05, 0.16, alongX ? 0.05 : w, mat(color, {transparent:true, opacity:.55}), x, 1.15, z, false);
   box(alongX ? w : 0.08, 0.08, alongX ? 0.08 : w, frameMat, x, 2.56, z, false);
 };
-function signTexture(name, title, icon, color) {
+const SIGNS = {};
+function signTexture(name, title, icon, color, img) {
   const c = document.createElement('canvas'); c.width = 512; c.height = 128; const g = c.getContext('2d');
-  g.fillStyle = '#0f1c26'; g.fillRect(0, 0, 512, 128); g.fillStyle = color; g.fillRect(0, 118, 512, 10);
-  g.direction = 'rtl'; g.textAlign = 'center'; g.fillStyle = '#ffffff'; g.font = 'bold 48px Tahoma, Arial';
-  g.fillText(icon + ' ' + name, 256, 58); g.fillStyle = '#c9d8e3'; g.font = '30px Tahoma, Arial'; g.fillText(title, 256, 100);
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+  const draw = () => {
+    g.clearRect(0, 0, 512, 128); g.fillStyle = '#0f1c26'; g.fillRect(0, 0, 512, 128); g.fillStyle = color; g.fillRect(0, 118, 512, 10);
+    const cx = img ? 300 : 256;
+    if (img) { g.save(); g.beginPath(); g.arc(64, 58, 50, 0, Math.PI * 2); g.clip(); g.drawImage(img, 14, 8, 100, 100); g.restore();
+      g.strokeStyle = color; g.lineWidth = 4; g.beginPath(); g.arc(64, 58, 50, 0, Math.PI * 2); g.stroke(); }
+    g.direction = 'rtl'; g.textAlign = 'center'; g.fillStyle = '#ffffff'; g.font = 'bold 46px Tahoma, Arial';
+    g.fillText(icon + ' ' + name, cx, 56); g.fillStyle = '#c9d8e3'; g.font = '28px Tahoma, Arial'; g.fillText(title, cx, 98);
+  };
+  draw();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  t.redraw = im => { img = im; draw(); t.needsUpdate = true; }; return t;
+}
+function setSignPhoto(d) {
+  const t = SIGNS[d.key]; if (!t || !d.photo) return;
+  const im = new Image(); im.onload = () => t.redraw(im); im.src = photoUrl(d);
 }
 function buildOffice(d) {
   const [x, z] = DESKS[d.key], back = z < 0, color = COLORS[d.key], hex = '#' + color.toString(16).padStart(6, '0');
@@ -150,7 +166,7 @@ function buildOffice(d) {
   post(door - 0.5, zw); post(door + 0.5, zw); box(1.08, 0.12, 0.1, frameMat, door, 2.2, zw, false);
   const leaf = box(0.04, 2.1, 0.95, officeGlass, door - 0.5 + 0.02, 1.07, zw + (back ? 0.5 : -0.5), false);   // door left open
   // name plate above the door, readable from the corridor (and from the camera for the front row)
-  const tex = signTexture(d.person || d.manager, d.manager, d.icon || '', hex);
+  const tex = signTexture(d.person || d.manager, d.manager, d.icon || '', hex); SIGNS[d.key] = tex; setSignPhoto(d);
   for (const side of [1, -1]) {
     const plate = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.45), new THREE.MeshBasicMaterial({map: tex}));
     plate.position.set(x - 0.55, 2.3, zw + side * 0.06); plate.rotation.y = side > 0 ? 0 : Math.PI; scene.add(plate);
@@ -293,10 +309,11 @@ function build() {
   const l = document.getElementById('loading'); l && l.remove();
   window.__office = {camera, controls, people, scene, THREE};
 }
+const photoUrl = d => '/office/api/photo/' + d.key + '?v=' + encodeURIComponent(d.photo || '');
 function renderTag(p, bubble) {
   const d = p.dept, first = (d.kpis || [])[0];
   p.el.innerHTML = (bubble ? `<div class="bubble">${esc(bubble)}</div>` : '') +
-    `<b><span class="dot"></span>${esc(d.person || '')}</b><small class="role">${esc(d.icon)} ${esc(d.manager)}</small>` +
+    (d.photo ? `<img class="av" alt="" src="${photoUrl(d)}">` : '') + `<b><span class="dot"></span>${esc(d.person || '')}</b><small class="role">${esc(d.icon)} ${esc(d.manager)}</small>` +
     `<small>${first ? esc(first[0]) + ': ' + esc(first[1] ?? '—') : esc(d.name)}</small>`;
   p.el.classList.toggle('alert', !!d.alert);
   p.tag.position.y = p.seated ? 1.5 : 1.95;
@@ -380,11 +397,13 @@ async function openPanel(key) {
   current = key; panel.classList.add('open'); msgs.innerHTML = '';
   const form = document.getElementById('form');
   form.style.display = '';
-  if (!key) { document.getElementById('pt').textContent = '👥 اجتماع الفريق'; document.getElementById('pr').textContent = 'اكتب للفريق كله أو اختر موظفًا؛ يرد كل واحد من قسمه.';
+  if (!key) { document.getElementById('pav').hidden = true; document.getElementById('setphoto').hidden = true; document.getElementById('pt').textContent = '👥 اجتماع الفريق'; document.getElementById('pr').textContent = 'اكتب للفريق كله أو اختر موظفًا؛ يرد كل واحد من قسمه.';
     document.getElementById('kpis').innerHTML = ''; meetingTo = 'all'; renderRecipients();
     document.getElementById('text').placeholder = 'اكتب للفريق كله… أو اختر موظفًا من الأعلى'; return; }
   document.getElementById('text').placeholder = 'اكتب لمدير القسم… أو أرفق ملفًا 📎';
   const d = CFG.departments.find(x => x.key === key), color = '#' + COLORS[key].toString(16).padStart(6, '0');
+  const pav = document.getElementById('pav'); pav.hidden = !d.photo; if (d.photo) pav.src = photoUrl(d); pav.style.borderColor = color;
+  document.getElementById('setphoto').hidden = false;
   document.getElementById('pt').textContent = d.icon + ' ' + (d.person ? d.person + ' — ' : '') + d.manager; document.getElementById('pr').textContent = String(d.role || '').split(/(?<=\.)\s/)[0]; document.getElementById('pr').title = d.role || '';
   document.getElementById('kpis').innerHTML = (d.kpis || []).map(([l, v]) => `<div class="k">${esc(l)}<b>${esc(v ?? '—')}</b></div>`).join('');
   const acts = document.getElementById('actions'); acts.innerHTML = '';
@@ -438,6 +457,14 @@ async function meetingSend(text, file) {
   refresh();
 }
 
+document.getElementById('photofile').onchange = async e => {
+  const f = e.target.files[0], key = current; e.target.value = ''; if (!f || !key) return;
+  const fd = new FormData(); fd.append('file', f);
+  try { const r = await fetch('/office/api/' + key + '/photo', {method: 'POST', headers: {'X-CSRF-Token': CFG.csrf}, body: fd});
+    const data = await r.json(); if (!r.ok) throw new Error(data.detail || 'تعذر الرفع');
+    const d = CFG.departments.find(x => x.key === key); d.photo = data.photo; openPanel(key); renderTag(people[key]); setSignPhoto(d); }
+  catch (err) { alert(err.message || 'تعذر رفع الصورة'); }
+};
 const fileInput = document.getElementById('file'), chip = document.getElementById('chip');
 const KINDS = /\.(pdf|xlsx|csv|docx|jpe?g|png|webp|gif)$/i;
 fileInput.onchange = () => {
