@@ -52,9 +52,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'shipment_file', 'description': 'The shared SHIPMENT FILE (one per bill of lading): customer/consignee and HOW TO CONTACT them (name, phone, email), shipper, goods, vessel, ETA, containers, declaration, current stage and next step with the responsible department. query = bill no, container no, declaration no, customer name or phone. query «اللوحة»/«board» = all open files by stage. Use it FIRST whenever someone asks who owns a shipment or how to reach the customer.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
+    {'name': 'shipment_workflow', 'description': 'RUN THE CLEARANCE FLOW of one shipment (سيّر الشحنة) end to end: 1) FASAH authorization of the importer (active/expired/none → prepares the request to the importer with our establishment name and licence 2513), 2) documents check (prepares the request for missing ones), 3) arrival date → arrival report to the customer, 4) prints the declaration from FASAH via the desktop runner → sends it to the customer, 5) delivery order request email to the shipping line, 6) the remaining steps to empty-container return. Every send is prepared with a «نفذ CODE». query = bill/container/customer. Use it whenever the manager asks to process/follow a shipment.',
+     'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
     {'name': 'shipment_file_update', 'description': 'Update a shipment file: stage (booked/arriving/arrived/declared/inspection/duties/released/trucking/delivered/returned/closed or its Arabic label), declaration_no, customer phone/contact_name/email, or a note. query = bill/container/customer.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_no': {'type': 'string'},
-        'phone': {'type': 'string'}, 'contact_name': {'type': 'string'}, 'email': {'type': 'string'}, 'note': {'type': 'string'}}, 'required': ['query']}},
+        'phone': {'type': 'string'}, 'contact_name': {'type': 'string'}, 'email': {'type': 'string'}, 'note': {'type': 'string'},
+        'docs_received': {'type': 'string', 'description': 'documents received from the customer, e.g. «الفاتورة وقائمة التعبئة وشهادة المنشأ»'}}, 'required': ['query']}},
     {'name': 'customs_question', 'description': 'Answer a question about customs procedures, documents or requirements from the approved knowledge.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'add_driver', 'description': 'Register a driver for load offers.',
@@ -321,7 +324,13 @@ def tool_shipment_file(c, a):
 def tool_shipment_file_update(c, a):
     from app import shipment_files
     return shipment_files.update(a.get('query'), a.get('stage') or '', a.get('declaration_no') or '', a.get('phone') or '',
-                                 a.get('contact_name') or '', a.get('email') or '', a.get('note') or '', _member().get('name') or '')
+                                 a.get('contact_name') or '', a.get('email') or '', a.get('note') or '', _member().get('name') or '',
+                                 a.get('docs_received') or '')
+
+
+def tool_shipment_workflow(c, a):
+    from app import shipment_workflow
+    return shipment_workflow.run(a.get('query'), _member().get('name') or '')
 
 
 def tool_customs_question(c, a):
@@ -1113,7 +1122,7 @@ def tool_send_email(c, a):
 
 HANDLERS = {t['name']: globals()['tool_' + t['name']] for t in TOOLS}
 INTERNAL_WRITE = {'add_driver', 'add_shipment', 'add_customer', 'update_declaration', 'approve_prospects'}
-EXTERNAL = {'send_whatsapp', 'send_email', 'add_employee', 'remove_employee', 'agent_email_send', 'mail_reply'}
+EXTERNAL = {'shipment_step', 'send_whatsapp', 'send_email', 'add_employee', 'remove_employee', 'agent_email_send', 'mail_reply'}
 
 
 def execute_confirmed(c, payload):
@@ -1163,6 +1172,9 @@ def _execute_action(c, action, member):
     if action.get('tool') == 'record_bank_payments':
         from app import bank_reconcile
         return bank_reconcile.record(int(action['batch']), 'مطابقة كشف البنك — ' + (member.get('name') or 'المدير'))
+    if action.get('tool') == 'shipment_step':
+        from app import shipment_workflow
+        return shipment_workflow.execute(action)
     if action.get('tool') == 'collection_reminder':
         from app import invoice_collection
         return invoice_collection.send(action['invoice_no'])

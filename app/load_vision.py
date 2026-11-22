@@ -473,6 +473,11 @@ async def handle_pdf(c, payload, sender, index):
         fields = await extract_pdf(got[0])
         command += '\nقراءة الملف: ' + json.dumps(fields, ensure_ascii=False)[:1500]
         staff_documents.set_fields(doc_id, fields)
+        try:
+            from app import shipment_workflow
+            shipment_workflow.note_document(fields)
+        except Exception as exc:
+            print('SHIPMENT_DOC_TICK', type(exc).__name__, str(exc)[:120], flush=True)
         if fields.get('document_kind') == 'statement':
             from app.prospect_autopilot import system_user
             items = await si.extract(si.content_for(got[0], got[1]))

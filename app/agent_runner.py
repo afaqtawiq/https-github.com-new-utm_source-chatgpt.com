@@ -41,7 +41,7 @@ KINDS = {
     'fill_form': 'تعبئة نموذج في موقع مسموح (الإرسال يحتاج موافقتك)',
     'fasah_declarations': 'قراءة قائمة البيانات في فسح وحفظها CSV — قراءة فقط',
     'fasah_details': 'قراءة تفاصيل بيان واحد في فسح (الفاتورة والرسوم) — قراءة فقط',
-    'fasah_release_notice': 'تنزيل إشعار الفسح PDF لبيان مفسوح — قراءة فقط',
+    'fasah_release_notice': 'تنزيل إشعار الفسح أو طباعة البيان PDF من فسح — قراءة فقط',
     'fasah_authorizations': 'قراءة قائمة تفاويض المخلص في فسح (المستورد وتاريخ الانتهاء) — قراءة فقط',
 }
 FILE_TYPES = {'application/pdf', 'text/csv', 'text/plain', 'image/png', 'image/jpeg',
@@ -710,6 +710,9 @@ def after_fasah(tid):
                              'ما يُسجل على الياسمين وما يُسجل على عمران ونصيب سلة الرحائب، برمز «نفذ» واحد.'
                              + (f'\n  (باقي {len(imports) - len(todo)} بيان؛ أعد الأمر بعد التسجيل.)' if len(imports) > len(todo) else ''))
             notify('\n'.join(lines))
+        elif params.get('doc') == 'declaration':
+            from app import shipment_workflow
+            notify(shipment_workflow.after_declaration_pdf(task, params, f))
         elif params.get('purpose') == 'containers':
             from app import fasah_containers
             summary = fasah_containers.after_details(task, params, bytes(f['data']).decode('utf-8', 'replace')[:60000])
