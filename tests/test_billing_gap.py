@@ -21,7 +21,10 @@ with db() as c:
     c.execute("INSERT INTO billing_declarations(number,kind,items_json,status,created_at) VALUES('1001','import','[]','recorded',NOW())")
 t = billing_gap.report('2026-11')
 assert 'بيانات الشهر في فسح: 3' in t and 'مسجلة في الحسابات: 1' in t, t
-assert 'ليس بيان سلة الرحائب' in t and '1003' in t and 'لم يقرأ جهاز العمل' in t and '1002' in t, t
+assert 'عميل بسعر ثابت (مدى التطوير)' in t and '1003' in t and 'لم يقرأ جهاز العمل' in t and '1002' in t, t
+items = billing_rules.compute({'number': '1003', 'kind': 'import', 'party': 'مؤسسة مدى التطوير الحديث للتجارة'})
+assert len(items) == 1 and str(items[0]['amount']) == '1100.00' and items[0]['party'] == 'مدى التطوير', items
+assert 'مدى التطوير' in billing_rules.all_parties()
 print('OK')
 '''
 

@@ -338,7 +338,7 @@ def all_statements(months=None):
     months = months or [dt.datetime.now(dt.timezone(dt.timedelta(hours=3))).strftime('%Y-%m')]
     out = []
     for month in sorted(set(months))[-3:]:
-        for party in (billing_rules.YASMEN, billing_rules.OMRAN, billing_rules.SALLA):
+        for party in billing_rules.all_parties():
             data = statement(party, month)
             if data['lines'] or data.get('incomplete_count'):
                 out.append(statement_text(party, month))

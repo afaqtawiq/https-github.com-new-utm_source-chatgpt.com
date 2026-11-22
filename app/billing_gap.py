@@ -62,7 +62,8 @@ def report(month=None):
             rows.append(r)
     if not rows:
         return f'ما لقيت بيانات لشهر {month} في آخر قراءة لفسح.'
-    recorded, groups = [], {}
+    from app.billing_rules import flat_rate as flat_of
+    recorded, groups, flat_items = [], {}, []
     for r in sorted(rows, key=lambda x: x['number']):
         key, label = (r['number'], r['kind']), f"{r['number']} ({KIND_AR.get(r['kind'], r['kind'])})"
         b = billed.get(key)
@@ -72,6 +73,10 @@ def report(month=None):
             continue
         if b:
             why = 'قراءة الفاتورة/الرسوم ناقصة أو فشلت — تحتاج مراجعة' + (f": {str(b['error'])[:60]}" if b.get('error') else '')
+        elif flat_of(r['details']):
+            why = f"عميل بسعر ثابت ({flat_of(r['details'])[0]}) — جاهز للتسجيل برمز «نفذ» أدناه"
+            flat_items.append({'number': r['number'], 'kind': r['kind'], 'party': flat_of(r['details'])[0],
+                               'date': str(_date(r['declared_on']) or '') or None})
         elif 'سلة' not in str(r['details']):
             why = f'ليس بيان سلة الرحائب ({party}) — الفوترة التلقائية تغطي سلة الرحائب فقط، ولا توجد قاعدة تسعير لهذا المستورد'
         elif r['number'] in read:
@@ -85,6 +90,15 @@ def report(month=None):
            f'• غير مسجلة: {len(rows) - len(recorded)}']
     for why, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         out.append(f'\n❗ {why} ({len(items)}):\n  ' + '، '.join(items[:40]) + (' …' if len(items) > 40 else ''))
+    if flat_items:
+        try:
+            from app.agent_runner import prepare_billing
+            code = prepare_billing(flat_items, f'{len(flat_items)} بيان لعملاء بسعر ثابت')
+        except Exception as exc:
+            code = None
+            print('BILLING_GAP_FLAT', type(exc).__name__, str(exc)[:120], flush=True)
+        out.append(f'\n✅ لتسجيل {len(flat_items)} بيان لعملاء السعر الثابت مسودات في الحسابات اكتب: نفذ {code}' if code
+                   else '\n(تعذر تجهيز رمز التسجيل الآن — لا توجد محادثة مدير معروفة.)')
     out.append('\nالعلاج:'
                '\n- بيانات سلة غير المقروءة أو المنتهية رموزها: اكتب لنورة «سجل حسابات سلة من فسح»، وأكّد الرمز الواحد اللي يجيك بـ«نفذ».'
                '\n- بيانات المستوردين الآخرين: تحتاج سعر تخليص لكل مستورد (قاعدة فوترة) قبل ما تُسجل تلقائيًا.'

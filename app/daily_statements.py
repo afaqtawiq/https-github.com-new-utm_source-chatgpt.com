@@ -18,7 +18,7 @@ def run():
     text = statement_import.all_statements([month])
     if not text:
         return ''
-    statements = [statement_import.statement(p, month) for p in (billing_rules.YASMEN, billing_rules.OMRAN, billing_rules.SALLA)]
+    statements = [statement_import.statement(p, month) for p in billing_rules.all_parties()]
     statements = [s for s in statements if s.get('lines')]
     chat = owner_chat()
     sent, failed = (statement_pdf.send_to_requester(chat, statements) if chat and chat[1] else ([], [s['party'] for s in statements]))
