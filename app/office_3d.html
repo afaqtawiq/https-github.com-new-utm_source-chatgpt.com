@@ -66,7 +66,10 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const CFG = JSON.parse(document.getElementById('config').textContent);
 const COLORS = {clearance:0x3b82f6, transport:0xf59e0b, containers:0x06b6d4, finance:0x22c55e, sales:0xec4899, service:0xa855f7, email:0xef4444, admin:0x94a3b8};
-const DESKS = {clearance:[-10,-3], transport:[-6,-3], containers:[-2,-3], finance:[2,-3], sales:[-10,3], service:[-6,3], admin:[-2,3], email:[2,3]};
+// Every manager has a private glass office: four along the back wall, four along the front, a corridor between them.
+const OFFICE_X = [-12, -7.5, -3, 1.5], OFFICE_W = 4.5, BACK_Z = -5, FRONT_Z = 5.2, WALL_Z = 1.3;
+const DESKS = {clearance:[OFFICE_X[0], BACK_Z], transport:[OFFICE_X[1], BACK_Z], containers:[OFFICE_X[2], BACK_Z], finance:[OFFICE_X[3], BACK_Z],
+  sales:[OFFICE_X[0], FRONT_Z], service:[OFFICE_X[1], FRONT_Z], admin:[OFFICE_X[2], FRONT_Z], email:[OFFICE_X[3], FRONT_Z]};
 const MEETING = new THREE.Vector3(10.5, 0, 3);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -82,7 +85,7 @@ const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 20
 const persp = {pos: new THREE.Vector3(-2, 12, 20), target: new THREE.Vector3(-1, 0.5, 0)};
 const overhead = {pos: new THREE.Vector3(-1, 34, 0.01), target: new THREE.Vector3(-1, 0, 0)};
 if (innerWidth < innerHeight) {   // phone held upright: look along the room's long side
-  camera.fov = 60; camera.updateProjectionMatrix(); persp.pos.set(-22, 15, 3); persp.target.set(-3, 0, -1);
+  camera.fov = 62; camera.updateProjectionMatrix(); persp.pos.set(-26, 18.5, 0.5); persp.target.set(-4.5, 0, 0);
   overhead.pos.set(-1, 52, 0.01);
 }
 camera.position.copy(persp.pos);
@@ -112,22 +115,62 @@ seats.forEach(s => { const back = s.z > 3 ? 1 : -1; box(0.55, 0.08, 0.5, mat(0x1
 const screenTv = box(2.6, 1.5, 0.06, mat(0x0b1620, {emissive:0x1e3a5f, emissiveIntensity:.6}), 10.5, 2.2, -0.9, false);
 // plants, shelves, cooler
 const plant = (x, z, s = 1) => { box(0.5 * s, 0.5 * s, 0.5 * s, mat(0xf1f1f1), x, 0.25 * s, z); const l = new THREE.Mesh(new THREE.SphereGeometry(0.55 * s, 10, 8), mat(0x3f8f3a)); l.position.set(x, 0.95 * s, z); l.castShadow = true; scene.add(l); };
-plant(-14, -9.2, 1.3); plant(6.2, -9.2, 1.2); if (innerWidth >= innerHeight) plant(-14, 9, 1.2); plant(6.4, 8.8); plant(-14, -5);
-if (innerWidth >= innerHeight) { box(0.5, 2.6, 2.4, mat(0x6b4a32), -14.55, 1.3, 6.5); for (let y = 0.6; y < 2.6; y += 0.6) box(0.5, 0.05, 2.3, mat(0x3b2a1e), -14.5, y, 6.5, false); }
+plant(6.2, -9.2, 1.2); plant(6.4, 9.2);
+// corridor lounge (sofa + coffee table) where people take a break
+box(1.9, 0.42, 0.8, mat(0x334155), 5.2, 0.21, 8.9); box(1.9, 0.55, 0.18, mat(0x334155), 5.2, 0.6, 9.3); box(0.9, 0.35, 0.6, mat(0x6b4a32), 5.2, 0.18, 7.7);
+const LOUNGE = new THREE.Vector3(5.2, 0, 7.1);
 box(0.5, 1.2, 0.5, mat(0xdfe6ee), 5, 0.6, -9.3); box(0.35, 0.45, 0.35, mat(0x7cc4ff, {transparent:true, opacity:.8}), 5, 1.45, -9.3);
 const COOLER = new THREE.Vector3(5, 0, -8.3);
 
-// desks with department rugs, laptops and chairs (seated height)
-const deskMat = mat(0xd9dadc, {roughness:.5});
-for (const [key, [x, z]] of Object.entries(DESKS)) {
-  box(3.2, 0.02, 2.6, mat(COLORS[key], {roughness:.95}), x, 0.012, z, false);
-  box(1.9, 0.06, 0.9, deskMat, x, 0.76, z + 0.35); box(1.8, 0.72, 0.06, mat(0x9aa3ab), x, 0.37, z + 0.77);
-  box(0.06, 0.73, 0.8, mat(0x9aa3ab), x - 0.92, 0.37, z + 0.35); box(0.06, 0.73, 0.8, mat(0x9aa3ab), x + 0.92, 0.37, z + 0.35);
-  box(0.55, 0.03, 0.38, mat(0xb8bec6, {metalness:.6, roughness:.3}), x, 0.8, z + 0.38);
-  const scr = box(0.55, 0.36, 0.02, mat(0x111827, {emissive:COLORS[key], emissiveIntensity:.35}), x, 0.98, z + 0.58);
-  scr.rotation.x = -0.2; box(0.12, 0.25, 0.12, mat(0xf97316), x + 0.7, 0.9, z + 0.5);  // desk lamp
-  box(0.55, 0.08, 0.5, mat(0x1f2937), x, 0.46, z - 0.42); box(0.55, 0.6, 0.08, mat(0x1f2937), x, 0.8, z - 0.7);      // chair
-  box(0.08, 0.42, 0.08, mat(0x111111), x, 0.21, z - 0.42);
+// ---------- private offices ----------
+const deskMat = mat(0x6b4a32, {roughness:.55}), frameMat = mat(0x2b3138, {metalness:.5, roughness:.4});
+const officeGlass = mat(0xcfe6f5, {roughness:.08, metalness:.1, transparent:true, opacity:.22, depthWrite:false});
+const post = (x, z, h = 2.6) => box(0.08, h, 0.08, frameMat, x, h / 2, z, false);
+const pane = (w, x, z, alongX, color) => {            // glass pane + frosted band in the department colour + top rail
+  box(alongX ? w : 0.04, 2.5, alongX ? 0.04 : w, officeGlass, x, 1.27, z, false);
+  box(alongX ? w : 0.05, 0.16, alongX ? 0.05 : w, mat(color, {transparent:true, opacity:.55}), x, 1.15, z, false);
+  box(alongX ? w : 0.08, 0.08, alongX ? 0.08 : w, frameMat, x, 2.56, z, false);
+};
+function signTexture(name, title, icon, color) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 128; const g = c.getContext('2d');
+  g.fillStyle = '#0f1c26'; g.fillRect(0, 0, 512, 128); g.fillStyle = color; g.fillRect(0, 118, 512, 10);
+  g.direction = 'rtl'; g.textAlign = 'center'; g.fillStyle = '#ffffff'; g.font = 'bold 48px Tahoma, Arial';
+  g.fillText(icon + ' ' + name, 256, 58); g.fillStyle = '#c9d8e3'; g.font = '30px Tahoma, Arial'; g.fillText(title, 256, 100);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+}
+function buildOffice(d) {
+  const [x, z] = DESKS[d.key], back = z < 0, color = COLORS[d.key], hex = '#' + color.toString(16).padStart(6, '0');
+  const x0 = x - OFFICE_W / 2, x1 = x + OFFICE_W / 2, zw = back ? -WALL_Z : WALL_Z, zFar = back ? -10 : 10, door = x + 1.45;
+  // floor finish + rug
+  box(OFFICE_W - 0.1, 0.015, Math.abs(zFar - zw) - 0.1, mat(0x8f6a46, {roughness:.6}), x, 0.008, (zw + zFar) / 2, false);
+  box(2.8, 0.02, 2.2, mat(color, {roughness:.95}), x, 0.02, z, false);
+  // side partitions (shared ones are drawn twice at the same spot: harmless) and the corridor wall with a door
+  for (const sx of [x0, x1]) { pane(Math.abs(zFar - zw), sx, (zw + zFar) / 2, false, color); post(sx, zw); }
+  pane(door - 0.5 - x0, (x0 + door - 0.5) / 2, zw, true, color); pane(x1 - (door + 0.5), (door + 0.5 + x1) / 2, zw, true, color);
+  post(door - 0.5, zw); post(door + 0.5, zw); box(1.08, 0.12, 0.1, frameMat, door, 2.2, zw, false);
+  const leaf = box(0.04, 2.1, 0.95, officeGlass, door - 0.5 + 0.02, 1.07, zw + (back ? 0.5 : -0.5), false);   // door left open
+  // name plate above the door, readable from the corridor (and from the camera for the front row)
+  const tex = signTexture(d.person || d.manager, d.manager, d.icon || '', hex);
+  for (const side of [1, -1]) {
+    const plate = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.45), new THREE.MeshBasicMaterial({map: tex}));
+    plate.position.set(x - 0.55, 2.3, zw + side * 0.06); plate.rotation.y = side > 0 ? 0 : Math.PI; scene.add(plate);
+  }
+  // executive desk, monitor, laptop, papers, lamp
+  box(2.0, 0.07, 0.95, deskMat, x, 0.76, z + 0.35); box(0.07, 0.73, 0.9, deskMat, x - 0.95, 0.37, z + 0.35); box(0.07, 0.73, 0.9, deskMat, x + 0.95, 0.37, z + 0.35);
+  box(1.9, 0.5, 0.05, deskMat, x, 0.45, z + 0.78);
+  const scr = box(0.62, 0.38, 0.03, mat(0x0b1220, {emissive:color, emissiveIntensity:.35}), x - 0.62, 1.06, z + 0.5); scr.rotation.y = 0.5;
+  box(0.05, 0.22, 0.05, frameMat, x - 0.64, 0.9, z + 0.54); box(0.45, 0.03, 0.32, mat(0xb8bec6, {metalness:.6, roughness:.3}), x + 0.45, 0.81, z + 0.3);
+  box(0.3, 0.02, 0.22, mat(0xf8fafc), x - 0.7, 0.8, z + 0.25); box(0.03, 0.3, 0.03, frameMat, x + 0.82, 0.94, z + 0.6); box(0.16, 0.1, 0.16, mat(0xfde68a, {emissive:0xfbbf24, emissiveIntensity:.5}), x + 0.82, 1.1, z + 0.6);
+  // manager chair (high back) and a guest chair across the desk
+  box(0.6, 0.1, 0.55, mat(0x111827), x, 0.47, z - 0.42); box(0.6, 0.85, 0.1, mat(0x111827), x, 0.95, z - 0.72); box(0.08, 0.42, 0.08, frameMat, x, 0.21, z - 0.42);
+  box(0.5, 0.08, 0.45, mat(0x475569), x + 0.3, 0.45, z + 1.35); box(0.5, 0.5, 0.07, mat(0x475569), x + 0.3, 0.72, z + 1.58);
+  // shelf / cabinet against the far wall, plant, wall frame
+  const shelfH = back ? 1.9 : 0.85, sz = zFar + (back ? 0.35 : -0.35);      // tall bookcase at the back, low credenza at the front (keeps the view open)
+  box(1.6, shelfH, 0.4, mat(0x5b3a24), x - 1.2, shelfH / 2, sz);
+  for (let y = 0.45; y < shelfH; y += 0.45) box(1.5, 0.04, 0.36, mat(0x3b2a1e), x - 1.2, y, sz, false);
+  for (let i = 0; i < 5; i++) box(0.1, 0.3, 0.26, mat([0x1e3a8a, 0x991b1b, 0x065f46, 0xb45309, 0x334155][i]), x - 1.75 + i * 0.22, shelfH + (back ? -0.62 : 0.15), sz, false);
+  plant(x1 - 0.45, zFar + (back ? 0.45 : -0.45), 0.9);
+  box(0.9, 0.6, 0.03, mat(color, {roughness:.4}), x + 0.9, 1.75, zFar + (back ? 0.17 : -0.17), false);
 }
 
 // ---------- people (real 3D humans, CC0 "Ultimate Animated Character Pack" by Quaternius) ----------
@@ -135,11 +178,62 @@ const people = {};
 const models = {};
 let clips = [];
 const SCALE = 0.72;                               // the pack shares one rig: one scale gives ~1.78 m people
-// Look of each person (the pack's own skin colour exports almost black): skin, hair, suit.
-const LOOK = {clearance: {skin: 0xc68a5f, hair: 0x1b120c, suit: 0x26324a}, transport: {skin: 0xb5764b, hair: 0x20140c},
-  containers: {skin: 0xd09a70, hair: 0x2a2a2a, suit: 0x3a3f46}, finance: {skin: 0xe0ac86, hair: 0x2b1a12, suit: 0x1f2a3d},
-  sales: {skin: 0xd8a07a, hair: 0x3a2215}, service: {skin: 0xc58b63, hair: 0x1e130d}, admin: {skin: 0xe2b28f, hair: 0x3b2a20, suit: 0x5a4636},
-  email: {skin: 0xd6a27e, hair: 0x1a110b, suit: 0x7f1d1d}};
+// Saudi office staff: men in a white thobe with a shemagh/ghutra and agal, women in an abaya with a hijab.
+// The pack's big cartoon head is scaled down to adult proportions (HEAD) so they read as real people.
+const HEAD = 0.5;
+const LOOK = {clearance: {skin: 0xc68a5f, ghutra: 'red'}, transport: {skin: 0xb5764b, ghutra: 'white'},
+  containers: {skin: 0xd09a70, ghutra: 'red'}, finance: {skin: 0xe0ac86, hijab: 0x15151a},
+  sales: {skin: 0xd8a07a, hijab: 0x1f2a44}, service: {skin: 0xc58b63, hijab: 0x4a1f2b},
+  admin: {skin: 0xe2b28f, hijab: 0x2b2b30}, email: {skin: 0xd6a27e, hijab: 0x7a6650}};
+const CLOTHES = new Set(['Shirt', 'Pants', 'Black', 'Details', 'Detail', 'Belt']);
+let shemaghTex = null;
+function shemagh() {                               // red-and-white check, like a real shemagh
+  if (shemaghTex) return shemaghTex;
+  const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  g.fillStyle = '#f4f1ea'; g.fillRect(0, 0, 64, 64); g.fillStyle = '#b3121f';
+  for (let i = 0; i < 64; i += 16) { g.fillRect(i, 0, 5, 64); g.fillRect(0, i, 64, 5); }
+  g.fillStyle = '#f4f1ea'; for (let i = 0; i < 64; i += 16) for (let j = 0; j < 64; j += 16) g.fillRect(i + 1.5, j + 1.5, 2, 2);
+  shemaghTex = new THREE.CanvasTexture(c); shemaghTex.wrapS = shemaghTex.wrapT = THREE.RepeatWrapping; shemaghTex.repeat.set(6, 4);
+  shemaghTex.colorSpace = THREE.SRGBColorSpace; return shemaghTex;
+}
+function headBox(root) {                          // world box of the vertices driven by the Head bone
+  const box3 = new THREE.Box3(), v = new THREE.Vector3(); root.updateMatrixWorld(true);
+  root.traverse(m => {
+    if (!m.isSkinnedMesh) return; const name = (Array.isArray(m.material) ? m.material[0] : m.material).name;
+    if (name !== 'Skin') return;
+    const bi = m.skeleton.bones.findIndex(b => b.name === 'Head'), g = m.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, pos = g.attributes.position;
+    for (let i = 0; i < pos.count; i++) { let w = 0; for (let k = 0; k < 4; k++) if (si.getComponent(i, k) === bi) w += sw.getComponent(i, k);
+      if (w < 0.5) continue; v.fromBufferAttribute(pos, i); m.applyBoneTransform(i, v); v.applyMatrix4(m.matrixWorld); box3.expandByPoint(v); }
+  });
+  return box3;
+}
+function dress(p, look) {                         // headwear built around the real head, then parented to the Head bone
+  const head = p.root.getObjectByName('Head'); if (!head) return;
+  const hb = headBox(p.root); if (hb.isEmpty()) return;
+  const c = hb.getCenter(new THREE.Vector3()), size = hb.getSize(new THREE.Vector3()), a = size.x / 2, b = size.y / 2, d = size.z / 2;
+  const g = new THREE.Group(); g.position.copy(c);
+  if (look.ghutra) {
+    const cloth = look.ghutra === 'red' ? new THREE.MeshStandardMaterial({map: shemagh(), roughness: .9, side: THREE.DoubleSide})
+      : new THREE.MeshStandardMaterial({color: 0xf7f7f4, roughness: .9, side: THREE.DoubleSide});
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.56), cloth);
+    cap.scale.set(a * 1.14, b * 1.08, d * 1.14); cap.rotation.x = -0.5; cap.position.set(0, b * 0.04, -d * 0.04); g.add(cap);
+    const drape = new THREE.Mesh(new THREE.CylinderGeometry(1, 1.3, 1, 28, 1, true, Math.PI * 0.3, Math.PI * 1.4), cloth);
+    drape.scale.set(a * 1.1, b * 1.5, d * 1.1); drape.position.set(0, -b * 0.7, -d * 0.1); g.add(drape);
+    const agal = new THREE.MeshStandardMaterial({color: 0x0d0d0d, roughness: .5});
+    for (const off of [0.42, 0.52]) { const r = new THREE.Mesh(new THREE.TorusGeometry(1, 0.045, 8, 40), agal);
+      r.rotation.x = Math.PI / 2 - 0.5; r.scale.set(a * 0.92, d * 0.92, 1); r.position.set(0, b * off, -d * 0.12); g.add(r); }
+  } else if (look.hijab) {
+    const cloth = new THREE.MeshStandardMaterial({color: look.hijab, roughness: .85, side: THREE.DoubleSide});
+    const hood = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 18, Math.PI * 0.78, Math.PI * 1.44, 0, Math.PI * 0.8), cloth);
+    hood.scale.set(a * 1.16, b * 1.12, d * 1.16); hood.position.set(0, b * 0.04, -d * 0.04); g.add(hood);
+    const band = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 8, 0, Math.PI * 2, 0, Math.PI * 0.36), cloth);   // over the forehead
+    band.scale.set(a * 1.16, b * 1.12, d * 1.16); band.position.set(0, b * 0.04, -d * 0.04); g.add(band);
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 1.35, 1, 28, 1, true), cloth);
+    neck.scale.set(a * 1.1, b * 0.9, d * 1.1); neck.position.set(0, -b * 1.0, -d * 0.05); g.add(neck);
+  }
+  g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  scene.add(g); head.attach(g); p.head = head;
+}
 function fallbackPerson(color) {                  // used only if a 3D model fails to load
   const g = new THREE.Group();
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.9, 6, 12), mat(color)); body.position.y = 0.85; body.castShadow = true;
@@ -155,9 +249,8 @@ function makePerson(d) {
     o.castShadow = true; o.frustumCulled = false;
     const recolor = m => { m = m.clone(); const n = m.name || '';
       if (n === 'Skin') m.color.setHex(look.skin || 0xd09a70);
-      else if (n === 'Hair') m.color.setHex(look.hair || 0x24170f);
-      else if (n === 'Black' && look.suit) m.color.setHex(look.suit);
-      else if (n === 'Hat') m.visible = false;
+      else if (n === 'Hair' || n === 'Hat') m.visible = false;               // covered by the ghutra / hijab
+      else if (CLOTHES.has(n)) { m.color.setHex(look.ghutra ? 0xf3f2ec : 0x16161b); if (m.map) m.map = null; }   // thobe / abaya
       else if (n === 'Face') m.color.setHex(0x1d1a18);             // eyes and brows dark, not white
       m.roughness = 0.75; return m; };
     o.material = Array.isArray(o.material) ? o.material.map(recolor) : recolor(o.material);
@@ -186,16 +279,19 @@ function standUp(p, then) {
 }
 
 function build() {
+  for (const d of CFG.departments) buildOffice(d);
   for (const d of CFG.departments) {
     const [x, z] = DESKS[d.key]; const p = makePerson(d);
-    p.home = new THREE.Vector3(x, 0, z - 0.45); p.root.position.copy(p.home); scene.add(p.root);
+    p.home = new THREE.Vector3(x, 0, z); p.root.position.copy(p.home); scene.add(p.root);   // the sit animation leans back onto the chair
+    if (p.mixer) dress(p, LOOK[d.key] || {});
     const el = document.createElement('div'); el.className = 'tag'; el.style.setProperty('--c', '#' + COLORS[d.key].toString(16).padStart(6, '0'));
     el.addEventListener('click', e => { e.stopPropagation(); openPanel(d.key); });
-    const tag = new CSS2DObject(el); tag.position.set(0, 2.05, 0); p.root.add(tag);
+    const tag = new CSS2DObject(el); tag.position.set(0, 1.95, 0); p.root.add(tag);
     Object.assign(p, {key: d.key, dept: d, el, tag, path: [], speed: 2.1, next: 10 + Math.random() * 30});
     people[d.key] = p; sitDown(p, true); renderTag(p);
   }
   const l = document.getElementById('loading'); l && l.remove();
+  window.__office = {camera, controls, people, scene, THREE};
 }
 function renderTag(p, bubble) {
   const d = p.dept, first = (d.kpis || [])[0];
@@ -203,7 +299,7 @@ function renderTag(p, bubble) {
     `<b><span class="dot"></span>${esc(d.person || '')}</b><small class="role">${esc(d.icon)} ${esc(d.manager)}</small>` +
     `<small>${first ? esc(first[0]) + ': ' + esc(first[1] ?? '—') : esc(d.name)}</small>`;
   p.el.classList.toggle('alert', !!d.alert);
-  p.tag.position.y = p.seated ? 1.55 : 2.05;
+  p.tag.position.y = p.seated ? 1.5 : 1.95;
 }
 
 // ---------- walking ----------
@@ -221,8 +317,8 @@ function step(p, dt) {
 }
 const AISLE_Z = 0, V = (x, z) => new THREE.Vector3(x, 0, z);
 // Back-row people go around their desk's side; front-row people step straight into the aisle.
-function leave(p) { const h = p.home; return h.z < 0 ? [V(h.x + 1.3, h.z), V(h.x + 1.3, AISLE_Z)] : [V(h.x, AISLE_Z)]; }
-function arrive(p) { const h = p.home; return h.z < 0 ? [V(h.x + 1.3, AISLE_Z), V(h.x + 1.3, h.z), h.clone()] : [V(h.x, AISLE_Z), h.clone()]; }
+function leave(p) { const h = p.home; return [V(h.x + 1.45, h.z), V(h.x + 1.45, AISLE_Z)]; }       // out through the office door
+function arrive(p) { const h = p.home; return [V(h.x + 1.45, AISLE_Z), V(h.x + 1.45, h.z), h.clone()]; }
 function faceFront(p) { p.root.rotation.y = 0; }
 function backToDesk(p) { p.away = false; sitDown(p); renderTag(p); }
 let meeting = false;
@@ -230,7 +326,7 @@ function wander(p, dt) {
   if (meeting || p.busy || p.path.length || p.away || current === p.key) return;
   p.next -= dt; if (p.next > 0) return;
   p.next = 35 + Math.random() * 50; p.away = true;
-  const spot = Math.random() < .5 ? COOLER.clone() : V(-13.6, 6.5);
+  const spot = Math.random() < .5 ? COOLER.clone() : LOUNGE.clone();
   walkTo(p, [...leave(p), V(spot.x, AISLE_Z), spot], () => setTimeout(() => {
     if (meeting) return; walkTo(p, [V(spot.x, AISLE_Z), ...arrive(p)], () => backToDesk(p)); }, 3000));
 }
@@ -384,7 +480,7 @@ setInterval(refresh, 60000);
 const clock = new THREE.Clock();
 function frame() {
   const dt = Math.min(clock.getDelta(), .05);
-  for (const p of Object.values(people)) { p.mixer && p.mixer.update(dt); step(p, dt); wander(p, dt); }
+  for (const p of Object.values(people)) { p.mixer && p.mixer.update(dt); if (p.head) p.head.scale.setScalar(HEAD); step(p, dt); wander(p, dt); }
   for (let i = tweens.length - 1; i >= 0; i--) { const t = tweens[i]; t.t = Math.min(1, t.t + dt * 1.2); const k = t.t * t.t * (3 - 2 * t.t);
     t.obj.lerpVectors(t.from, t.to, k); if (t.t >= 1) tweens.splice(i, 1); }
   controls.update(); renderer.render(scene, camera); labels.render(scene, camera); requestAnimationFrame(frame);
