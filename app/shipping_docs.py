@@ -14,7 +14,9 @@ shipping_line, vessel, voyage (voyage number as written), delivery_agent (destin
 discharge as written), bill_no, consignee, eta (YYYY-MM-DD arrival/discharge date), free_days (integer free time days for
 container detention/demurrage), free_until (YYYY-MM-DD last free day if written), return_place (empty container return
 depot/yard if written), daily_cost (detention/demurrage per day per container in SAR if written), container_size (20, 40 or
-45 when all containers on the document have the same size). null when absent."""
+45 when all containers on the document have the same size), consignee_contact (contact person named for the consignee or
+notify party), consignee_phone, consignee_email (as written for the consignee/notify party), shipper, goods (short
+description), hs_code, pol (port of loading), pod (port of discharge). null when absent."""
 
 
 def _date(value):
@@ -30,6 +32,11 @@ def register(fields, caption=''):
         n = container_returns.number(str(raw))
         if n and n not in numbers:
             numbers.append(n)
+    try:  # one shipment file per bill: customer, contact, containers, stage (owner, 22 Nov 2026)
+        from app import shipment_files
+        shipment_files.upsert_from_document(dict(fields, container_numbers=numbers or fields.get('container_numbers') or []))
+    except Exception as exc:
+        print('SHIPMENT_FILE', type(exc).__name__, str(exc)[:160], flush=True)
     if not numbers:
         return None
     numbers = numbers[:40]
