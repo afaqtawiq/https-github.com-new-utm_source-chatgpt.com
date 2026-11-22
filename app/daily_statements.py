@@ -28,6 +28,13 @@ def run():
     if failed:
         head += ('\n⚠️ تعذر إرسال PDF لـ' + '، '.join(failed) + ' (نافذة محادثتك مع الوكيل مغلقة أو غير معروفة). '
                  'أرسل أي رسالة للوكيل ثم اكتب لنورة «أرسل الكشوفات» لتصلك الملفات.')
+    try:  # owner, 22 Nov 2026: say every day how many FASAH declarations are still missing from the accounts and why
+        from app import billing_gap
+        gap = billing_gap.report(month)
+        if 'غير مسجلة: 0' not in gap:
+            text += '\n\n' + gap
+    except Exception as exc:
+        print('BILLING_GAP', type(exc).__name__, str(exc)[:120], flush=True)
     return head + '\n\n' + text
 
 

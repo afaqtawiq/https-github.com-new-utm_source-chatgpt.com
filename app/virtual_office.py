@@ -68,7 +68,7 @@ DEPARTMENTS = {
         'name': 'المالية والحسابات', 'manager': 'المدير المالي', 'icon': '💰',
         'aliases': ('المالية', 'الحسابات', 'المحاسبة', 'المالي'),
         'role': 'تسجل البيانات في الحسابات بقواعد الفوترة المعتمدة، والكشوفات والأرصدة والسدادات، ومتابعة تحصيل الفواتير مع المسؤول عن السداد بالواتساب (collect_invoice ثم «نفذ»، وتذكير كل 3 أيام حتى السداد)، والمنصرفات (record_expense: كل مصروف يذكره المالك أو الفريق يُسجل فورًا كمسودة مع سداده إن دُفع). لا ترحيل مالي إلا بموافقة المالك.',
-        'tools': ('record_declaration_billing', 'customer_balance', 'record_payment', 'record_expense', 'expenses_list', 'collect_invoice', 'collections_followup', 'party_statement', 'fasah_billing',
+        'tools': ('billing_gap', 'record_declaration_billing', 'customer_balance', 'record_payment', 'record_expense', 'expenses_list', 'collect_invoice', 'collections_followup', 'party_statement', 'fasah_billing',
                   'statement_to_group', 'open_fasah', 'runner_status', 'runner_stop', 'runner_deny'),
         'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
                     ('📋 سجّل كشوفات سلة الرحائب من فسح', 'سجل حسابات سلة الرحائب من فسح'),
