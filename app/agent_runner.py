@@ -488,7 +488,7 @@ def billing_listing(rows, party_hint='سلة'):
     with db() as c:
         for r in rows:
             number, date, details = r.get('رقم البيان', ''), r.get('التاريخ', ''), r.get('التفاصيل', '')
-            if not number or party_hint not in details:
+            if not number or not (billing_rules.is_salla(details) if party_hint == 'سلة' else party_hint in details):
                 continue
             kind = 'export' if 'تصدير' in details or 'صادر' in details else 'import'
             prior = c.execute('SELECT status FROM billing_declarations WHERE number=%s AND kind=%s',

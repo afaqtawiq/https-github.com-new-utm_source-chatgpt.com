@@ -62,7 +62,7 @@ def report(month=None):
             rows.append(r)
     if not rows:
         return f'ما لقيت بيانات لشهر {month} في آخر قراءة لفسح.'
-    from app.billing_rules import flat_rate as flat_of
+    from app.billing_rules import flat_rate as flat_of, is_salla
     recorded, groups, flat_items = [], {}, []
     for r in sorted(rows, key=lambda x: x['number']):
         key, label = (r['number'], r['kind']), f"{r['number']} ({KIND_AR.get(r['kind'], r['kind'])})"
@@ -77,7 +77,7 @@ def report(month=None):
             why = f"عميل بسعر ثابت ({flat_of(r['details'])[0]}) — جاهز للتسجيل برمز «نفذ» أدناه"
             flat_items.append({'number': r['number'], 'kind': r['kind'], 'party': flat_of(r['details'])[0],
                                'date': str(_date(r['declared_on']) or '') or None})
-        elif 'سلة' not in str(r['details']):
+        elif not is_salla(r['details']):
             why = f'ليس بيان سلة الرحائب ({party}) — الفوترة التلقائية تغطي سلة الرحائب فقط، ولا توجد قاعدة تسعير لهذا المستورد'
         elif r['number'] in read:
             why = 'قُرئت فاتورته من فسح وانتظر رمز «نفذ» للتسجيل، والرمز ما اعتُمد (أو انتهت مدته)'
