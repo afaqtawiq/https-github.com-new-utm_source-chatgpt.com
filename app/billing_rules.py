@@ -59,11 +59,46 @@ def is_salla(name):
     return 'سله الرحايب' in fold(name).replace('ة', 'ه') or 'salla' in fold(name)
 
 
+# Flat-rate customers (owner, 22 Nov 2026): one fixed amount per declaration, all-inclusive.
+FLAT_DEFAULTS = (('مدى التطوير', '1100', 'شامل النقل والتخليص'),)
+
+
+def flat_rates():
+    """[(name, Decimal amount, note)]: the defaults plus any added in importer_rates."""
+    rates = {n: (Decimal(a), note) for n, a, note in FLAT_DEFAULTS}
+    try:
+        with db() as c:
+            c.execute('''CREATE TABLE IF NOT EXISTS importer_rates(name TEXT PRIMARY KEY, amount TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+            for r in c.execute('SELECT name, amount, note FROM importer_rates').fetchall():
+                rates[r['name']] = (Decimal(r['amount']), r['note'])
+    except Exception:
+        pass
+    return [(n, a, note) for n, (a, note) in rates.items()]
+
+
+def flat_rate(party):
+    p = fold(party).replace('ة', 'ه')
+    for name, amount, note in flat_rates():
+        if fold(name).replace('ة', 'ه') in p:
+            return name, amount, note
+    return None
+
+
+def all_parties():
+    return (YASMEN, OMRAN, SALLA) + tuple(n for n, _, _ in flat_rates())
+
+
 def compute(d):
     """Pure calculation. d: number, kind('import'|'export'), party (importer/exporter), invoice_no,
     invoice_value, supplier, duty, other. Returns list of {'party','kind','amount','components','label'}."""
     kind = d.get('kind') or 'import'
     out = []
+    flat = flat_rate(d.get('party'))
+    if flat:
+        name, amount, note = flat
+        return [{'party': name, 'kind': 'claim', 'amount': amount.quantize(CENT), 'components': {'clearance_transport': amount.quantize(CENT)},
+                 'label': f'مطالبة {name} — {format(amount, ",.0f")} ريال للبيان' + (f' ({note})' if note else '')}]
     if kind == 'export':
         if is_salla(d.get('party')):
             out.append({'party': SALLA, 'kind': 'payable', 'amount': Decimal('100.00'), 'components': {},

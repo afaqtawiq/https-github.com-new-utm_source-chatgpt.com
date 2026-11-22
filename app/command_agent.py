@@ -732,7 +732,7 @@ def tool_party_statement(c, a):
     month = f'{m.group(1)}-{int(m.group(2)):02d}' if m else _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=3))).strftime('%Y-%m')
     from app import billing_rules
     party = statement_import.party_from(a.get('party') or '')
-    parties = [party] if party else [billing_rules.YASMEN, billing_rules.OMRAN, billing_rules.SALLA]
+    parties = [party] if party else list(billing_rules.all_parties())
     if party:
         text = statement_import.statement_text(a.get('party') or '', month)
     else:
@@ -1239,7 +1239,7 @@ def _execute_action(c, action, member):
                     from app import statement_pdf
                     months = sorted(accepted_months) or [_d.datetime.now(_d.timezone(_d.timedelta(hours=3))).strftime('%Y-%m')]
                     sent, _failed = statement_pdf.send_to_requester(chat, [statement_import.statement(p, m) for m in months[-2:]
-                                                                          for p in (billing_rules.YASMEN, billing_rules.OMRAN, billing_rules.SALLA)])
+                                                                          for p in billing_rules.all_parties()])
                     if sent:
                         text += '\n📎 أرسلت لك الكشوفات ملفات PDF.'
         except Exception as exc:
