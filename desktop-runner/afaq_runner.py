@@ -869,6 +869,21 @@ class Task:
         return self.upload(path, page.url)
 
 
+def keep_fasah_alive(context):
+    """Owner (23 Nov 2026): FASAH signs out when idle, but any activity every minute keeps the session. While the
+    runner is idle, move the mouse and tap Shift on the FASAH window — no click, nothing that changes anything."""
+    for page in list(context.pages):
+        try:
+            if page.is_closed() or 'fasah.zatca.gov.sa' not in page.url or '/login' in page.url:
+                continue
+            page.mouse.move(400 + int(time.time()) % 50, 300)
+            page.mouse.move(420, 320 + int(time.time()) % 40)
+            page.keyboard.press('Shift')
+            page.evaluate("window.dispatchEvent(new Event('mousemove')); document.dispatchEvent(new Event('keydown'))")
+        except Exception:
+            continue
+
+
 def self_update(api):
     """While idle: fetch the latest runner from the system; if it changed and compiles, replace this file and restart."""
     try:
@@ -942,7 +957,7 @@ def main():
             except Exception:
                 return False
         context = launch()
-        last_check = time.time()
+        last_check = last_ping = time.time()
         while True:
             try:
                 got = api.post('/api/runner/claim')
@@ -964,6 +979,9 @@ def main():
             elif args.once:
                 break
             else:
+                if time.time() - last_ping > 50:
+                    last_ping = time.time()
+                    keep_fasah_alive(context)
                 if time.time() - last_check > 15 * 60:
                     last_check = time.time()
                     if self_update(api):

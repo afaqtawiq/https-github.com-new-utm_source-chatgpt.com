@@ -54,6 +54,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
     {'name': 'declaration_info', 'description': 'For given declaration number(s): what the agent read from FASAH (date, details text), whether it was recognised as سلة الرحائب, and its billing status. Use it when the manager says a declaration belongs to a party but is not counted.',
      'input_schema': {'type': 'object', 'properties': {'numbers': {'type': 'string'}}, 'required': ['numbers']}},
+    {'name': 'fasah_count', 'description': 'EXACT number of an importer/exporter declarations in FASAH for a month, read live from FASAH by the desktop runner (list filtered by the name). Use it for «كم بيان استيراد لسلة الرحائب شهر نوفمبر». party = name as in FASAH (e.g. سلة)، which = import|export، month = YYYY-MM. The answer arrives as a notice after the read.',
+     'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'which': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party']}},
     {'name': 'billing_gap', 'description': 'Match the declarations seen in FASAH this month with the accounts: how many are recorded and, for EACH unrecorded declaration, why (not a سلة الرحائب declaration / no billing rule, read failed, waiting for «نفذ», never read). Use it when the manager asks why the accounts show fewer declarations than FASAH. month = YYYY-MM (optional).',
      'input_schema': {'type': 'object', 'properties': {'month': {'type': 'string'}}}},
     {'name': 'shipment_workflow', 'description': 'RUN THE CLEARANCE FLOW of one shipment (سيّر الشحنة) end to end: 1) FASAH authorization of the importer (active/expired/none → prepares the request to the importer with our establishment name and licence 2513), 2) documents check (prepares the request for missing ones), 3) arrival date → arrival report to the customer, 4) prints the declaration from FASAH via the desktop runner → sends it to the customer, 5) delivery order request email to the shipping line, 6) the remaining steps to empty-container return. Every send is prepared with a «نفذ CODE». query = bill/container/customer. Use it whenever the manager asks to process/follow a shipment.',
@@ -233,7 +235,8 @@ GM_POLICY = ('\nأنت «المدير العام» لمكتب آفاق طويق�
              'ثم ارجع للمالك برد واحد مرتب: ✅ ما تم، 📌 النتيجة بالأرقام، ⏳ ما ينتظر قراره أو رمز «نفذ». '
              'لا تطلب من المالك أن يكلم موظفًا أو قسمًا بنفسه، ولا تنقل له ردود الموظفين حرفيًا؛ لخّصها. '
              'أي معلومة يذكرها المالك عن شحنة (المكتب المفوّض، الميناء، المسؤول، ملاحظة) احفظها فورًا في ملف الشحنة بأداة '
-             'shipment_file_update، وابحث عن الشحنات بأداة shipment_file بالكلمات (مثل «سلة الرحائب الملك عبدالله») قبل أن تقول لا يوجد.')
+             'shipment_file_update. أسئلة «كم بيان» لعميل أو شهر: العدد الصحيح يُقرأ من فسح مباشرة بأداة fasah_count (لا تجاوب من '
+             'كشف الحسابات، فهو المسجل فقط)، واذكر معه المسجل في الحسابات (party_statement) والفرق. وابحث عن الشحنات بأداة shipment_file بالكلمات (مثل «سلة الرحائب الملك عبدالله») قبل أن تقول لا يوجد.')
 
 
 # ------------------------------------------------------------------ tool implementations
@@ -349,6 +352,19 @@ def tool_shipment_file_update(c, a):
 def tool_declaration_info(c, a):
     from app import billing_gap
     return billing_gap.declaration_info(a.get('numbers'))
+
+
+def tool_fasah_count(c, a):
+    import datetime as _dt
+    from app import agent_runner
+    month = str(a.get('month') or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}', month):
+        month = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=3))).strftime('%Y-%m')
+    which = 'export' if str(a.get('which') or '').startswith(('ex', 'تص', 'صا')) else 'import'
+    party = _clean(a.get('party'), 60) or 'سلة'
+    tid, msg = agent_runner.create_task('fasah_declarations', {'which': which, 'party': party, 'since': month + '-01', 'pages': 20,
+                                                               'purpose': 'count', 'month': month}, _member().get('name') or 'المدير')
+    return msg + ('\nالعدد الدقيق من فسح يوصلك أول ما تخلص القراءة.' if tid else '')
 
 
 def tool_billing_gap(c, a):

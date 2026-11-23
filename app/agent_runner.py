@@ -663,6 +663,22 @@ def after_authorizations(tid):
         notify(f'تعذر تحليل قائمة التفاويض من فسح (المهمة #{tid}).')
 
 
+def count_text(params, rows):
+    """The exact number of an importer's declarations in FASAH for a month, read from the FASAH list itself."""
+    month = str(params.get('month') or '')
+    kind = 'استيراد' if params.get('which', 'import') == 'import' else 'تصدير'
+    picked = []
+    for r in rows:
+        d = str(r.get('التاريخ') or '')
+        m = re.match(r'(\d{2})/(\d{2})/(\d{4})', d)
+        if not month or (m and f'{m[3]}-{m[2]}' == month):
+            picked.append((r.get('رقم البيان') or '', d))
+    lines = [f"📊 من فسح مباشرة: بيانات {kind} «{params.get('party')}» لشهر {month or 'الفترة'}: {len(picked)} بيان"]
+    if picked:
+        lines.append('، '.join(f'{n} ({d})' for n, d in picked[:80]))
+    return '\n'.join(lines)
+
+
 def after_fasah(tid):
     import csv as _csv
     import io as _io
@@ -688,6 +704,9 @@ def after_fasah(tid):
             if params.get('purpose') == 'containers':
                 from app import fasah_containers
                 notify(fasah_containers.after_list(task, rows))
+                return
+            if params.get('purpose') == 'count':
+                notify(count_text(params, rows))
                 return
             if params.get('track'):
                 try:

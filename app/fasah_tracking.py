@@ -200,6 +200,15 @@ def after_read(task, rows):
     import json
     params = json.loads(task['params_json']) if isinstance(task.get('params_json'), str) else (task.get('params_json') or {})
     changes = ingest(rows, params.get('which', 'import'))
+    if params.get('party'):  # a list filtered by importer in FASAH: remember whose declarations these are
+        try:
+            nums = [str(r.get('رقم البيان') or '').strip() for r in rows if str(r.get('رقم البيان') or '').strip()]
+            with db() as c:
+                c.execute("ALTER TABLE fasah_status ADD COLUMN IF NOT EXISTS party TEXT NOT NULL DEFAULT ''")
+                c.execute('UPDATE fasah_status SET party=%s WHERE kind=%s AND number = ANY(%s)',
+                          (str(params['party'])[:60], params.get('which', 'import'), nums))
+        except Exception as exc:
+            print('FASAH_PARTY_TAG', type(exc).__name__, str(exc)[:120], flush=True)
     message = change_message(changes)
     try:
         from app import fasah_docs
