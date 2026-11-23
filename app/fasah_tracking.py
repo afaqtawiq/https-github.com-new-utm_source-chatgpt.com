@@ -145,26 +145,75 @@ def ingest(rows, kind, now=None):
     return changes
 
 
+PORT_WORDS = r'(?:ميناء|منفذ|مطار|جمرك|محطة|الميناء|مستودع|ساحة)'
+
+
+def name_in_details(details):
+    """FASAH list rows read «<importer> <port> <stage>»: the importer is the text before the port word."""
+    text = ' '.join(str(details or '').split())
+    m = re.match(r'^(.{3,80}?)\s+' + PORT_WORDS + r'\b', text)
+    if not m:
+        m = re.match(r'^(.{3,80}?)\s+(?:مرحلة|مقدم|بانتظار|جاهز|تم |انتهت|تحت )', text)
+    name = (m.group(1).strip() if m else '')
+    return '' if re.fullmatch(r'[\d\s/.-]*', name) else name
+
+
+def party_hint(c, number, kind, details=''):
+    """Importer name for a declaration from what we already hold: the FASAH party tag, the billing record,
+    the shipment file or the clearance record. Empty when nothing names it."""
+    queries = (
+        ("SELECT party AS n FROM fasah_status WHERE number=%s AND kind=%s AND party<>''", (number, kind), 'fasah_status'),
+        ("SELECT party AS n FROM billing_declarations WHERE number=%s AND kind=%s AND party<>''", (number, kind), 'billing_declarations'),
+        ("SELECT customer AS n FROM shipment_files WHERE declaration_no=%s AND customer<>'' ORDER BY id DESC LIMIT 1", (number,), 'shipment_files'),
+        ("SELECT customer_name AS n FROM customs_declarations WHERE declaration_number=%s AND customer_name<>'' ORDER BY id DESC LIMIT 1",
+         (number,), 'customs_declarations'),
+    )
+    for sql, args, table in queries:
+        try:
+            if not _has(c, table):
+                continue
+            row = c.execute(sql, args).fetchone()
+            if row and str(row['n']).strip():
+                return str(row['n']).strip()[:60]
+        except Exception:
+            continue
+    return name_in_details(details)
+
+
 def change_message(changes):
-    """Manager message for the changes, with a «نفذ» code per customer message. Nothing is sent before the code."""
+    """Manager message for the changes, with a «نفذ» code per customer message. Nothing is sent before the code.
+    Each line names the importer when known; missing customer numbers are listed once at the end, not per line."""
     if not changes:
         return None
     from app import transport_desk
     lines = [f'🛃 تغيّرت حالة {len(changes)} بيان في فسح:']
+    missing = []
     with db() as c:
         chat = transport_desk.manager_chat(c)
         for ch in changes:
             kind = 'تصدير' if ch['kind'] == 'export' else 'استيراد'
-            lines.append(f"\n• {ch['number']} ({kind}): {LABELS.get(ch['old'], ch['old'] or '—')} ← {LABELS.get(ch['new'], ch['new'])}")
             name, phone = customer_for(c, ch['number'], ch['details'])
+            who = name or party_hint(c, ch['number'], ch['kind'], ch['details'])
+            label = f" — {who}" if who else ''
+            lines.append(f"• {ch['number']} ({kind}){label}: {LABELS.get(ch['old'], ch['old'] or '—')} ← {LABELS.get(ch['new'], ch['new'])}")
             text = customer_text(ch['number'], ch['kind'], ch['new'])
             if not text:
                 continue
             if not phone:
-                lines.append('  رقم العميل غير معروف. لحفظه اكتب: رقم المستورد <اسم المستورد كما في فسح> 05xxxxxxxx')
+                missing.append((ch['number'], who))
             elif chat:
                 token = transport_desk.pending(c, chat[0], chat[1], {'tool': 'send_whatsapp', 'to': '+' + phone, 'text': text}, 240)
                 lines.append(f'  رسالة جاهزة للعميل {name} (+{phone}). للإرسال اكتب: نفذ {token}')
+    if missing:
+        named = {}
+        for number, who in missing:
+            named.setdefault(who, []).append(number)
+        lines.append(f'\n📇 بدون رقم جوال للعميل ({len(missing)} بيان) — احفظه مرة واحدة ويُستخدم لكل بياناته:')
+        for who, nums in named.items():
+            if who:
+                lines.append(f"• {who} ({'، '.join(nums)}): اكتب «رقم المستورد {who} 05xxxxxxxx»")
+            else:
+                lines.append(f"• اسم المستورد غير ظاهر في صف فسح ({'، '.join(nums)})")
     return '\n'.join(lines)
 
 
@@ -189,7 +238,9 @@ def duties_alerts(now=None):
                 token = transport_desk.pending(c, chat[0], chat[1], {'tool': 'send_whatsapp', 'to': '+' + phone, 'text': msg}, 240)
                 text += f'\nتذكير العميل {name}: نفذ {token}'
             elif not phone:
-                text += '\nرقم العميل غير معروف (رقم المستورد <الاسم> 05xxxxxxxx).'
+                who = party_hint(c, r['number'], r['kind'], r['details'])
+                text += (f'\nرقم العميل غير معروف — اكتب «رقم المستورد {who} 05xxxxxxxx».' if who
+                         else '\nرقم العميل غير معروف (رقم المستورد <الاسم> 05xxxxxxxx).')
             c.execute('UPDATE fasah_status SET duties_alerted_on=%s WHERE number=%s AND kind=%s', (today, r['number'], r['kind']))
             out.append(text)
     return out

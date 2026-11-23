@@ -54,7 +54,22 @@ def run():
     changes = ft.ingest([row('418900', 'سلة الرحائب للتجارة ميناء جدة الإسلامي مرحلة إنتظار تحصيل الرسوم الجمركيه')], 'import', now=t1)
     assert [(x['number'], x['old'], x['new']) for x in changes] == [('418900', 'under_review', 'duties_due')]
     text = ft.change_message(changes)
-    assert '418900' in text and 'بانتظار سداد الرسوم' in text and 'رقم المستورد' in text and 'نفذ' not in text
+    assert '418900' in text and 'بانتظار سداد الرسوم' in text and 'رقم المستورد سلة الرحائب للتجارة 05' in text and '— سلة الرحائب للتجارة' in text and 'نفذ' not in text
+
+    # 3b) Several unknown customers: importer named from the party tag, the save hint appears once at the end.
+    t1b = t1 + dt.timedelta(minutes=30)
+    ft.ingest([row('418950', 'مرحلة إنتظار تحصيل الرسوم الجمركيه'), row('418951', 'مرحلة إنتظار تحصيل الرسوم الجمركيه')], 'import', now=t1b)
+    with db() as c:
+        c.execute("ALTER TABLE fasah_status ADD COLUMN IF NOT EXISTS party TEXT NOT NULL DEFAULT ''")
+        c.execute("UPDATE fasah_status SET party='مدى التطوير' WHERE number='418950'")
+    changes = ft.ingest([row('418950', 'جاهز لطباعة إشعار الفسح الجمركي'), row('418951', 'جاهز لطباعة إشعار الفسح الجمركي')], 'import',
+                        now=t1b + dt.timedelta(hours=1))
+    text = ft.change_message(changes)
+    assert text.count('بدون رقم جوال') == 1 and '418950 (استيراد) — مدى التطوير' in text, text
+    assert '• مدى التطوير (418950): اكتب «رقم المستورد مدى التطوير 05xxxxxxxx»' in text, text
+    assert 'اسم المستورد غير ظاهر في صف فسح (418951)' in text, text
+    assert ft.name_in_details('سلة الرحائب للتجارة ميناء جدة الإسلامي مرحلة إنتظار') == 'سلة الرحائب للتجارة'
+
 
     # 4) Manager saves the importer number; the next change prepares a customer message behind a «نفذ» code.
     assert 'حفظت رقم سلة الرحائب' in ft.save_contact('سلة الرحائب', '0551234567', 'المدير')
@@ -69,7 +84,7 @@ def run():
         action = json.loads(pend[0]['command'].partition(':')[2])
         assert action['tool'] == 'send_whatsapp' and action['to'] == '+966551234567' and 'تم فسح بيانكم الجمركي رقم 418900' in action['text']
         assert c.execute("SELECT duties_since FROM fasah_status WHERE number='418900'").fetchone()['duties_since'] is None
-        assert c.execute('SELECT COUNT(*) n FROM fasah_status_events').fetchone()['n'] == 2
+        assert c.execute('SELECT COUNT(*) n FROM fasah_status_events').fetchone()['n'] == 4
 
     # 5) Duties waiting more than a day: one alert per declaration per day; not before 24 hours.
     assert ft.duties_alerts(now=t0 + dt.timedelta(hours=20)) == []
