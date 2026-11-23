@@ -70,7 +70,7 @@ def run():
         assert 'لا يوجد ملف' in command_agent.tool_ask_document(None, {'question': 'متى الوصول'})
         command_agent.CHAT.reset(chat)
         with db() as c:
-            c.execute("UPDATE staff_documents SET created_at = NOW() - INTERVAL '4 days'")
+            c.execute("UPDATE staff_documents SET created_at = NOW() - INTERVAL '31 days'")
         assert staff_documents.latest(OWNER) is None
 
     # 5) Extraction returning prose instead of JSON no longer raises.
