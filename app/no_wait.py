@@ -457,6 +457,8 @@ async def tick(now=None, deliver=None):
             await run_in_threadpool(group_watch.flush)
             await group_watch.poll(now)
             sent += await group_watch.check(now, deliver, reads_left=max(0, MAX_PROVIDER_READS - reads))
+            from app import group_dispatch  # the general manager hands group requests to the departments
+            group_dispatch.kick()
     except Exception as exc:
         print('GROUP_WATCH_TICK', type(exc).__name__, str(exc)[:160], flush=True)
     return sent

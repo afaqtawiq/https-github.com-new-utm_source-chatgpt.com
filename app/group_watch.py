@@ -51,6 +51,8 @@ def init():
             important BOOLEAN NOT NULL DEFAULT FALSE, level INTEGER NOT NULL DEFAULT 0, answered_at TIMESTAMPTZ,
             received_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL)''')
         c.execute('CREATE INDEX IF NOT EXISTS whatsapp_group_messages_conv ON whatsapp_group_messages(conversation_id, received_at)')
+        c.execute("ALTER TABLE whatsapp_group_messages ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ")
+        c.execute("ALTER TABLE whatsapp_group_messages ADD COLUMN IF NOT EXISTS dispatch_dept TEXT")
         c.execute('''CREATE TABLE IF NOT EXISTS whatsapp_group_poll(conversation_id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
             polled_at TIMESTAMPTZ)''')
     _READY = True
@@ -208,7 +210,7 @@ def _touch(cid, now):
 def due(now):
     init()
     with db() as c:
-        return c.execute('''SELECT * FROM whatsapp_group_messages WHERE important AND answered_at IS NULL
+        return c.execute('''SELECT * FROM whatsapp_group_messages WHERE important AND answered_at IS NULL AND dispatched_at IS NULL
             AND received_at > %s AND ((level = 0 AND received_at <= %s) OR (level = 1 AND received_at <= %s))
             ORDER BY received_at LIMIT 10''', (now - dt.timedelta(days=2), now - dt.timedelta(minutes=FIRST),
                                                now - dt.timedelta(minutes=ESCALATE))).fetchall()
