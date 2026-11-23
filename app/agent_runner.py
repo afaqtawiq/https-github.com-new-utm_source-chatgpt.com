@@ -416,8 +416,11 @@ async def finish(tid: int, request: Request):
     try:
         import asyncio
         from app.owner_briefing import deliver
-        auto = str(task.get('created_by') or '').startswith('متابعة تلقائية')
-        if not auto:  # the 2-hourly FASAH tracking reads report only status changes, not every run
+        auto = str(task.get('created_by') or '').startswith('متابعة تلقائية') or str(task.get('created_by') or '') == 'تلقائي'
+        p = json.loads(task.get('params_json') or '{}')
+        # Owner (23 Nov 2026): «أوقف الإزعاج — رسالة واحدة تكفي». Batch reads report once (batch summary); the same
+        # failure is reported once per 30 minutes with a count, not one WhatsApp per task.
+        if not auto and not p.get('batch') and not p.get('bill') and should_notify(task['kind'], status, body):
             asyncio.get_running_loop().create_task(deliver(task_text(tid)))
     except Exception:
         pass
@@ -453,6 +456,27 @@ async def finish(tid: int, request: Request):
         from app import shipment_tracking
         threading.Thread(target=shipment_tracking.after_page, args=(tid, status), daemon=True).start()
     return {'status': status}
+
+
+_LAST_FAILURE = {}
+
+
+def should_notify(kind, status, body):
+    """One message per distinct failure every 30 minutes; successes always."""
+    import time
+    if status == 'done':
+        return True
+    res = (body or {}).get('result') or {}
+    res = res if isinstance(res, dict) else {}
+    err = str(res.get('error') or res.get('note') or status)[:80]
+    key = re.sub(r'\d+', '#', err)
+    now = time.time()
+    last = _LAST_FAILURE.get(key)
+    if last and now - last[0] < 1800:
+        _LAST_FAILURE[key] = (last[0], last[1] + 1)
+        return False
+    _LAST_FAILURE[key] = (now, 0)
+    return True
 
 
 # ---------- FASAH results -> accounts (read here, record only after «نفذ CODE») ----------
