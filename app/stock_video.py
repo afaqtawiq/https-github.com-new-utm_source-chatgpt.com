@@ -433,6 +433,75 @@ def manager_text(c, vid, duration, note, caption):
     return '\n'.join(lines)
 
 
+def _work(job, topic, actor='', dialect=None):
+    """Produce one job and tell the manager (preview + «نفذ» code, or the reason it failed)."""
+    import asyncio
+    from app.owner_briefing import deliver
+    try:
+        vid, duration, credits, note, caption = produce(job, topic, actor, dialect)
+        with db() as c:
+            text = manager_text(c, vid, duration, note, caption)
+    except Exception as exc:
+        message = str(exc) if isinstance(exc, VideoError) else 'تعذر إنتاج الفيديو (' + type(exc).__name__ + ').'
+        print('STOCK_VIDEO_FAILED', job, type(exc).__name__, str(exc)[:200], flush=True)
+        with db() as c:
+            c.execute("UPDATE stock_video_jobs SET status='failed',error=%s,finished_at=%s WHERE id=%s", (message[:300], utcnow(), job))
+        text = f'⚠️ لم يكتمل الفيديو #{job}: {message}'
+    try:
+        asyncio.run(deliver(text))
+    except Exception as exc:
+        print('STOCK_VIDEO_DELIVER', type(exc).__name__, flush=True)
+
+
+def resume_interrupted(delay=90):
+    """Owner/Reem (23 Nov 2026): videos #6-#8 never came back — every deploy restarts the server and killed the
+    production thread, leaving the job «producing» forever. After a restart, finish the interrupted jobs one by one
+    (last 24 hours); older ones are closed as failed with the reason."""
+    def go():
+        import time
+        time.sleep(delay)
+        try:
+            init()
+            with db() as c:
+                c.execute("""UPDATE stock_video_jobs SET status='failed', error='انقطع الإنتاج بإعادة تشغيل الخادم (أقدم من 24 ساعة)',
+                    finished_at=%s WHERE status IN ('queued','producing') AND created_at < NOW()-INTERVAL '24 hours'""", (utcnow(),))
+                jobs = c.execute("""SELECT id, topic, created_by FROM stock_video_jobs WHERE status IN ('queued','producing')
+                    ORDER BY id""").fetchall()
+            for j in jobs[:4]:
+                print('STOCK_VIDEO_RESUME', j['id'], flush=True)
+                with db() as c:
+                    c.execute("UPDATE stock_video_jobs SET status='queued' WHERE id=%s", (j['id'],))
+                _work(j['id'], j['topic'], j['created_by'] or '')
+        except Exception as exc:
+            print('STOCK_VIDEO_RESUME_FAILED', type(exc).__name__, str(exc)[:160], flush=True)
+    threading.Thread(target=go, daemon=True).start()
+
+
+STATUS_AR = {'queued': 'بالانتظار', 'producing': 'قيد الإنتاج', 'ready': 'جاهز ✅', 'failed': 'فشل ❌'}
+
+
+def status_text(limit=8):
+    """Reem: where every recent video stands — preview link when ready, the reason when it failed."""
+    from app import video_publish
+    init()
+    with db() as c:
+        rows = c.execute('SELECT * FROM stock_video_jobs ORDER BY id DESC LIMIT %s', (limit,)).fetchall()
+    if not rows:
+        return 'ما فيه طلبات فيديو بعد.'
+    out = ['🎬 حالة طلبات الفيديو:']
+    for r in rows:
+        line = f"#{r['id']} — {STATUS_AR.get(r['status'], r['status'])} — {r['topic'][:70]}"
+        if r['status'] == 'ready' and r.get('video_id'):
+            line += '\n   معاينة: ' + video_publish.url(r['video_id']) + ' (النشر برمز «نفذ» عند المدير)'
+        elif r['status'] == 'failed':
+            line += '\n   السبب: ' + str(r.get('error') or '—')[:160]
+        elif r['status'] in ('queued', 'producing'):
+            mins = int((utcnow() - r['created_at']).total_seconds() // 60)
+            line += f'\n   منذ {mins} دقيقة' + (' — سيكمل تلقائيًا بعد إعادة التشغيل' if mins > 15 else '')
+        out.append(line)
+    return '\n'.join(out)
+
+
 def start(topic, actor='', dialect=None):
     if not configured():
         return ('إنتاج الفيديو المجاني يحتاج مفتاح Pexels (حساب مجاني). أضف PEXELS_API_KEY في متغيرات Railway '
@@ -446,23 +515,6 @@ def start(topic, actor='', dialect=None):
         job = c.execute("INSERT INTO stock_video_jobs(topic,status,created_by,created_at) VALUES(%s,'queued',%s,%s) RETURNING id",
                         (topic, actor, utcnow())).fetchone()['id']
 
-    def work():
-        import asyncio
-        from app.owner_briefing import deliver
-        try:
-            vid, duration, credits, note, caption = produce(job, topic, actor, dialect)
-            with db() as c:
-                text = manager_text(c, vid, duration, note, caption)
-        except Exception as exc:
-            message = str(exc) if isinstance(exc, VideoError) else 'تعذر إنتاج الفيديو (' + type(exc).__name__ + ').'
-            print('STOCK_VIDEO_FAILED', job, type(exc).__name__, str(exc)[:200], flush=True)
-            with db() as c:
-                c.execute("UPDATE stock_video_jobs SET status='failed',error=%s,finished_at=%s WHERE id=%s", (message[:300], utcnow(), job))
-            text = f'⚠️ لم يكتمل الفيديو #{job}: {message}'
-        try:
-            asyncio.run(deliver(text))
-        except Exception as exc:
-            print('STOCK_VIDEO_DELIVER', type(exc).__name__, flush=True)
-    threading.Thread(target=work, daemon=True).start()
+    threading.Thread(target=_work, args=(job, topic, actor, dialect), daemon=True).start()
     return (f'🎬 بدأ إنتاج فيديو مجاني (#{job}) عن: {topic}\nمقاطع مجانية' + (' + تعليق صوتي (Azure)' if azure_configured() else ' + نص وموسيقى (الصوت غير مفعّل)') + ' + موسيقى بدون حقوق. '
             'أرسل لك رابط المعاينة ورمز النشر خلال 3-6 دقائق. لن يُنشر شيء قبل «نفذ».')

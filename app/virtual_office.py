@@ -82,7 +82,7 @@ DEPARTMENTS = {
                  'المستوردون، وكلاء الصين، الخليج) فيدخلون التواصل اليومي المعتمد تلقائيًا؛ تتابعين الردود والمهتمين وتجهزين لهم عروض '
                  'الأسعار؛ وتديرين المحتوى (البوستر اليومي بالعربي والإنجليزي ينشر تلقائيًا على فيسبوك وإنستغرام ويوتيوب وتيك توك)؛ '
                  'وترفعين للمالك تقرير القمع (marketing_report) كل صباح. لا رسالة خارجية جديدة إلا عبر القوالب المعتمدة أو «نفذ».'),
-        'tools': ('find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'stock_video', 'whatsapp_templates', 'send_email',
+        'tools': ('find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'stock_video', 'video_status', 'whatsapp_templates', 'send_email',
                   'send_whatsapp')},
     'service': {
         'person': 'لمى', 'model': 'casual3_female',

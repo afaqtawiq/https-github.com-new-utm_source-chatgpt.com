@@ -166,6 +166,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'gap_number': {'type': 'string'}, 'question': {'type': 'string'}, 'answer': {'type': 'string'}}, 'required': ['answer']}},
     {'name': 'learned_answers', 'description': 'Approved answers the customer agent learned: action=list shows them; action=revoke with id removes one («الغ الجواب 3»); action=report builds the performance report of yesterday now («تقرير أداء الوكيل»).',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'revoke', 'report']}, 'id': {'type': 'string'}}, 'required': ['action']}},
+    {'name': 'video_status', 'description': 'Status of the recent marketing video requests (stock_video): queued / producing / ready with the preview link / failed with the reason. Use it before asking for a new video or when the manager asks where a video is.',
+     'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'stock_video', 'description': 'Produce a FREE short vertical marketing video: footage from Pexels (free licence), free local Arabic narration, royalty-free music, Afaq brand cards and phone end card. The manager gets a preview link and a «نفذ» code; nothing is published before «نفذ». topic = what the video is about. e.g. «سوي فيديو عن التخليص في ميناء جدة» «فيديو مجاني عن نقل الحاويات للرياض».',
      'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'dialect': {'type': 'string', 'enum': ['fusha', 'saudi'], 'description': 'saudi when the manager asks for Saudi/colloquial dialect, else fusha'}}, 'required': ['topic']}},
     {'name': 'customer_care', 'description': 'Existing customers programme: transport offer to customers we clear for, and win-back messages to customers inactive 60+ days. action=prepare prepares a batch now (sent only after «نفذ»); action=status shows results. e.g. «جهز رسائل العملاء» «نتائج رسائل العملاء الحاليين».',
@@ -709,6 +711,11 @@ def tool_learned_answers(c, a):
     if a.get('action') == 'report':
         return agent_learning.report()
     return agent_learning.list_text()
+
+
+def tool_video_status(c, a):
+    from app import stock_video
+    return stock_video.status_text()
 
 
 def tool_stock_video(c, a):
