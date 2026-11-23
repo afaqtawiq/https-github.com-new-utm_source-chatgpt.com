@@ -36,3 +36,32 @@ def test_shipment_files():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     r = subprocess.run([sys.executable, '-c', SCRIPT], cwd=root, capture_output=True, text=True, timeout=60)
     assert r.stdout.strip().endswith('OK'), r.stderr[-2500:] + r.stdout[-500:]
+
+
+SCRIPT2 = r'''
+from app import shipment_files as sf, container_returns as cr
+from app.storage import db
+sf.init(); cr.init()
+with db() as c:
+    c.execute("DELETE FROM shipment_files WHERE bill_no IN ('KAP123456','KAP999')")
+    c.execute("DELETE FROM container_returns WHERE container IN ('SALU1234567','SALU7654321')")
+    c.execute("""INSERT INTO container_returns(container,customer,bill,return_place,status,created_at,updated_at)
+        VALUES('SALU1234567','مؤسسة سلة الرحائب','KAP123456','ميناء الملك عبدالله','open',NOW(),NOW()),
+              ('SALU7654321','مؤسسة سلة الرحائب','KAP123456','ميناء الملك عبدالله','open',NOW(),NOW())""")
+n = sf.backfill()
+assert n >= 1, n
+t = sf.lookup_text('سلة الرحائب الملك عبدالله')
+assert 'KAP123456' in t and 'SALU7654321' in t, t
+u = sf.update('KAP123456', broker='مكتب أبو سعود', pod='ميناء الملك عبدالله')
+assert 'أبو سعود' in u, u
+assert sf.keep_document({'bill_no': 'KAP123456', 'document_kind': 'shipping_document'}, 'bl.pdf', b'%PDF-1.4 x') == 'KAP123456'
+assert 'bl.pdf' in sf.lookup_text('KAP123456')
+print('OK')
+'''
+
+
+@db_only
+def test_backfill_search_keep():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, '-c', SCRIPT2], cwd=root, capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip().endswith('OK'), r.stderr[-2500:] + r.stdout[-800:]

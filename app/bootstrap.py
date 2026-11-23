@@ -295,6 +295,20 @@ app.include_router(virtual_office_router)
 from app import stock_video
 stock_video.init()
 stock_video.resume_interrupted()
+
+
+def _shipment_backfill():
+    import time
+    time.sleep(60)
+    try:
+        from app import shipment_files
+        print('SHIPMENT_BACKFILL', shipment_files.backfill(), flush=True)
+    except Exception as exc:
+        print('SHIPMENT_BACKFILL_FAILED', type(exc).__name__, str(exc)[:160], flush=True)
+
+
+import threading as _threading
+_threading.Thread(target=_shipment_backfill, daemon=True).start()
 from app import clearance_card
 clearance_card.install()
 app.include_router(clearance_card.router)

@@ -47,6 +47,10 @@ def init():
             containers TEXT NOT NULL DEFAULT '[]', declaration_no TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL DEFAULT 'booked',
             notes TEXT NOT NULL DEFAULT '', history TEXT NOT NULL DEFAULT '[]', created_at TIMESTAMPTZ NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL)''')
+        c.execute("ALTER TABLE shipment_files ADD COLUMN IF NOT EXISTS broker TEXT NOT NULL DEFAULT ''")
+        c.execute('''CREATE TABLE IF NOT EXISTS shipment_file_docs(id BIGSERIAL PRIMARY KEY, bill_no TEXT NOT NULL,
+            filename TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '', data BYTEA NOT NULL,
+            sha TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, UNIQUE(bill_no, sha))''')
         seed(c)
     _READY = True
 
@@ -179,7 +183,18 @@ def from_tracking(ref, info):
                    utcnow(), row['id']))
 
 
+def _fold(text):
+    text = re.sub(r'[ً-ٰٟـ]', '', str(text or '')).lower()
+    text = text.translate(str.maketrans('أإآىئة', 'اااييه'))
+    return re.sub(r'\b(ال)', '', text)
+
+
+STOP = {'ميناء', 'شحنه', 'شحنات', 'شحنة', 'في', 'باسم', 'اسم', 'حق', 'تبع', 'عن', 'ملف', 'port', 'وش', 'ايش', 'صار', 'كل'}
+
+
 def find(query):
+    """By bill, container, declaration or phone; otherwise every word must appear somewhere in the file
+    (customer, contact, port of loading/discharge, shipper, goods, broker, notes) — e.g. «سلة الرحائب الملك عبدالله»."""
     init()
     q = str(query or '').strip()
     if not q:
@@ -187,10 +202,105 @@ def find(query):
     bill = _bill(q)
     digits = re.sub(r'\D', '', q)
     with db() as c:
-        return c.execute('''SELECT * FROM shipment_files WHERE bill_no=%s OR containers ILIKE %s OR declaration_no=%s
-            OR customer ILIKE %s OR contact_name ILIKE %s OR (%s<>'' AND phone LIKE %s) ORDER BY updated_at DESC LIMIT 6''',
-                         (bill, '%' + bill + '%', q, '%' + q + '%', '%' + q + '%', digits[-9:] if len(digits) >= 9 else '',
-                          '%' + (digits[-9:] if len(digits) >= 9 else '#') + '%')).fetchall()
+        exact = c.execute('''SELECT * FROM shipment_files WHERE bill_no=%s OR (%s<>'' AND containers ILIKE %s) OR declaration_no=%s
+            OR (%s<>'' AND phone LIKE %s) ORDER BY updated_at DESC LIMIT 6''',
+                          (bill, bill if len(bill) >= 6 else '', '%' + bill + '%', q, digits[-9:] if len(digits) >= 9 else '',
+                           '%' + (digits[-9:] if len(digits) >= 9 else '#') + '%')).fetchall()
+        if exact:
+            return exact
+        rows = c.execute("SELECT * FROM shipment_files ORDER BY updated_at DESC LIMIT 800").fetchall()
+    words = [w for w in _fold(q).split() if len(w) > 1 and w not in {_fold(x) for x in STOP}]
+    if not words:
+        return []
+    hits = []
+    for r in rows:
+        hay = _fold(' '.join(str(r.get(k) or '') for k in ('customer', 'contact_name', 'email', 'pol', 'pod', 'shipper', 'goods',
+                                                           'broker', 'notes', 'vessel', 'shipping_line', 'bill_no')))
+        if all(w in hay for w in words):
+            hits.append(r)
+    return hits[:12]
+
+
+def keep_document(fields, filename, data, mime='application/pdf'):
+    """Owner (23 Nov 2026): «موظفي الوكيل ما بيحتفظوا بالمستندات». Every document read for a shipment is kept
+    permanently on its shipment file (the general document inbox only keeps the last few days)."""
+    import hashlib
+    if not data:
+        return None
+    init()
+    bill = _bill((fields or {}).get('bill_no'))
+    if not bill:
+        try:
+            from app import shipment_workflow
+            got = shipment_workflow.note_document(fields or {})
+            bill = (got or '').split('،')[0].strip()
+        except Exception:
+            bill = ''
+    if not bill:
+        return None
+    with db() as c:
+        if not c.execute('SELECT 1 FROM shipment_files WHERE bill_no=%s', (bill,)).fetchone():
+            return None
+        c.execute('''INSERT INTO shipment_file_docs(bill_no,filename,mime,kind,data,sha,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(bill_no, sha) DO NOTHING''', (bill, str(filename or '')[:160], mime or '', str((fields or {}).get('document_kind') or ''),
+                                                    data, hashlib.sha256(data).hexdigest(), utcnow()))
+    return bill
+
+
+def documents_text(bill):
+    with db() as c:
+        rows = c.execute('SELECT filename, kind, created_at FROM shipment_file_docs WHERE bill_no=%s ORDER BY id', (bill,)).fetchall()
+    return '، '.join((r['filename'] or r['kind'] or 'مستند') + ' (' + r['created_at'].astimezone(RIYADH).strftime('%d/%m') + ')' for r in rows)
+
+
+def backfill():
+    """Open files for shipments the office already knew before shipment files existed: containers registered from
+    B/Ls (container_returns), tracked bills (shipment_tracks) and documents still in the inbox. Never overwrites."""
+    init()
+    made = 0
+    with db() as c:
+        have = {r['bill_no'] for r in c.execute('SELECT bill_no FROM shipment_files').fetchall()}
+        groups = {}
+        if c.execute("SELECT to_regclass('container_returns') t").fetchone()['t']:
+            for r in c.execute("""SELECT container, customer, customer_phone, bill, return_place, notes, created_at FROM container_returns
+                    WHERE COALESCE(bill,'')<>'' AND NOT COALESCE(is_test,FALSE) AND status<>'returned'""").fetchall():
+                g = groups.setdefault(_bill(r['bill']), {'customer': '', 'phone': '', 'boxes': [], 'notes': ''})
+                g['customer'] = g['customer'] or (r['customer'] or '')
+                g['phone'] = g['phone'] or _phone(r['customer_phone'])
+                g['boxes'].append(r['container'])
+                g['notes'] = g['notes'] or ' '.join(x for x in (r['return_place'] or '', r['notes'] or '') if x)[:200]
+        tracks = {}
+        if c.execute("SELECT to_regclass('shipment_tracks') t").fetchone()['t']:
+            for r in c.execute('SELECT ref, ref_type, carrier, vessel, voyage, pol, pod, eta, containers, hints FROM shipment_tracks').fetchall():
+                tracks[_bill(r['ref'])] = r
+        now = utcnow()
+        for bill, g in groups.items():
+            if not bill or bill in have:
+                continue
+            t = tracks.get(bill) or {}
+            c.execute('''INSERT INTO shipment_files(bill_no,customer,phone,shipping_line,vessel,voyage,pol,pod,eta,containers,notes,
+                stage,history,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(bill_no) DO NOTHING''',
+                      (bill, g['customer'], g['phone'], t.get('carrier') or '', t.get('vessel') or '', t.get('voyage') or '',
+                       t.get('pol') or '', t.get('pod') or '', t.get('eta'), json.dumps(sorted(set(g['boxes']))), g['notes'],
+                       'arrived' if t.get('eta') and t['eta'] < now else 'booked',
+                       _log(None, 'فُتح من سجل الحاويات المسجلة سابقًا'), now, now))
+            have.add(bill)
+            made += 1
+        docs = []
+        if c.execute("SELECT to_regclass('staff_documents') t").fetchone()['t']:
+            docs = c.execute("SELECT filename, mime, data, fields FROM staff_documents WHERE fields LIKE '%%shipping_document%%'").fetchall()
+    for d in docs:
+        try:
+            fields = json.loads(d['fields'] or '{}')
+            if fields.get('document_kind') == 'shipping_document' and fields.get('bill_no'):
+                if _bill(fields['bill_no']) not in have:
+                    upsert_from_document(fields, 'مستند محفوظ في صندوق الملفات')
+                    have.add(_bill(fields['bill_no']))
+                    made += 1
+                keep_document(fields, d['filename'], bytes(d['data']), d['mime'])
+        except Exception as exc:
+            print('SHIPMENT_BACKFILL_DOC', type(exc).__name__, str(exc)[:120], flush=True)
+    return made
 
 
 def card(r):
@@ -207,6 +317,8 @@ def card(r):
              f'🕒 الوصول: {eta}',
              f"🧱 الحاويات ({len(boxes)}): " + ('، '.join(boxes) if boxes else '—'),
              (f"🧾 البيان: {r['declaration_no']}" if r.get('declaration_no') else '🧾 البيان: لم يُسجل بعد'),
+             (f"🏢 المخلص/المكتب المفوّض: {r['broker']}" if r.get('broker') else ''),
+             ('📎 المستندات المحفوظة: ' + (documents_text(r['bill_no']) or 'لا يوجد — ارفع البوليصة ليحفظها الملف')),
              f'📍 المرحلة: {label}', f'➡️ الخطوة التالية: {nxt}',
              (f"📝 ملاحظات: {r['notes']}" if r.get('notes') else '')]
     return '\n'.join(x for x in lines if x)
@@ -216,13 +328,17 @@ def lookup_text(query):
     rows = find(query)
     if not rows:
         return (f'ما لقيت ملف شحنة لـ«{query}». الملف ينفتح تلقائيًا من البوليصة أو إشعار الوصول — ارفعها هنا أو أرسلها للوكيل.')
-    return '\n\n'.join(card(r) for r in rows[:3])
+    head = f'لقيت {len(rows)} ملف شحنة:\n' + '\n'.join(
+        f"• {r['bill_no']} — {r['customer'][:40] or '؟'} — {r.get('pod') or '؟'} — {STAGE_AR.get(r['stage'], (r['stage'],))[0]}" for r in rows) + '\n\n' if len(rows) > 3 else ''
+    return head + '\n\n'.join(card(r) for r in rows[:3])
 
 
-def update(query, stage='', declaration_no='', phone='', contact_name='', email='', note='', actor='', docs_received=''):
+def update(query, stage='', declaration_no='', phone='', contact_name='', email='', note='', actor='', docs_received='', broker='', pod=''):
     rows = find(query)
     if not rows:
         return f'ما لقيت ملف شحنة لـ«{query}».'
+    if len(rows) > 1 and not re.search(r'[A-Z]{4}\d{7}|\d{6,}', str(query)):
+        return 'لقيت أكثر من ملف؛ حدد رقم البوليصة: ' + '، '.join(f"{x['bill_no']} ({x['customer'][:30]})" for x in rows[:8])
     r = rows[0]
     sets, changes = {}, []
     if stage:
@@ -248,6 +364,12 @@ def update(query, stage='', declaration_no='', phone='', contact_name='', email=
         sets['notes'] = (r['notes'] + ' | ' if r['notes'] else '') + _clean(note, 300)
         changes.append('ملاحظة')
     extra = ''
+    if broker:
+        sets['broker'] = _clean(broker, 120)
+        changes.append('المكتب المفوّض: ' + sets['broker'])
+    if pod:
+        sets['pod'] = _clean(pod, 60)
+        changes.append('ميناء الوصول: ' + sets['pod'])
     if docs_received:
         from app import shipment_workflow as sw
         sw.init()
