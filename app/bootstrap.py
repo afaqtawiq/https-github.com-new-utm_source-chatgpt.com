@@ -294,6 +294,7 @@ from app.virtual_office import router as virtual_office_router
 app.include_router(virtual_office_router)
 from app import stock_video
 stock_video.init()
+stock_video.resume_interrupted()
 from app import clearance_card
 clearance_card.install()
 app.include_router(clearance_card.router)
