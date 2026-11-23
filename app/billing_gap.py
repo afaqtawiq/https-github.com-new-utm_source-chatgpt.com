@@ -46,7 +46,8 @@ def report(month=None):
     with db() as c:
         if not c.execute("SELECT to_regclass('fasah_status') t").fetchone()['t']:
             return 'ما فيه قراءة لقائمة البيانات من فسح بعد؛ اطلب «افتح فسح» أولًا.'
-        seen = c.execute('SELECT number, kind, declared_on, details, stage, first_seen FROM fasah_status').fetchall()
+        c.execute("ALTER TABLE fasah_status ADD COLUMN IF NOT EXISTS party TEXT NOT NULL DEFAULT ''")
+        seen = c.execute("SELECT number, kind, declared_on, details || ' ' || party AS details, stage, first_seen FROM fasah_status").fetchall()
         billed = {}
         if c.execute("SELECT to_regclass('billing_declarations') t").fetchone()['t']:
             billed = {(r['number'], r['kind']): r for r in
