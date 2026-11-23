@@ -187,7 +187,78 @@ def briefing_text(today=None):
 
 # ---------- delivery ----------
 
-async def deliver(text):
+DIGEST_QUIET = 90      # seconds without a new update before the manager sends the bundle
+DIGEST_MAX_WAIT = 300  # never hold an update longer than this
+MANAGER = 'المدير العام'
+
+
+def _outbox(c):
+    c.execute('''CREATE TABLE IF NOT EXISTS owner_outbox(id BIGSERIAL PRIMARY KEY, body TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), sent_at TIMESTAMPTZ)''')
+
+
+async def deliver(text, urgent=False):
+    """Owner (23 Nov 2026): «تواصلي مع المدير، وهو يوزع المهام ويعطيني النتائج — رسالة واحدة تكفي». Every
+    department's notice goes to the general manager's outbox; he sends ONE message with all updates (after 90 s of
+    quiet, at most 5 minutes later). urgent=True (or OWNER_DIGEST=0) sends at once."""
+    if not urgent and os.getenv('OWNER_DIGEST', '1') != '0' and str(text or '').strip():
+        try:
+            def queue():
+                with db() as c:
+                    _outbox(c)
+                    c.execute('INSERT INTO owner_outbox(body) VALUES(%s)', (str(text)[:6000],))
+            await run_in_threadpool(queue)
+            return 'queued'
+        except Exception as exc:
+            print('OWNER_OUTBOX_FAILED', type(exc).__name__, str(exc)[:120], flush=True)
+    return await send_now(text)
+
+
+def bundle(bodies):
+    """One message from the manager: duplicates merged (×n), each update separated, split under WhatsApp's limit."""
+    seen, order = {}, []
+    for b in bodies:
+        key = b.strip()
+        if key in seen:
+            seen[key] += 1
+        else:
+            seen[key] = 1
+            order.append(key)
+    items = [k + (f'\n(تكرر ×{seen[k]})' if seen[k] > 1 else '') for k in order]
+    head = f'📋 {MANAGER} — ' + ('تحديث' if len(items) == 1 else f'{len(items)} تحديثات من الأقسام')
+    parts, cur = [], head
+    for it in items:
+        block = '\n\n▫️ ' + it
+        if len(cur) + len(block) > 3500 and cur != head:
+            parts.append(cur)
+            cur = f'📋 {MANAGER} (تكملة)'
+        cur += block[:3400]
+    parts.append(cur)
+    return parts
+
+
+async def flush_outbox(force=False):
+    def take():
+        with db() as c:
+            _outbox(c)
+            rows = c.execute('SELECT id, body, created_at FROM owner_outbox WHERE sent_at IS NULL ORDER BY id').fetchall()
+            if not rows:
+                return []
+            now = dt.datetime.now(dt.timezone.utc)
+            quiet = (now - rows[-1]['created_at']).total_seconds() >= DIGEST_QUIET
+            old = (now - rows[0]['created_at']).total_seconds() >= DIGEST_MAX_WAIT
+            if not (force or quiet or old):
+                return []
+            c.execute('UPDATE owner_outbox SET sent_at=NOW() WHERE id = ANY(%s)', ([r['id'] for r in rows],))
+            c.execute("DELETE FROM owner_outbox WHERE sent_at < NOW() - INTERVAL '7 days'")
+            return [r['body'] for r in rows]
+    bodies = await run_in_threadpool(take)
+    for part in (bundle(bodies) if bodies else []):
+        await send_now(part)
+    return len(bodies)
+
+
+async def send_now(text):
     from app import zernio_whatsapp as z
     owner = os.getenv('WHATSAPP_COMMAND_OWNER', '').strip()
     if owner:
@@ -249,6 +320,18 @@ def register_worker(app):
                     print('OWNER_BRIEFING_ERROR', type(exc).__name__, str(exc)[:200], flush=True)
             await asyncio.sleep(300)
 
+    async def digest_loop():
+        await asyncio.sleep(20)
+        while True:
+            try:
+                await flush_outbox()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print('OWNER_DIGEST_ERROR', type(exc).__name__, str(exc)[:160], flush=True)
+            await asyncio.sleep(30)
+
     @app.on_event('startup')
     async def start():
         app.state.owner_briefing_worker = asyncio.create_task(loop())
+        app.state.owner_digest_worker = asyncio.create_task(digest_loop())
