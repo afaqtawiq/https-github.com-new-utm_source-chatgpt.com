@@ -61,6 +61,8 @@ TOOLS = [
     {'name': 'shipment_file_update', 'description': 'Update a shipment file: stage (booked/arriving/arrived/declared/inspection/duties/released/trucking/delivered/returned/closed or its Arabic label), declaration_no, customer phone/contact_name/email, or a note. query = bill/container/customer.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_no': {'type': 'string'},
         'phone': {'type': 'string'}, 'contact_name': {'type': 'string'}, 'email': {'type': 'string'}, 'note': {'type': 'string'},
+        'broker': {'type': 'string', 'description': 'the clearance office handling it if not us, e.g. «مكتب أبو سعود»'},
+        'pod': {'type': 'string', 'description': 'port of discharge, e.g. «ميناء الملك عبدالله»'},
         'docs_received': {'type': 'string', 'description': 'documents received from the customer, e.g. «الفاتورة وقائمة التعبئة وشهادة المنشأ»'}}, 'required': ['query']}},
     {'name': 'customs_question', 'description': 'Answer a question about customs procedures, documents or requirements from the approved knowledge.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}}, 'required': ['question']}},
@@ -229,7 +231,9 @@ GM_POLICY = ('\nأنت «المدير العام» لمكتب آفاق طويق�
              'ريم (المبيعات والتسويق)، لمى (خدمة العملاء)، دانة (البريد)، هند (الإدارة). '
              'كل طلب من عمل قسم: وزّعه على الموظف المختص بأداة ask_colleague (ولأكثر من موظف إذا احتاج)، ونفّذ بنفسك ما تملك أداته مباشرة. '
              'ثم ارجع للمالك برد واحد مرتب: ✅ ما تم، 📌 النتيجة بالأرقام، ⏳ ما ينتظر قراره أو رمز «نفذ». '
-             'لا تطلب من المالك أن يكلم موظفًا أو قسمًا بنفسه، ولا تنقل له ردود الموظفين حرفيًا؛ لخّصها.')
+             'لا تطلب من المالك أن يكلم موظفًا أو قسمًا بنفسه، ولا تنقل له ردود الموظفين حرفيًا؛ لخّصها. '
+             'أي معلومة يذكرها المالك عن شحنة (المكتب المفوّض، الميناء، المسؤول، ملاحظة) احفظها فورًا في ملف الشحنة بأداة '
+             'shipment_file_update، وابحث عن الشحنات بأداة shipment_file بالكلمات (مثل «سلة الرحائب الملك عبدالله») قبل أن تقول لا يوجد.')
 
 
 # ------------------------------------------------------------------ tool implementations
@@ -339,7 +343,7 @@ def tool_shipment_file_update(c, a):
     from app import shipment_files
     return shipment_files.update(a.get('query'), a.get('stage') or '', a.get('declaration_no') or '', a.get('phone') or '',
                                  a.get('contact_name') or '', a.get('email') or '', a.get('note') or '', _member().get('name') or '',
-                                 a.get('docs_received') or '')
+                                 a.get('docs_received') or '', a.get('broker') or '', a.get('pod') or '')
 
 
 def tool_declaration_info(c, a):

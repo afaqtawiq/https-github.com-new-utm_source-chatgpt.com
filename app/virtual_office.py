@@ -534,8 +534,11 @@ async def office_upload(key: str, request: Request):
             from app import load_vision, shipping_docs
             fields = await load_vision.extract_pdf(data)
             await run_in_threadpool(staff_documents.set_fields, doc_id, fields)
-            from app import shipment_workflow
+            from app import shipment_files, shipment_workflow
             await run_in_threadpool(shipment_workflow.note_document, fields)
+            kept = await run_in_threadpool(shipment_files.keep_document, fields, name, data, mime)
+            if kept:
+                text = (text + '\n\n' if text else '') + f'[حُفظ المستند في ملف الشحنة {kept}]'
             if fields.get('document_kind') == 'shipping_document' and fields.get('bill_no'):
                 registered = await run_in_threadpool(shipping_docs.register, fields, text)
                 text = (text + '\n\n' if text else '') + ('[سُجل المستند في ملف الشحنة ' + str(fields.get('bill_no')) +

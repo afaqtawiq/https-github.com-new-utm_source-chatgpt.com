@@ -18,7 +18,7 @@ import httpx
 
 from app.storage import db, utcnow
 
-KEEP_HOURS, KEEP_PER_SENDER = 72, 5
+KEEP_HOURS, KEEP_PER_SENDER = 30 * 24, 40  # owner, 23 Nov 2026: documents must not vanish after 3 days
 MAX_BYTES = 15 * 1024 * 1024
 _READY = False
 # Who «the last file» belongs to when not on WhatsApp (virtual office upload: 'office:<user id>').

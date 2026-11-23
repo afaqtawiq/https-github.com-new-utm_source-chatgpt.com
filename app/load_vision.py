@@ -496,6 +496,13 @@ async def handle_pdf(c, payload, sender, index):
                 reply = await staff_documents.summary(row) if row else ''
             reply = ('📄 ' + reply + '\n\n' if reply else 'وصلني الملف. ') + \
                 'لم أسجل منه شيئًا. اسألني عن أي معلومة فيه (مثل: متى تصل الشحنة؟).'
+        try:  # keep the document on its shipment file for good (owner, 23 Nov 2026)
+            from app import shipment_files
+            kept = shipment_files.keep_document(fields, staff_documents.filename_of(payload, index), got[0])
+            if kept:
+                reply += f'\n📁 حُفظ المستند في ملف الشحنة {kept}.'
+        except Exception as exc:
+            print('SHIPMENT_KEEP_DOC', type(exc).__name__, str(exc)[:120], flush=True)
     except ValueError as error:
         reply = str(error)
     except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError):
