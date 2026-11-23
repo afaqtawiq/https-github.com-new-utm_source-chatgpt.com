@@ -925,10 +925,23 @@ def main():
     print('جهاز آفاق طويق يعمل. للإيقاف الكامل: Ctrl+C', flush=True)
     with sync_playwright() as pw:
         kwargs = dict(user_data_dir=str(PROFILE), headless=args.headless, accept_downloads=True, locale='ar-SA', chromium_sandbox=True)
-        try:
-            context = pw.chromium.launch_persistent_context(channel='chrome', **kwargs)
-        except Exception:
-            context = pw.chromium.launch_persistent_context(**kwargs)
+
+        def launch():
+            try:
+                return pw.chromium.launch_persistent_context(channel='chrome', **kwargs)
+            except Exception:
+                return pw.chromium.launch_persistent_context(**kwargs)
+
+        def alive(ctx):
+            # The browser window can be closed by hand (or by a second copy of this program): then EVERY task failed
+            # with «Target page, context or browser has been closed» (owner, 23 Nov 2026). Check before each task.
+            try:
+                probe = ctx.new_page()
+                probe.close()
+                return True
+            except Exception:
+                return False
+        context = launch()
         last_check = time.time()
         while True:
             try:
@@ -938,6 +951,13 @@ def main():
                 time.sleep(30)
                 continue
             if got.get('task'):
+                if not alive(context):
+                    print('نافذة المتصفح مغلقة — أعيد فتحها (قد يطلب فسح تسجيل الدخول).', flush=True)
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                    context = launch()
                 print('انتهت المهمة:', run_one(api, got, context), flush=True)
                 if args.once:
                     break
