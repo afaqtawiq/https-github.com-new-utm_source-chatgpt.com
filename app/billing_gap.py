@@ -104,3 +104,30 @@ def report(month=None):
                '\n- بيانات المستوردين الآخرين: تحتاج سعر تخليص لكل مستورد (قاعدة فوترة) قبل ما تُسجل تلقائيًا.'
                '\n- المحتاجة مراجعة: افتحها مع نورة بالرقم.')
     return '\n'.join(out)
+
+
+def declaration_info(numbers):
+    """What the agent has stored for given declaration numbers: FASAH row (date, details as read), seen as سلة or not,
+    billing status. For finding why a declaration is not counted."""
+    from app.billing_rules import is_salla, flat_rate
+    from app.storage import db
+    nums = re.findall(r'\d{3,8}', str(numbers or ''))[:10]
+    if not nums:
+        return 'اكتب رقم البيان (أو أكثر).'
+    out = []
+    with db() as c:
+        has_status = c.execute("SELECT to_regclass('fasah_status') t").fetchone()['t']
+        has_bill = c.execute("SELECT to_regclass('billing_declarations') t").fetchone()['t']
+        for n in nums:
+            rows = c.execute('SELECT * FROM fasah_status WHERE number=%s', (n,)).fetchall() if has_status else []
+            bill = c.execute('SELECT kind, status, party FROM billing_declarations WHERE number=%s', (n,)).fetchall() if has_bill else []
+            if not rows:
+                out.append(f'• {n}: غير موجود فيما قرأه الوكيل من قائمة فسح (لم يظهر في الصفحات المقروءة).')
+                continue
+            for r in rows:
+                tag = 'سلة الرحائب ✅' if is_salla(r['details']) else (('سعر ثابت: ' + flat_rate(r['details'])[0]) if flat_rate(r['details']) else 'لم يُتعرّف عليه كسلة ❌')
+                b = next((x for x in bill if x['kind'] == r['kind']), None)
+                out.append(f"• {n} ({KIND_AR.get(r['kind'], r['kind'])}) — {r['declared_on'] or '؟'} — {tag}\n"
+                           f"  كما قُرئ من فسح: {r['details'][:200]}\n"
+                           f"  الحسابات: {(b['status'] + ' / ' + b['party']) if b else 'غير مسجل'}")
+    return '\n'.join(out)
