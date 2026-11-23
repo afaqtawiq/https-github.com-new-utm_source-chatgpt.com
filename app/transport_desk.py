@@ -352,7 +352,7 @@ def driver_accept(phone, text, lang=''):
                   (utcnow(), bid, rec['phone']))
         count = c.execute("SELECT COUNT(*) n FROM load_broadcast_recipients WHERE broadcast_id=%s AND status='accepted'", (bid,)).fetchone()['n']
     reply = dl.accept_reply(lang, ref) or ('تم تسجيل موافقتك على الحمولة ' + ref + ' 👍 ننسق الآن مع صاحب الحمولة ونرجع لك بالتأكيد خلال وقت قصير. '
-             'للاستفسار: ' + SUPPORT)
+             'للاستفسار: ' + SUPPORT + '\n\n📱 ' + __import__('app.market_publish', fromlist=['invite']).invite('ar'))
     manager = None
     if first:
         name = rec.get('driver_name') or 'سائق'

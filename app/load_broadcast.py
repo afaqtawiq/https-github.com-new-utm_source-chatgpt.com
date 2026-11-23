@@ -193,7 +193,13 @@ def start(action, actor_name=''):
             c.execute("INSERT INTO load_broadcast_recipients(broadcast_id,driver_id,phone,status) VALUES(%s,%s,%s,'pending') ON CONFLICT DO NOTHING",
                       (bid, d['id'], phone))
     threading.Thread(target=lambda: asyncio.run(send_all(bid)), daemon=True).start()
-    return (f'✅ بدأ إرسال الحمولة {ref} إلى {len(seen)} سائق ({load["origin"]} → {load["destination"]}، سعر السائق {load["driver_price"]} ريال). '
+    try:  # same «نفذ»: announce it in the transport app too (owner, 23 Nov 2026)
+        from app import market_publish
+        app_line = '\n' + market_publish.publish(bid)
+    except Exception as exc:
+        app_line = ''
+        print('MARKET_PUBLISH', type(exc).__name__, str(exc)[:120], flush=True)
+    return app_line.strip() + '\n' + (f'✅ بدأ إرسال الحمولة {ref} إلى {len(seen)} سائق ({load["origin"]} → {load["destination"]}، سعر السائق {load["driver_price"]} ريال). '
             f'السائق يرد بـ «موافق {ref}» وأبلغك فورًا بكل موافقة لتختار السائق. اسأل «حالة الإرسال {ref}» لمعرفة النتيجة.')
 
 

@@ -95,7 +95,11 @@ def accept_reply(lang, ref, state='recorded'):
         'en': {'recorded': f'Your acceptance of load {ref} is recorded 👍 We will confirm with the load owner shortly. Contact: {SUPPORT}',
                'yours': f'Load {ref} is assigned to you ✅ Details have been sent. Contact: {SUPPORT}',
                'taken': f'Thank you 🙏 Load {ref} was given to another driver. We will keep sending you new loads.'}}
-    return texts.get(lang, {}).get(state)
+    text = texts.get(lang, {}).get(state)
+    if text:
+        from app.market_publish import invite
+        text += '\n\n📱 ' + invite(lang)
+    return text
 
 
 def latest_offer(c, phone, hours=72):
