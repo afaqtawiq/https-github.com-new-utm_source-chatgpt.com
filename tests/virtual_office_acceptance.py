@@ -145,7 +145,7 @@ def run():
         return 'قرأت الملف ' + row['filename']
 
     def reading_model(messages, system):
-        if len(messages) == 1:
+        if isinstance(messages[-1]['content'], str):  # a new request (earlier office turns may precede it)
             return {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'ask_document', 'input': {'question': 'لخص'}}]}
         result = messages[-1]['content'][0]['content']
         return {'content': [{'type': 'text', 'text': 'تمام: ' + result}]}
@@ -204,7 +204,7 @@ def run():
         return 'wamid.1'
 
     def group_model(messages, system):
-        if len(messages) == 1:
+        if isinstance(messages[-1]['content'], str):
             return {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'statement_to_group', 'input': {'party': 'الياسمين'}}]}
         return {'content': [{'type': 'text', 'text': messages[-1]['content'][0]['content']}]}
 
