@@ -70,3 +70,37 @@ def test_routine_customer_messages_get_natural_replies_with_context(setup, monke
     secret = agent.accept_inbound(payload(90, 'كلمة المرور حقتي 12345678 للدخول'))
     assert tick()
     assert len(seen) == 3 and 'conversation_text' not in store.get_job(secret['job_id'])['payload']
+
+
+def test_routine_photo_burst_gets_one_human_ack(setup, monkeypatch):
+    """Owner, 24 Nov 2026: several photos from a customer -> one acknowledgement in the customer's language,
+    never a failure notice per photo."""
+    from test_whatsapp_agent import ACCOUNT
+    store.update_settings(ACCOUNT, mode='routine', acceptance={'direct_owner_activation': True,
+                          'owner_receipt_confirmed': True, 'confirmed_by': 'test-owner'})
+    monkeypatch.setitem(sys.modules, 'app.team', SimpleNamespace(identify=lambda event: (None, None)))
+    notices = []
+    from app import owner_briefing
+
+    async def deliver(text, urgent=False):
+        notices.append(text)
+    monkeypatch.setattr(owner_briefing, 'deliver', deliver)
+    from app import whatsapp_natural
+
+    async def natural(question, history=()):
+        return 'Thank you, noted.'
+    monkeypatch.setattr(whatsapp_natural, 'reply', natural)
+    first = agent.accept_inbound(payload(95, 'Please find the shipment details'))
+    assert tick()
+    ids = []
+    for number in range(96, 100):
+        photo = payload(number, '')
+        photo['message']['attachments'] = [{'type': 'image', 'mimeType': 'image/jpeg', 'id': f'm{number}'}]
+        queued = agent.accept_inbound(photo)
+        ids.append(queued['job_id'])
+        assert tick()
+    statuses = [store.get_job(i)['status'] for i in ids]
+    sent = [s[1] for s in setup['sends']]
+    assert statuses[0] == 'sent' and set(statuses[1:]) == {'blocked'}, statuses
+    assert sent[-1].startswith('Thank you, we have received your attachments') and len(sent) == 2, sent
+    assert len(notices) == 1 and 'مرفقات' in notices[0]

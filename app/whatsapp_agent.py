@@ -190,6 +190,29 @@ def accept_inbound(payload):
     return {'ok':True,'queued':True,'job_id':job['id'],'automatic_retry_of_send':False}
 
 
+ATTACHMENT_ACK_AR = ('شكرًا لك، وصلتنا المرفقات 👍 فريق آفاق طويق يراجعها الآن ويرد عليك بأقرب وقت. '
+                     'وإذا عندك أي تفاصيل إضافية عن الشحنة اكتبها هنا.')
+ATTACHMENT_ACK_EN = ('Thank you, we have received your attachments 👍 Our team at Afaq Tuwaiq is reviewing them now '
+                     'and will get back to you shortly. Feel free to add any further shipment details here.')
+HUMAN_FALLBACK_AR = 'شكرًا لك، وصلتنا رسالتك. فريق آفاق طويق يراجع طلبك ويرد عليك بأقرب وقت.'
+HUMAN_FALLBACK_EN = 'Thank you for your message. Our team at Afaq Tuwaiq is reviewing your request and will reply to you shortly.'
+
+
+def _latin(texts):
+    joined = ' '.join(str(t or '') for t in texts)
+    return len(re.findall(r'[A-Za-z]', joined)) > len(re.findall(r'[\u0600-\u06FF]', joined))
+
+
+def attachment_ack(data, history=()):
+    recent = [data.get('conversation_text') or ''] + [h.get('question') for h in list(history or ())[-2:]]
+    return ATTACHMENT_ACK_EN if _latin(recent) else ATTACHMENT_ACK_AR
+
+
+def human_fallback(question, history=()):
+    recent = [question] + [h.get('question') for h in list(history or ())[-2:]]
+    return HUMAN_FALLBACK_EN if _latin(recent) else HUMAN_FALLBACK_AR
+
+
 async def fetch_document(job):
     data = job['payload']
     if data.get('attachment_count') != 1 or len(data.get('attachments', [])) != 1:
@@ -470,6 +493,28 @@ async def processing(job):
             await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=status_reply,
                 diagnostics={'model_attempted':False,'model_success':False,'model_reason':'declaration_status'})
             return
+    if (settings['mode'] == 'routine' and data.get('attachments')
+            and document_status in ('unavailable', 'quarantined', 'reference_unavailable')):
+        # Owner, 24 Nov 2026: photos/files the lane cannot read get ONE human acknowledgement per burst
+        # (never one failure notice per file), and the manager is told to look at them.
+        already = await run_in_threadpool(store.recent_attachment_ack, account_id=job['account_id'],
+                                          sender=job['sender'], before_job_id=jid)
+        if already:
+            await run_in_threadpool(store.prepare_reply, jid, lease, terminal_status='blocked',
+                                    diagnostics={'reason': 'attachment_burst_already_acknowledged'})
+            return
+        history = await run_in_threadpool(store.recent_exchanges, account_id=job['account_id'], sender=job['sender'],
+                                          conversation_id=job['conversation_id'], before_job_id=jid)
+        await run_in_threadpool(store.prepare_reply, jid, lease, reply_text=attachment_ack(data, history),
+                                diagnostics={'model_attempted': False, 'model_success': False, 'model_reason': 'attachment_ack'})
+        try:
+            from app.owner_briefing import deliver
+            caption = str(data.get('conversation_text') or '')[:200]
+            await deliver(f"📎 عميل +{job['sender']} أرسل مرفقات (صور/ملفات) — رددت عليه باستلامها، وتحتاج مراجعتك في واتساب."
+                          + (f"\nنص مرفق: {caption}" if caption else ''))
+        except Exception as exc:
+            print('WA_ATTACHMENT_NOTICE', type(exc).__name__, flush=True)
+        return
     natural_text = data.get('conversation_text')
     if (natural_text and settings['mode'] == 'routine' and not data.get('attachments') and not text and document_status == 'none'
             and data.get('question_kind') != 'review'
@@ -486,7 +531,7 @@ async def processing(job):
                 print('WA_NATURAL_LANE', type(exc).__name__, str(exc)[:120], flush=True)
                 natural = None
             await run_in_threadpool(store.save_model, jid, lease,
-                                    reply_text=natural or 'أهلًا بك، معك نيرمين من آفاق طويق. وش أقدر أخدمك فيه اليوم؟',
+                                    reply_text=natural or human_fallback(natural_text, history),
                                     diagnostics={'model_success': bool(natural), 'model_attempted': True,
                                                  'model_reason': 'natural_conversation', 'gate': data.get('question_reason') or data.get('question_kind')})
             await run_in_threadpool(store.prepare_reply, jid, lease)
@@ -549,6 +594,15 @@ async def processing(job):
                                              approved_hashes=model_hashes,before_request=model_guard,reviewed_excerpt=bool(review_id),
                                              conversation_history=conversation_history,conversation_scope=conversation_scope,
                                              operator_context=operator_context)
+            if (settings['mode'] == 'routine' and str(result.text or '').strip().startswith(privacy.FALLBACK_REPLY)
+                    and not text and not data.get('attachments')):
+                # Never send «ما قدرت أجهز إجابة موثوقة» to a customer: try the natural lane, else a human line.
+                from app import whatsapp_natural
+                retry = None
+                with suppress(Exception):
+                    retry = await whatsapp_natural.reply(data.get('question') or data.get('conversation_text') or '', conversation_history)
+                result = privacy.ReplyResult(retry or human_fallback(data.get('question'), conversation_history),
+                                             True, bool(retry), 'natural_after_fallback' if retry else 'human_fallback')
             await run_in_threadpool(store.save_model,jid,lease,reply_text=result.text,
                                     diagnostics={'model_success':bool(result.ok and result.used_model),
                                                  'model_attempted':result.used_model,'model_reason':result.reason})

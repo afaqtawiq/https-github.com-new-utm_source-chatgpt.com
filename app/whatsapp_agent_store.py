@@ -883,6 +883,17 @@ def _reply(text):
         raise ValueError("reply text must be nonempty and bounded")
 
 
+def recent_attachment_ack(*, account_id, sender, before_job_id, minutes=20, db_factory=None, now=None):
+    """True when this sender already got (or is getting) one attachment acknowledgement in the window,
+    so a burst of photos/files gets a single reply instead of one per file."""
+    cutoff = _stamp(_time(now) - timedelta(minutes=minutes))
+    with (db_factory or database)() as connection:
+        row = connection.execute("""SELECT 1 AS hit FROM whatsapp_agent_jobs WHERE account_id=%s AND sender=%s AND id<%s
+            AND created_at>%s AND diagnostics LIKE %s AND status IN ('ready','sending','sent') LIMIT 1""",
+            (account_id, sender, before_job_id, cutoff, '%attachment_ack%')).fetchone()
+    return bool(row)
+
+
 def prepare_reply(job_id, lease_token, *, reply_text=None, terminal_status=None,
                   diagnostics=None, db_factory=None, now=None):
     with (db_factory or database)() as connection:
