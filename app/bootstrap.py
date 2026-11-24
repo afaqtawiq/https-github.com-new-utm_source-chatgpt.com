@@ -295,6 +295,9 @@ app.include_router(virtual_office_router)
 from app import stock_video
 stock_video.init()
 stock_video.resume_interrupted()
+from app import video_director
+video_director.init()
+video_director.register_worker()
 
 
 def _shipment_backfill():
