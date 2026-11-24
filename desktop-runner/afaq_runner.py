@@ -869,9 +869,15 @@ class Task:
         return self.upload(path, page.url)
 
 
+SESSION_FILE = PROFILE.parent / 'fasah-session.json'
+_last_refresh = [0.0]
+
+
 def keep_fasah_alive(context):
-    """Owner (23 Nov 2026): FASAH signs out when idle, but any activity every minute keeps the session. While the
-    runner is idle, move the mouse and tap Shift on the FASAH window — no click, nothing that changes anything."""
+    """Owner (23-24 Nov 2026): FASAH signs out when idle; any activity keeps the session. Every call moves the mouse
+    and taps Shift on the FASAH window (no click, nothing that changes anything); every 4 minutes it also makes one
+    read-only request to the page it is on, so the server session is extended too, not only the screen timer."""
+    refresh = time.time() - _last_refresh[0] > 240
     for page in list(context.pages):
         try:
             if page.is_closed() or 'fasah.zatca.gov.sa' not in page.url or '/login' in page.url:
@@ -880,8 +886,55 @@ def keep_fasah_alive(context):
             page.mouse.move(420, 320 + int(time.time()) % 40)
             page.keyboard.press('Shift')
             page.evaluate("window.dispatchEvent(new Event('mousemove')); document.dispatchEvent(new Event('keydown'))")
+            if refresh:
+                page.evaluate("fetch(location.href, {credentials: 'include', cache: 'no-store'}).then(r => r.status).catch(() => 0)")
         except Exception:
             continue
+    if refresh:
+        _last_refresh[0] = time.time()
+
+
+def save_fasah_session(context):
+    """Before the browser closes (relaunch or self-update): keep FASAH cookies and session storage for the restart,
+    so the owner does not have to sign in again. Stored only in this computer's profile folder."""
+    try:
+        state = {'saved': time.time(), 'cookies': [c for c in context.cookies() if 'zatca.gov.sa' in c.get('domain', '')],
+                 'session': {}}
+        for page in list(context.pages):
+            if not page.is_closed() and 'fasah.zatca.gov.sa' in page.url and '/login' not in page.url:
+                state['session'] = page.evaluate('JSON.stringify(Object.assign({}, sessionStorage))')
+                state['url'] = page.url
+                break
+        SESSION_FILE.write_text(json.dumps(state), encoding='utf-8')
+    except Exception as exc:
+        print('تعذر حفظ جلسة فسح:', str(exc)[:100], flush=True)
+
+
+def restore_fasah_session(context, max_age=1800):
+    """After a restart: put the saved FASAH session back (only if saved in the last 30 minutes) and reopen FASAH."""
+    try:
+        state = json.loads(SESSION_FILE.read_text(encoding='utf-8'))
+        if time.time() - float(state.get('saved', 0)) > max_age or not state.get('cookies'):
+            return False
+        context.add_cookies(state['cookies'])
+        session = state.get('session') or '{}'
+        context.add_init_script("""(() => { if (!location.host.includes('fasah.zatca.gov.sa')) return;
+            try { const s = %s; for (const k in s) if (sessionStorage.getItem(k) === null) sessionStorage.setItem(k, s[k]); } catch (e) {} })();"""
+                                % session)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(state.get('url') or 'https://fasah.zatca.gov.sa/', wait_until='domcontentloaded', timeout=60000)
+        print('أعدت جلسة فسح بعد إعادة التشغيل.' if '/login' not in page.url else 'فسح يطلب تسجيل الدخول بعد إعادة التشغيل.', flush=True)
+        return '/login' not in page.url
+    except FileNotFoundError:
+        return False
+    except Exception as exc:
+        print('تعذر استعادة جلسة فسح:', str(exc)[:100], flush=True)
+        return False
+    finally:
+        try:
+            SESSION_FILE.unlink()
+        except Exception:
+            pass
 
 
 def self_update(api):
@@ -957,6 +1010,7 @@ def main():
             except Exception:
                 return False
         context = launch()
+        restore_fasah_session(context)
         last_check = last_ping = time.time()
         while True:
             try:
@@ -969,11 +1023,16 @@ def main():
                 if not alive(context):
                     print('نافذة المتصفح مغلقة — أعيد فتحها (قد يطلب فسح تسجيل الدخول).', flush=True)
                     try:
+                        save_fasah_session(context)
                         context.close()
                     except Exception:
                         pass
                     context = launch()
+                    restore_fasah_session(context)
                 print('انتهت المهمة:', run_one(api, got, context), flush=True)
+                if time.time() - last_ping > 50:  # long task runs: keep FASAH alive between tasks too
+                    last_ping = time.time()
+                    keep_fasah_alive(context)
                 if args.once:
                     break
             elif args.once:
@@ -985,6 +1044,7 @@ def main():
                 if time.time() - last_check > 15 * 60:
                     last_check = time.time()
                     if self_update(api):
+                        save_fasah_session(context)
                         context.close()
                         os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
                 time.sleep(10)
