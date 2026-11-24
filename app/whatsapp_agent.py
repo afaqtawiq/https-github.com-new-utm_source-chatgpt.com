@@ -225,6 +225,32 @@ def human_fallback(question, history=()):
     return HUMAN_FALLBACK_EN if _latin(recent) else HUMAN_FALLBACK_AR
 
 
+async def voice_reply(job, data, jid, lease):
+    """Customer voice note (owner, 24 Nov 2026): transcribe it, understand it with the conversation, reply in text.
+    Returns (reply, natural_ok) or None when the note cannot be transcribed (the normal acknowledgement follows)."""
+    from app import whatsapp_admin, whatsapp_natural
+    audio = next((a for a in data['attachments'] if isinstance(a, dict) and a.get('kind') == 'audio'), None)
+    pseudo = {'message': {'platformMessageId': job['message_id']}, 'account': {'accountId': job['account_id']},
+              'conversation': {'id': job['conversation_id']}}
+    try:
+        transcript = await whatsapp_admin.transcribe(pseudo, audio.get('index', 0))
+    except Exception as exc:
+        print('WA_VOICE_TRANSCRIBE', type(exc).__name__, str(exc)[:120], flush=True)
+        return None
+    history = await run_in_threadpool(store.recent_exchanges, account_id=job['account_id'], sender=job['sender'],
+                                      conversation_id=job['conversation_id'], before_job_id=jid)
+    if privacy.screen_question(transcript).kind == 'review':  # sensitive content never goes to the model
+        return human_fallback(transcript, history), False
+    await run_in_threadpool(store.save_voice_text, jid, lease, transcript)
+    question = await carrier_context(job, data, transcript, history)
+    try:
+        answer = await whatsapp_natural.reply(question, history)
+    except Exception as exc:
+        print('WA_VOICE_REPLY', type(exc).__name__, str(exc)[:120], flush=True)
+        answer = None
+    return (answer, True) if answer else (human_fallback(transcript, history), False)
+
+
 async def carrier_context(job, data, question, history):
     """Partner detection (owner, 24 Nov 2026): a transport company / fleet owner is a partner, not a shipper.
     Returns the question with a system hint for the reply, and tells the manager once."""
@@ -528,6 +554,12 @@ async def processing(job):
             and document_status in ('unavailable', 'quarantined', 'reference_unavailable')):
         # Owner, 24 Nov 2026: photos/files the lane cannot read get ONE human acknowledgement per burst
         # (never one failure notice per file), and the manager is told to look at them.
+        if any(isinstance(a, dict) and a.get('kind') == 'audio' for a in data['attachments']):
+            voice = await voice_reply(job, data, jid, lease)
+            if voice:
+                await run_in_threadpool(store.prepare_reply, jid, lease, reply_text=voice[0],
+                                        diagnostics={'model_attempted': True, 'model_success': voice[1], 'model_reason': 'voice_note'})
+                return
         photos = False
         try:
             from app import customer_images
