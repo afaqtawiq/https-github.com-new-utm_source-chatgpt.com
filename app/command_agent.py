@@ -1385,11 +1385,11 @@ def run_agent(c, raw):
     if not os.getenv('ANTHROPIC_API_KEY'):
         return None
     member = _member()
-    history = []
+    history, turns = [], []
     try:
         from app.team import CONTEXT
-        for item in ((CONTEXT.get() or {}).get('history') or [])[-4:]:
-            history.append(f"الموظف: {item['command'][:400]}\nالمساعد: {item['reply'][:400]}")
+        for item in ((CONTEXT.get() or {}).get('history') or [])[-6:]:
+            turns.append((str(item.get('command') or '')[:1500], str(item.get('reply') or '')[:2500]))
     except ImportError:
         pass
     system = SYSTEM + CUSTOMS_FIRST_POLICY + ('\nالمرسل: ' + (member.get('name') or 'عضو الفريق') + ('، وهو المدير.' if member.get('manager') else '، ليس المدير؛ رسائل العملاء الخارجية تحتاج تأكيد المدير.'))
@@ -1399,12 +1399,34 @@ def run_agent(c, raw):
         system += OFFICE.get()['system']
         try:
             from app import virtual_office
-            history = [f"المالك: {m['command'][:400]}\nالمدير: {m['reply'][:400]}" for m in virtual_office.history(OFFICE.get()['key'], 4)]
+            turns = [(str(m['command'])[:1500], str(m['reply'])[:2500]) for m in virtual_office.history(OFFICE.get()['key'], 6)]
         except Exception:
             pass
-    if history:
-        system += '\nآخر المحادثة للسياق فقط:\n' + '\n'.join(history)
-    messages = [{'role': 'user', 'content': raw[:2000]}]
+    # Owner (24 Nov 2026): «ليش ما يفهم الكلام مثل كلود» — the agent only saw 400-character fragments of the last
+    # turns in its instructions, so a short answer to its own question looked like a new, unclear request.
+    # The conversation now goes in as real turns, and a short reply is read as the answer to the last question.
+    system += ('\nافهم كل رسالة في سياق المحادثة السابقة: إذا كانت ردًا على سؤال سألته أنت (مثل تحديد جهة، اعتماد كشف، '
+               'نعم/لا، رقم)، فاعتبرها إجابة وأكمل التنفيذ مباشرة بالأدوات، ولا تسأل «هل تقصد سؤالًا أم تنفيذ شيء؟». '
+               'اسأل فقط عن معلومة ناقصة فعلًا، سؤالًا واحدًا محددًا.')
+    if member.get('manager') and not OFFICE.get():
+        try:  # notices the GM sent on its own (digest) are part of the conversation too: the owner may answer them
+            c.execute('SAVEPOINT gm_notes')
+            rows = c.execute("""SELECT body FROM owner_outbox WHERE sent_at > now() - interval '3 hours'
+                ORDER BY id DESC LIMIT 6""").fetchall()
+            notes = '\n---\n'.join(str(r['body'])[:800] for r in reversed(rows))
+            if notes:
+                system += '\nتنبيهات أرسلتها أنت للمالك خلال آخر 3 ساعات (قد يكون يرد على أحدها):\n' + notes[-3000:]
+            c.execute('RELEASE SAVEPOINT gm_notes')
+        except Exception:
+            try:
+                c.execute('ROLLBACK TO SAVEPOINT gm_notes')
+            except Exception:
+                pass
+    messages = []
+    for command, answer in turns:
+        if command.strip() and answer.strip():
+            messages += [{'role': 'user', 'content': command}, {'role': 'assistant', 'content': answer}]
+    messages.append({'role': 'user', 'content': raw[:2000]})
     for _ in range(6):
         try:
             data = call_model(messages, system)
@@ -1416,6 +1438,11 @@ def run_agent(c, raw):
         uses = [b for b in content if b.get('type') == 'tool_use']
         if not uses:
             text = ''.join(b.get('text', '') for b in content if b.get('type') == 'text').strip()
+            if not text and len(messages) > 1 and isinstance(messages[-1].get('content'), list):
+                # Tools ran but the model ended silently: report what the tools did, never fall back to the
+                # legacy «هل تقصد سؤالًا…» reply that drops the whole context.
+                done = [str(r.get('content') or '') for r in messages[-1]['content'] if isinstance(r, dict)]
+                text = '\n\n'.join(d for d in done if d.strip())
             return text[:3500] or None
         messages.append({'role': 'assistant', 'content': content})
         results = []
