@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from html import escape
 import json
+import os
 import logging
 import re
 import httpx
@@ -203,9 +204,16 @@ def _latin(texts):
     return len(re.findall(r'[A-Za-z]', joined)) > len(re.findall(r'[\u0600-\u06FF]', joined))
 
 
-def attachment_ack(data, history=()):
+PHOTO_ACK_AR = 'شكرًا لك، وصلتنا الصور 👍 أراجعها الآن وأرد عليك بعد قليل بالتفاصيل.'
+PHOTO_ACK_EN = 'Thank you, we have received your photos 👍 I am reviewing them now and will reply with the details in a moment.'
+
+
+def attachment_ack(data, history=(), photos=False):
     recent = [data.get('conversation_text') or ''] + [h.get('question') for h in list(history or ())[-2:]]
-    return ATTACHMENT_ACK_EN if _latin(recent) else ATTACHMENT_ACK_AR
+    latin = _latin(recent)
+    if photos and os.getenv('ANTHROPIC_API_KEY'):
+        return PHOTO_ACK_EN if latin else PHOTO_ACK_AR
+    return ATTACHMENT_ACK_EN if latin else ATTACHMENT_ACK_AR
 
 
 def human_fallback(question, history=()):
@@ -497,6 +505,14 @@ async def processing(job):
             and document_status in ('unavailable', 'quarantined', 'reference_unavailable')):
         # Owner, 24 Nov 2026: photos/files the lane cannot read get ONE human acknowledgement per burst
         # (never one failure notice per file), and the manager is told to look at them.
+        photos = False
+        try:
+            from app import customer_images
+            photos = any(customer_images.is_image(a) for a in data['attachments'])
+            if photos:
+                customer_images.schedule(job)  # reads the whole burst after it ends and answers once
+        except Exception as exc:
+            print('CUSTOMER_IMAGE_SCHEDULE', type(exc).__name__, str(exc)[:120], flush=True)
         already = await run_in_threadpool(store.recent_attachment_ack, account_id=job['account_id'],
                                           sender=job['sender'], before_job_id=jid)
         if already:
@@ -505,13 +521,17 @@ async def processing(job):
             return
         history = await run_in_threadpool(store.recent_exchanges, account_id=job['account_id'], sender=job['sender'],
                                           conversation_id=job['conversation_id'], before_job_id=jid)
-        await run_in_threadpool(store.prepare_reply, jid, lease, reply_text=attachment_ack(data, history),
+        await run_in_threadpool(store.prepare_reply, jid, lease, reply_text=attachment_ack(data, history, photos),
                                 diagnostics={'model_attempted': False, 'model_success': False, 'model_reason': 'attachment_ack'})
         try:
             from app.owner_briefing import deliver
             caption = str(data.get('conversation_text') or '')[:200]
-            await deliver(f"📎 عميل +{job['sender']} أرسل مرفقات (صور/ملفات) — رددت عليه باستلامها، وتحتاج مراجعتك في واتساب."
+            if photos and os.getenv('ANTHROPIC_API_KEY'):
+                raise StopIteration  # the photo reader sends its own summary to the manager
+            await deliver(f"📎 عميل +{job['sender']} أرسل مرفقات (ملفات) — رددت عليه باستلامها، وتحتاج مراجعتك في واتساب."
                           + (f"\nنص مرفق: {caption}" if caption else ''))
+        except StopIteration:
+            pass
         except Exception as exc:
             print('WA_ATTACHMENT_NOTICE', type(exc).__name__, flush=True)
         return
