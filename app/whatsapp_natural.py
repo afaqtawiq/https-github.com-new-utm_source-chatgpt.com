@@ -134,6 +134,45 @@ SYSTEM = """أنت موظف خدمة العملاء على واتساب لمؤس
 """
 
 
+# Import on Afaq's record with SABER issued by Afaq (owner, 24 Nov 2026). Prices exactly as the owner gave them.
+IMPORT_ON_BEHALF = """خدمة الاستيراد على سجل آفاق طويق (اعتمدها المالك 24 نوفمبر 2026):
+- حاليًا كل البضائع الواردة إلى السعودية لا بد لها من شهادات سابر، ولا يوجد تخليص بدون سابر.
+- إذا ما عند العميل طريقة لإصدار سابر: يستورد على سجل شركتنا ونتكفل نحن بإصدار سابر، بالتكاليف التالية:
+  سجل تجاري 800 ريال، سابر 1400 ريال، تخليص 300 ريال، زكاة 2.5% من قيمة الفاتورة، ضريبة القيمة المضافة 15% من قيمة الفاتورة، بالإضافة إلى الرسوم الجمركية حسب البند.
+- عند السؤال عن التخليص بدون سابر أو صعوبة إصدار سابر اذكر هذا الحل بأرقامه كما هي، ثم اطلب نوع البضاعة وقيمة الفاتورة التقريبية لتجهيز العرض."""
+
+_WITHOUT_SABER = re.compile(
+    r'(?:without|no|not\s+(?:have|having|requir\w*)|don\W?t\s+have|bypass|skip|avoid)\W+(?:\w+\W+){0,4}saber|'
+    r'saber\W+(?:\w+\W+){0,3}(?:not\s+requir|exempt|without)|'
+    r'(?:بدون|بلا|من\s*غير|دون|ما\s*عندي|ماعندي|مافي|ما\s*في|ما\s*يحتاج|مايحتاج|ما\s*نقدر\s*نطلع|صعب)\s*(?:\S+\s+){0,3}(?:شهاد[ةه]\s*)?سابر', re.I)
+
+IMPORT_ON_BEHALF_AR = ('حياك الله. حاليًا كل البضائع الواردة إلى السعودية لا بد لها من إصدار شهادات سابر، فما نقدر نخلّص بدون سابر.\n'
+                       'ولو ما عندك طريقة لإصدار سابر، تقدر تستورد على سجل شركتنا ونحن نتكفل بإصدار سابر بالتكاليف التالية:\n'
+                       '• سجل تجاري: 800 ريال\n• سابر: 1400 ريال\n• تخليص: 300 ريال\n'
+                       '• زكاة: 2.5% من قيمة الفاتورة\n• ضريبة القيمة المضافة: 15% من قيمة الفاتورة\n'
+                       '• بالإضافة إلى الرسوم الجمركية حسب البند\n'
+                       'أرسل لنا نوع البضاعة وقيمة الفاتورة التقريبية ونجهز لك العرض. للتواصل: 0507665873')
+IMPORT_ON_BEHALF_EN = ('Good day, and thank you for reaching out. Currently, all goods imported into Saudi Arabia must have SABER '
+                       'certificates, so clearance without SABER is not possible.\n'
+                       'If you have no way to issue SABER, you can import under our company\'s record and we take care of issuing SABER, '
+                       'at the following costs:\n'
+                       '• Commercial registration: SAR 800\n• SABER: SAR 1,400\n• Customs clearance: SAR 300\n'
+                       '• Zakat: 2.5% of the invoice value\n• VAT: 15% of the invoice value\n'
+                       '• Plus customs duties according to the HS code\n'
+                       'Please share the type of goods and the approximate invoice value, and we will prepare your quotation. '
+                       'Contact: +966 50 766 5873')
+
+
+def import_on_behalf_reply(question):
+    """Fixed answer for «clearance without SABER» questions, in Arabic or English."""
+    text = str(question or '')
+    if not _WITHOUT_SABER.search(text):
+        return None
+    latin = len(re.findall(r'[A-Za-z]', text))
+    arabic = len(re.findall(r'[\u0600-\u06FF]', text))
+    return IMPORT_ON_BEHALF_EN if latin > arabic else IMPORT_ON_BEHALF_AR
+
+
 TARIFF_TOOL = {'name': 'tariff_search', 'description': 'Search the GCC unified customs tariff (12-digit codes, Arabic/English descriptions, duty rates) for a product. Give up to 3 Arabic and 3 English tariff-style phrasings of the goods.',
                'input_schema': {'type': 'object', 'properties': {'ar': {'type': 'array', 'items': {'type': 'string'}},
                                                                  'en': {'type': 'array', 'items': {'type': 'string'}}}}}
@@ -322,6 +361,9 @@ async def reply(question, history=()):
     from app import whatsapp_agent_privacy as privacy
     if privacy.identity_requested(str(question)):
         return None
+    on_behalf = import_on_behalf_reply(question)
+    if on_behalf:
+        return on_behalf
     saber_needed = needs_saber_search(question)
     if saber_needed:
         from app import saber_exemptions
@@ -369,7 +411,7 @@ async def reply(question, history=()):
     try:
         async with httpx.AsyncClient(timeout=40) as client:
             for _ in range(3):
-                body = {'model': name, 'max_tokens': 900, 'system': SYSTEM + TARIFF_RULES + KNOWLEDGE + SABER_RULES + CUSTOMS_FIRST_POLICY + case_guidance + learned,
+                body = {'model': name, 'max_tokens': 900, 'system': SYSTEM + IMPORT_ON_BEHALF + '\n' + TARIFF_RULES + KNOWLEDGE + SABER_RULES + CUSTOMS_FIRST_POLICY + case_guidance + learned,
                         'messages': msgs, 'tools': [TARIFF_TOOL, SABER_TOOL]}
                 if saber_needed and not saber_checked:
                     body['tool_choice'] = {'type': 'tool', 'name': 'saber_search'}
