@@ -728,3 +728,24 @@ def test_batch_auth_failure_clears_cache_and_stops_all_later_io(provider, fake_c
     assert len(provider['gets']) == 7
     assert len(provider['posts']) == 2
     assert fake_clock['sleeps'] == []
+
+
+def test_account_and_template_checks_are_cached_only_when_enabled(monkeypatch):
+    import asyncio as _asyncio
+    from app import zernio_whatsapp as zw
+    calls = []
+
+    async def read(c, path, params=None):
+        calls.append(path)
+        return {'accounts': [{'_id': zw.account_id(), 'platform': 'whatsapp', 'isActive': True}]} if path == '/accounts' else {'templates': [1]}
+    monkeypatch.setattr(zw, 'read', read)
+    zw._ACCOUNT_OK.clear(); zw._TEMPLATES.clear()
+    monkeypatch.setenv('ZERNIO_ACCOUNT_CACHE_SECONDS', '120')
+    monkeypatch.setenv('ZERNIO_TEMPLATES_CACHE_SECONDS', '300')
+    for _ in range(3):
+        _asyncio.run(zw.validate_account(None)); _asyncio.run(zw.templates(None))
+    assert calls == ['/accounts', '/whatsapp/templates']
+    monkeypatch.setenv('ZERNIO_ACCOUNT_CACHE_SECONDS', '0')
+    _asyncio.run(zw.validate_account(None))
+    assert calls[-1] == '/accounts' and len(calls) == 3
+    zw._ACCOUNT_OK.clear(); zw._TEMPLATES.clear()
