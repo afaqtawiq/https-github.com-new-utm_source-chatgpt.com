@@ -18,7 +18,7 @@ from app.customs_case_guidance import (guidance_for, SABER_FEE_QUERY, SABER_FEE_
 
 SUPPORT = '0507665873'
 EXTRA_NUMBERS = {'0507665873', '966507665873', '0530130435', '966530130435'}
-MAX_CHARS = 1400
+MAX_CHARS = 2200
 ACTION_CLAIM = re.compile(r'(سأحجز|سنحجز|حجزت|حجزنا|تم\s*الحجز|أرسلت\s*لك|ارسلت\s*لك|تم\s*الإرسال|تم\s*الارسال|سأرسل|سنرسل\s*السائق|نفذت|تم\s*التنفيذ|تم\s*التأكيد|أكدت\s*الحجز|وصلت\s*شحنتك|شحنتك\s*وصلت|تم\s*الفسح)')
 
 # Narrow response-side guard. This is not semantic validation of all claims.
@@ -128,7 +128,7 @@ SYSTEM = """أنت موظف خدمة العملاء على واتساب لمؤس
 - إذا كانت الرسالة غير واضحة فعلًا فاسأل سؤالًا واحدًا محددًا يوضح المقصود، لا ردًا عامًا.
 - تجنب العبارات الآلية مثل «وصلتني رسالتك» «هذه المحادثة لا…» «مستند معتمد» «لم أنفذ».
 - رد بنفس لغة العميل ولهجته قدر الإمكان (عربي، إنجليزي، أردو، هندي، صيني…).
-اكتب نصًا عاديًا مناسبًا لواتساب (بدون عناوين Markdown)، ويمكن استخدام نقاط قصيرة عند الحاجة، وبحد أقصى نحو 8 أسطر.
+اكتب نصًا عاديًا مناسبًا لواتساب (بدون عناوين Markdown)، ويمكن استخدام نقاط قصيرة عند الحاجة، والرد القصير للأسئلة القصيرة؛ أما الاستفسار التفصيلي (شحنة كاملة بمسار وبضاعة وبنود) فرد عليه ردًا مرتبًا كاملًا يلخص ما فهمته من الشحنة، ويوضح المتطلبات النظامية (مثل سابر للبضاعة)، ويطلب المعلومات الناقصة في قائمة مرقمة، ويختم بأن الفريق يجهز العرض؛ وبحد أقصى نحو 18 سطرًا.
 
 معلومات آفاق:
 """
@@ -319,6 +319,11 @@ def allowed_numbers(knowledge):
     return found | EXTRA_NUMBERS
 
 
+REWRITE_NOTE = ('(ملاحظة داخلية من النظام، ليست من العميل) أعد كتابة ردك نفسه للعميل بنفس لغته مع الالتزام بالتالي: '
+                'لا تقل إنك أو الفريق أرسلتم/سترسلون/حجزتم/نفذتم/أكدتم أي شيء، واكتب بدلها أن الفريق يجهز العرض ويتابع معه؛ '
+                'لا تذكر أي رقم جوال غير 0507665873؛ لا روابط؛ لا تضمن الفسح؛ ولا تتجاوز 1800 حرف. اكتب الرد النهائي فقط.')
+
+
 def safe(text, knowledge):
     if not isinstance(text, str):
         return None
@@ -487,7 +492,23 @@ async def reply(question, history=()):
         return TARIFF_UNVERIFIED_REPLY
     if unverified_fee_total(question, text, history):
         return FEE_TOTAL_UNVERIFIED_REPLY
+    grounding += '\n' + str(question) + '\n' + '\n'.join(
+        str((entry or {}).get('question') or '') for entry in list(history or ())[-6:])  # the customer's own numbers/codes
     result = safe(text, grounding)
+    if result is None and text.strip() and not saber_needed and not tariff_needed:
+        # One rewrite instead of dropping a good answer to a canned fallback (owner, 24 Nov 2026).
+        try:
+            async with httpx.AsyncClient(timeout=40) as client:
+                fix = await client.post('https://api.anthropic.com/v1/messages', headers={'x-api-key': key, 'anthropic-version': '2023-06-01'},
+                    json={'model': name, 'max_tokens': 900, 'system': SYSTEM + IMPORT_ON_BEHALF + KNOWLEDGE + CUSTOMS_FIRST_POLICY + case_guidance + learned,
+                          'messages': msgs + [{'role': 'assistant', 'content': text},
+                                              {'role': 'user', 'content': REWRITE_NOTE}]})
+            if fix.status_code == 200:
+                again = '\n'.join(p.get('text', '') for p in fix.json().get('content', []) if isinstance(p, dict) and p.get('type') == 'text')
+                if not unverified_fee_total(question, again, history):
+                    result = safe(again, grounding)
+        except (httpx.HTTPError, ValueError) as exc:
+            print('WHATSAPP_NATURAL_REWRITE', type(exc).__name__, flush=True)
     if result is None:
         print('WHATSAPP_NATURAL_REJECTED', flush=True)
         return saber_reply(SABER_UNVERIFIED_REPLY) if saber_needed else (TARIFF_UNVERIFIED_REPLY if tariff_needed else None)

@@ -10,7 +10,7 @@ def test_safe_rejects_action_claims_and_foreign_numbers():
     assert n.safe('سأحجز النقل.', KNOWLEDGE) is None
     assert n.safe('تم الحجز لك', KNOWLEDGE) is None
     assert n.safe('كلم المندوب على 0551234567', KNOWLEDGE) is None
-    assert n.safe('x' * 2000, KNOWLEDGE) is None
+    assert n.safe('x' * 2300, KNOWLEDGE) is None
 
 
 def test_history_messages_shape():
