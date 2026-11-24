@@ -883,6 +883,15 @@ def _reply(text):
         raise ValueError("reply text must be nonempty and bounded")
 
 
+def save_voice_text(job_id, lease_token, text, *, db_factory=None, now=None):
+    """Keep the transcript of a customer voice note on its job so later replies see it as conversation."""
+    with (db_factory or database)() as connection:
+        job = _leased(connection, job_id, lease_token, now)
+        payload = dict(job.get("payload") or {})
+        payload["voice_text"] = str(text)[:2000]
+        connection.execute("UPDATE whatsapp_agent_jobs SET payload=%s WHERE id=%s", (_json(payload), job_id))
+
+
 def recent_attachment_ack(*, account_id, sender, before_job_id, minutes=20, db_factory=None, now=None):
     """True when this sender already got (or is getting) one attachment acknowledgement in the window,
     so a burst of photos/files gets a single reply instead of one per file."""
@@ -1144,7 +1153,7 @@ def recent_exchanges(*, account_id, sender, conversation_id, before_job_id,
               AND NOT EXISTS (SELECT 1 FROM whatsapp_agent_budget_notices n WHERE n.job_id=j.id)
               AND j.created_at>%s AND j.created_at<=%s
               AND j.completed_at>%s AND j.completed_at<=%s
-              AND j.document_status='none'
+              AND (j.document_status='none' OR (j.document_status='unavailable' AND j.payload LIKE '%%"voice_text"%%'))
               AND (j.document_text IS NULL OR j.document_text='')
               AND j.document_sha256 IS NULL AND j.context_source_job_id IS NULL
               AND """ + _ELIGIBLE + " ORDER BY j.id DESC LIMIT 32",
@@ -1154,9 +1163,11 @@ def recent_exchanges(*, account_id, sender, conversation_id, before_job_id,
     for raw in rows:
         row = _row(raw)
         payload = row.pop("payload")
-        question, reply = payload.get("question") or payload.get("conversation_text"), row["reply_text"]
+        voice = payload.get("voice_text") if isinstance(payload.get("voice_text"), str) else None
+        question, reply = voice or payload.get("question") or payload.get("conversation_text"), row["reply_text"]
         natural = payload.get("question_allowed") is not True and isinstance(payload.get("conversation_text"), str)
-        if ((payload.get("question_allowed") is not True and not natural) or not _followup_payload(payload) or
+        if ((payload.get("question_allowed") is not True and not natural and not voice)
+                or not (_followup_payload(payload) or voice) or
             not isinstance(question, str) or not question.strip() or
             not isinstance(reply, str) or not reply.strip() or
             len(question) > MAX_EXCHANGE_QUESTION_CHARS or len(reply) > MAX_EXCHANGE_REPLY_CHARS or

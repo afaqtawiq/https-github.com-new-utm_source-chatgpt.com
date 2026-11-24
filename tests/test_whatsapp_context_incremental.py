@@ -173,3 +173,31 @@ def test_customer_photo_burst_is_read_once_and_answered(setup, monkeypatch):
     assert len(notices) == 1 and 'Krusman' in notices[0]
     asyncio.run(ci._run(ACCOUNT, sender, 'synthetic-conversation'))
     assert len(sends) == 1  # already read
+
+
+def test_customer_voice_note_is_understood_and_answered_in_text(setup, monkeypatch):
+    from app import whatsapp_admin, whatsapp_natural as wn
+    from test_whatsapp_agent import ACCOUNT
+    store.update_settings(ACCOUNT, mode='routine', acceptance={'direct_owner_activation': True,
+                          'owner_receipt_confirmed': True, 'confirmed_by': 'test-owner'})
+    monkeypatch.setitem(sys.modules, 'app.team', SimpleNamespace(identify=lambda event: (None, None)))
+    asked = []
+
+    async def transcribe(pseudo, index):
+        return 'كم سعر النقل من دبي للرياض تريلا ستارة'
+
+    async def natural(question, history=()):
+        asked.append((question, [h['question'] for h in history]))
+        return 'النقل من دبي للرياض بتريلا ستارة 4200 درهم.'
+    monkeypatch.setattr(whatsapp_admin, 'transcribe', transcribe)
+    monkeypatch.setattr(wn, 'reply', natural)
+    voice = payload(130, '')
+    voice['message']['attachments'] = [{'type': 'audio', 'mimeType': 'audio/ogg', 'id': 'v130'}]
+    queued = agent.accept_inbound(voice)
+    assert tick()
+    job = store.get_job(queued['job_id'])
+    assert job['status'] == 'sent' and setup['sends'][-1][1] == 'النقل من دبي للرياض بتريلا ستارة 4200 درهم.'
+    assert asked[0][0].endswith('كم سعر النقل من دبي للرياض تريلا ستارة')
+    follow = agent.accept_inbound(payload(131, 'وللدمام؟'))
+    assert tick()
+    assert asked[-1][1] == ['كم سعر النقل من دبي للرياض تريلا ستارة']  # the voice note is part of the conversation
