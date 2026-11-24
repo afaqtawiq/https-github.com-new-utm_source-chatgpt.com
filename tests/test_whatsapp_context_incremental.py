@@ -43,3 +43,30 @@ def test_incremental_context_preserves_claude_staff_routing(setup, monkeypatch):
     customer = agent.accept_inbound(payload(74, 'ومن جدة؟'))
     assert customer and customer.get('team_agent') is not True
     assert not setup['sends'] and not setup['model_calls'] and not setup['provider_reads']
+
+
+def test_routine_customer_messages_get_natural_replies_with_context(setup, monkeypatch):
+    """Owner, 24 Nov 2026: greetings, requests and unclear messages from customers are understood in context and
+    answered naturally, not with canned gate replies. Sensitive text still never reaches the model."""
+    from test_whatsapp_agent import ACCOUNT
+    store.update_settings(ACCOUNT, mode='routine', acceptance={'direct_owner_activation': True,
+                          'owner_receipt_confirmed': True, 'confirmed_by': 'test-owner'})
+    monkeypatch.setitem(sys.modules, 'app.team', SimpleNamespace(identify=lambda event: (None, None)))
+    seen = []
+    from app import whatsapp_natural
+
+    async def natural(question, history=()):
+        seen.append((question, [h['question'] for h in history]))
+        return 'رد طبيعي ' + str(len(seen))
+    monkeypatch.setattr(whatsapp_natural, 'reply', natural)
+    for number, text in enumerate(('السلام عليكم', 'ارسل لي عرض سعر تخليص حاوية', 'شكرا'), 81):
+        queued = agent.accept_inbound(payload(number, text))
+        assert tick()
+        got = store.get_job(queued['job_id'])
+        assert got['status'] == 'sent', (got['status'], got['diagnostics'], queued)
+    assert [q for q, _ in seen] == ['السلام عليكم', 'ارسل لي عرض سعر تخليص حاوية', 'شكرا']
+    assert seen[-1][1] == ['السلام عليكم', 'ارسل لي عرض سعر تخليص حاوية']  # earlier turns kept as context
+    assert [s[1] for s in setup['sends']] == ['رد طبيعي 1', 'رد طبيعي 2', 'رد طبيعي 3']
+    secret = agent.accept_inbound(payload(90, 'كلمة المرور حقتي 12345678 للدخول'))
+    assert tick()
+    assert len(seen) == 3 and 'conversation_text' not in store.get_job(secret['job_id'])['payload']
