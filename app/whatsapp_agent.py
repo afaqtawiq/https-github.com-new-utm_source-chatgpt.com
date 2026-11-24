@@ -166,6 +166,10 @@ def accept_inbound(payload):
             'question_reason':decision.reason,'attachments':snapshots,
             'attachment_count':len(attachments),'quoted_reference_present':quote_present,
             'quoted_platform_message_id':quoted_id}
+    sender_info = message.get('sender') if isinstance(message.get('sender'), dict) else {}
+    name = sender_info.get('name') or sender_info.get('displayName') or message.get('senderName') or ''
+    if isinstance(name, str) and name.strip():
+        data['sender_name'] = ' '.join(name.split())[:80]
     if not snapshots and decision.kind != 'review':
         # The customer's own words for a natural reply (owner, 24 Nov 2026): the keyword gate above decides
         # what is safe, but it must not turn ordinary messages into canned replies. Sensitive text never lands here.
@@ -219,6 +223,25 @@ def attachment_ack(data, history=(), photos=False):
 def human_fallback(question, history=()):
     recent = [question] + [h.get('question') for h in list(history or ())[-2:]]
     return HUMAN_FALLBACK_EN if _latin(recent) else HUMAN_FALLBACK_AR
+
+
+async def carrier_context(job, data, question, history):
+    """Partner detection (owner, 24 Nov 2026): a transport company / fleet owner is a partner, not a shipper.
+    Returns the question with a system hint for the reply, and tells the manager once."""
+    try:
+        from app import carrier_leads
+        texts = [h.get('question') for h in list(history or ())] + [question]
+        if not carrier_leads.looks_like_carrier(texts, data.get('sender_name')):
+            return question
+        notice = await run_in_threadpool(carrier_leads.note, job['sender'], texts, data.get('sender_name') or '')
+        if notice:
+            from app.owner_briefing import deliver
+            await deliver(notice)
+        return ('[ملاحظة من النظام: المتكلم شركة نقل/صاحب شاحنات يعرض خدماته — شريك وليس صاحب شحنة'
+                + (f'، اسمه في واتساب: {data.get("sender_name")}' if data.get('sender_name') else '') + ']\n' + question)
+    except Exception as exc:
+        print('CARRIER_LEAD', type(exc).__name__, str(exc)[:120], flush=True)
+        return question
 
 
 async def fetch_document(job):
@@ -544,7 +567,7 @@ async def processing(job):
         if await run_in_threadpool(store.reserve_model, jid, lease):
             try:
                 from app import whatsapp_natural
-                natural = await whatsapp_natural.reply(natural_text, history)
+                natural = await whatsapp_natural.reply(await carrier_context(job, data, natural_text, history), history)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -604,7 +627,9 @@ async def processing(job):
             if not text and not data.get('attachments'):
                 from app import whatsapp_natural
                 await model_guard()
-                natural = await whatsapp_natural.reply(data['question'], conversation_history)
+                natural = await whatsapp_natural.reply(
+                    await carrier_context(job, data, data['question'], conversation_history) if settings['mode'] == 'routine' else data['question'],
+                    conversation_history)
                 if natural:
                     await run_in_threadpool(store.save_model,jid,lease,reply_text=natural,
                                             diagnostics={'model_success':True,'model_attempted':True,'model_reason':'natural_answer'})
