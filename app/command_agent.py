@@ -54,8 +54,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
     {'name': 'declaration_info', 'description': 'For given declaration number(s): what the agent read from FASAH (date, details text), whether it was recognised as سلة الرحائب, and its billing status. Use it when the manager says a declaration belongs to a party but is not counted.',
      'input_schema': {'type': 'object', 'properties': {'numbers': {'type': 'string'}}, 'required': ['numbers']}},
-    {'name': 'fasah_count', 'description': 'EXACT number of an importer/exporter declarations in FASAH for a month, read live from FASAH by the desktop runner (list filtered by the name). Use it for «كم بيان استيراد لسلة الرحائب شهر نوفمبر». party = name as in FASAH (e.g. سلة)، which = import|export، month = YYYY-MM. The answer arrives as a notice after the read.',
-     'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'which': {'type': 'string'}, 'month': {'type': 'string'}}, 'required': ['party']}},
+    {'name': 'fasah_count', 'description': 'EXACT number of an importer/exporter declarations in FASAH for a month, read live from FASAH by the desktop runner (list filtered by the name). Use it for «كم بيان استيراد لسلة الرحائب شهر نوفمبر». party = name as in FASAH (e.g. سلة)، which = import|export، month = YYYY-MM. If a reading for the same request finished in the last 90 minutes the tool returns that exact number at once, and if one is still running it says so — ALWAYS call this tool for «كم العدد/كم بيان» and quote its number first; never start the question over. refresh=true only when the owner asks for a fresh reading.',
+     'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'which': {'type': 'string'}, 'month': {'type': 'string'}, 'refresh': {'type': 'boolean'}}, 'required': ['party']}},
     {'name': 'billing_gap', 'description': 'Match the declarations seen in FASAH this month with the accounts: how many are recorded and, for EACH unrecorded declaration, why (not a سلة الرحائب declaration / no billing rule, read failed, waiting for «نفذ», never read). Use it when the manager asks why the accounts show fewer declarations than FASAH. month = YYYY-MM (optional).',
      'input_schema': {'type': 'object', 'properties': {'month': {'type': 'string'}}}},
     {'name': 'shipment_workflow', 'description': 'RUN THE CLEARANCE FLOW of one shipment (سيّر الشحنة) end to end: 1) FASAH authorization of the importer (active/expired/none → prepares the request to the importer with our establishment name and licence 2513), 2) documents check (prepares the request for missing ones), 3) arrival date → arrival report to the customer, 4) prints the declaration from FASAH via the desktop runner → sends it to the customer, 5) delivery order request email to the shipping line, 6) the remaining steps to empty-container return. Every send is prepared with a «نفذ CODE». query = bill/container/customer. Use it whenever the manager asks to process/follow a shipment.',
@@ -362,6 +362,12 @@ def tool_fasah_count(c, a):
         month = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=3))).strftime('%Y-%m')
     which = 'export' if str(a.get('which') or '').startswith(('ex', 'تص', 'صا')) else 'import'
     party = _clean(a.get('party'), 60) or 'سلة'
+    if not a.get('refresh'):
+        found = agent_runner.recent_count(party, month, which)
+        if found and found[0] == 'done':
+            return found[1]
+        if found:
+            return f'⏳ قراءة فسح #{found[1]} شغالة الآن لنفس الطلب؛ النتيجة توصلك أول ما تخلص (ما فتحت قراءة ثانية).'
     tid, msg = agent_runner.create_task('fasah_declarations', {'which': which, 'party': party, 'since': month + '-01', 'pages': 20,
                                                                'purpose': 'count', 'month': month}, _member().get('name') or 'المدير')
     return msg + ('\nالعدد الدقيق من فسح يوصلك أول ما تخلص القراءة.' if tid else '')

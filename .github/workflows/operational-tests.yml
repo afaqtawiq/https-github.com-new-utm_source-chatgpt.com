@@ -121,6 +121,9 @@ jobs:
       - run: python tests/whatsapp_agent_postgres_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
+      - run: python tests/fasah_count_reuse_acceptance.py
+        env:
+          AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python tests/command_agent_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test

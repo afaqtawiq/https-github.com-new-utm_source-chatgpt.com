@@ -679,6 +679,31 @@ def count_text(params, rows):
     return '\n'.join(lines)
 
 
+def recent_count(party, month, which='import', minutes=90):
+    """The latest FASAH count task for this importer/month: ('done', text) from its file, ('running', id), or None.
+    Owner (24 Nov 2026): every «كم العدد» started a new reading instead of answering from the one just finished."""
+    import csv as _csv
+    import io as _io
+    init()
+    with db() as c:
+        rows = c.execute("""SELECT id,status,params_json FROM runner_tasks WHERE kind='fasah_declarations'
+            AND created_at > now() - (%s || ' minutes')::interval ORDER BY id DESC LIMIT 20""", (str(minutes),)).fetchall()
+        for t in rows:
+            p = json.loads(t['params_json'] or '{}')
+            if p.get('purpose') != 'count' or p.get('which', 'import') != which or str(p.get('month')) != month \
+                    or str(p.get('party') or '') != str(party):
+                continue
+            if t['status'] in ('queued', 'running', 'claimed'):
+                return ('running', t['id'])
+            if t['status'] != 'done':
+                continue
+            f = c.execute('SELECT data FROM runner_files WHERE task_id=%s AND verified ORDER BY id DESC LIMIT 1', (t['id'],)).fetchone()
+            if f:
+                rows_ = list(_csv.DictReader(_io.StringIO(bytes(f['data']).decode('utf-8-sig'))))
+                return ('done', count_text(p, rows_) + f'\n(من قراءة فسح #{t["id"]})')
+    return None
+
+
 def after_fasah(tid):
     import csv as _csv
     import io as _io
