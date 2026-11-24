@@ -24,7 +24,8 @@ unreadable values. Plain text, at most 15 short lines, in English:
 - shipment facts visible: product names/brands, model/SKU, HS codes, quantities, weights, values and currency,
   origin, destination, company names
 - anything relevant to importing into Saudi Arabia that is visible or clearly missing (SABER/SASO marks, country of
-  origin, certificates). Do not mention Arabic labelling: the owner confirmed it is not required."""
+  origin, certificates). Do not mention Arabic labelling: the owner confirmed it is not required.
+  If the goods are lubricants/oils/greases, say so clearly (they need a Saudi Ministry of Energy petroleum import licence)."""
 
 
 def is_image(snapshot):
