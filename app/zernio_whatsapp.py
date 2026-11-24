@@ -603,6 +603,12 @@ async def send_document(recipient, content, filename, caption='', *, expected_ac
         await run_in_threadpool(validate_pdf_locally, content)
     except (HTTPException, ValueError, OSError):
         raise WhatsAppBlocked('تعذر التحقق المحلي من ملف PDF؛ لم يُرسل الملف') from None
+    return await _post_attachment(target, content, filename, 'application/pdf', caption, expected_account,
+                                  expected_conversation, idempotency_key, takeover)
+
+
+async def _post_attachment(target, content, filename, mime, caption, expected_account, expected_conversation,
+                           idempotency_key, takeover):
     async with transport_batch() as batch:
         # Parsing awaited in a worker: never adopt an account changed while the
         # reviewed bytes were being checked, including an existing batch scope.
@@ -640,7 +646,7 @@ async def send_document(recipient, content, filename, caption='', *, expected_ac
                     _check_window(batch, path, target, cid, proof)
                     response = await c.post(BASE + path,
                         data={'accountId': batch.account, 'message': caption},
-                        files={'attachment': (filename, content, 'application/pdf')},
+                        files={'attachment': (filename, content, mime)},
                         headers={'Idempotency-Key': idempotency_key}, follow_redirects=False)
             except (httpx.HTTPError, TimeoutError, asyncio.CancelledError):
                 raise WhatsAppDocumentSendUncertain(None) from None
@@ -687,6 +693,24 @@ async def send_document(recipient, content, filename, caption='', *, expected_ac
                 'http_status': status, 'account_id': batch.account,
                 'conversation_id': expected_conversation, 'public_attachment_url_present': public_url}
 
+
+
+async def send_voice(recipient, content, filename='voice.ogg', *, expected_account, expected_conversation, idempotency_key):
+    """One spoken reply (OGG/Opus voice note) inside an open conversation (owner, 24 Nov 2026: drivers cannot read
+    while driving). Same guards and no-retry boundary as documents; the text reply is always sent first."""
+    target = phone(recipient)
+    if (not target or expected_account != account_id() or not isinstance(expected_conversation, str)
+            or not expected_conversation or len(expected_conversation) > 255):
+        raise WhatsAppBlocked('هوية المستلم أو المحادثة غير صالحة؛ لم يُرسل الصوت')
+    if not isinstance(idempotency_key, str) or not re.fullmatch(r'wa-document-[0-9a-f]{64}', idempotency_key):
+        raise WhatsAppBlocked('معرف محاولة إرسال الصوت غير صالح')
+    if not isinstance(content, bytes) or not content.startswith(b'OggS') or len(content) > 5 * 1024 * 1024:
+        raise WhatsAppBlocked('يلزم مقطع صوتي OGG أصغر من 5 ميجابايت؛ لم يُرسل')
+    if _dispatch_guard.get() is None:
+        raise WhatsAppBlocked('يلزم التحقق من صلاحية الإرسال قبل المحاولة')
+    takeover = await automated_snapshot(expected_account, target)
+    return await _post_attachment(target, content, filename, 'audio/ogg', '', expected_account,
+                                  expected_conversation, idempotency_key, takeover)
 
 def session(request):
     from app.storage import get_session

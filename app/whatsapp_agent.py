@@ -722,6 +722,11 @@ async def dispatch(job):
                             provider_message_id=mid,diagnostics={'reason':reason})
     if state == 'sent':
         try:
+            from app import driver_voice  # drivers get the same reply as a voice note too (owner, 24 Nov 2026)
+            asyncio.get_running_loop().create_task(driver_voice.after_text(dict(job)))
+        except Exception as exc:
+            print('DRIVER_VOICE_SCHEDULE', type(exc).__name__, flush=True)
+        try:
             from app import auto_handoff
             await run_in_threadpool(auto_handoff.after_send, job)
         except Exception as exc:  # hand-off is advisory; never affects the reply already sent
