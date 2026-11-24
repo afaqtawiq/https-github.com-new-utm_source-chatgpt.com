@@ -1143,8 +1143,9 @@ def recent_exchanges(*, account_id, sender, conversation_id, before_job_id,
     for raw in rows:
         row = _row(raw)
         payload = row.pop("payload")
-        question, reply = payload.get("question"), row["reply_text"]
-        if (payload.get("question_allowed") is not True or not _followup_payload(payload) or
+        question, reply = payload.get("question") or payload.get("conversation_text"), row["reply_text"]
+        natural = payload.get("question_allowed") is not True and isinstance(payload.get("conversation_text"), str)
+        if ((payload.get("question_allowed") is not True and not natural) or not _followup_payload(payload) or
             not isinstance(question, str) or not question.strip() or
             not isinstance(reply, str) or not reply.strip() or
             len(question) > MAX_EXCHANGE_QUESTION_CHARS or len(reply) > MAX_EXCHANGE_REPLY_CHARS or
@@ -1198,6 +1199,12 @@ def _model_input_permitted(job, settings, *, review_authorized=False):
                 job["document_sha256"] in settings["approved_sha256"])
     payload = job.get("payload") or {}
     question = payload.get("question")
+    natural = payload.get("conversation_text")
+    if (settings.get("mode") == "routine" and job["document_status"] == "none" and _followup_payload(payload)
+            and payload.get("question_kind") != "review" and isinstance(natural, str) and natural.strip()):
+        # Routine customer text the gate kept out of the guarded path: answered naturally (owner, 24 Nov 2026).
+        # accept_inbound never stores conversation_text for sensitive ('review') messages.
+        return True
     return (job["document_status"] == "none" and _followup_payload(payload) and
             payload.get("question_allowed") is True and payload.get("question_kind") in {"operations", "conversation", "document_question"} and
             isinstance(question, str) and bool(question.strip()))

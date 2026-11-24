@@ -165,6 +165,12 @@ def accept_inbound(payload):
             'question_reason':decision.reason,'attachments':snapshots,
             'attachment_count':len(attachments),'quoted_reference_present':quote_present,
             'quoted_platform_message_id':quoted_id}
+    if not snapshots and decision.kind != 'review':
+        # The customer's own words for a natural reply (owner, 24 Nov 2026): the keyword gate above decides
+        # what is safe, but it must not turn ordinary messages into canned replies. Sensitive text never lands here.
+        raw = privacy._text(str(message.get('text') or ''), privacy.MAX_QUESTION_CHARS)
+        if raw and raw.strip():
+            data['conversation_text'] = raw.strip()
     if not snapshots:
         from app.driver_language import lang_hint
         data['lang_hint'] = lang_hint(message.get('text'))
@@ -464,6 +470,27 @@ async def processing(job):
             await run_in_threadpool(store.prepare_reply,jid,lease,reply_text=status_reply,
                 diagnostics={'model_attempted':False,'model_success':False,'model_reason':'declaration_status'})
             return
+    natural_text = data.get('conversation_text')
+    if (natural_text and settings['mode'] == 'routine' and not data.get('attachments') and not text and document_status == 'none'
+            and data.get('question_kind') != 'review'
+            and (not data.get('question_allowed') or data.get('question_kind') in ('greeting', 'thanks', 'ready', 'local_only'))):
+        history = await run_in_threadpool(store.recent_exchanges, account_id=job['account_id'], sender=job['sender'],
+                                          conversation_id=job['conversation_id'], before_job_id=jid)
+        if await run_in_threadpool(store.reserve_model, jid, lease):
+            try:
+                from app import whatsapp_natural
+                natural = await whatsapp_natural.reply(natural_text, history)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print('WA_NATURAL_LANE', type(exc).__name__, str(exc)[:120], flush=True)
+                natural = None
+            await run_in_threadpool(store.save_model, jid, lease,
+                                    reply_text=natural or 'أهلًا بك، معك نيرمين من آفاق طويق. وش أقدر أخدمك فيه اليوم؟',
+                                    diagnostics={'model_success': bool(natural), 'model_attempted': True,
+                                                 'model_reason': 'natural_conversation', 'gate': data.get('question_reason') or data.get('question_kind')})
+            await run_in_threadpool(store.prepare_reply, jid, lease)
+        return
     if not data.get('question_allowed'):
         if data.get('question_reason') == 'broker_execution_request':
             reply = privacy.BROKER_EXECUTION_REPLY
