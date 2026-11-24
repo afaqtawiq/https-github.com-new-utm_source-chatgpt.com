@@ -104,3 +104,72 @@ def test_routine_photo_burst_gets_one_human_ack(setup, monkeypatch):
     assert statuses[0] == 'sent' and set(statuses[1:]) == {'blocked'}, statuses
     assert sent[-1].startswith('Thank you, we have received your attachments') and len(sent) == 2, sent
     assert len(notices) == 1 and 'مرفقات' in notices[0]
+
+
+def test_customer_photo_burst_is_read_once_and_answered(setup, monkeypatch):
+    import asyncio
+    from app import customer_images as ci, whatsapp_natural, zernio_whatsapp as z, load_vision, owner_briefing
+    from test_whatsapp_agent import ACCOUNT
+    store.update_settings(ACCOUNT, mode='routine', acceptance={'direct_owner_activation': True,
+                          'owner_receipt_confirmed': True, 'confirmed_by': 'test-owner'})
+    monkeypatch.setitem(sys.modules, 'app.team', SimpleNamespace(identify=lambda event: (None, None)))
+    scheduled = []
+    monkeypatch.setattr(ci, 'schedule', lambda job: scheduled.append(job['sender']) or True)
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic-test-only')
+    agent.accept_inbound(payload(120, 'Please find the shipment details'))
+    from app import whatsapp_natural as wn
+
+    async def natural(question, history=()):
+        return 'Thank you, noted.'
+    monkeypatch.setattr(wn, 'reply', natural)
+    assert tick()
+    for number in (121, 122, 123):
+        photo = payload(number, '')
+        photo['message']['attachments'] = [{'type': 'image', 'mimeType': 'image/jpeg', 'id': f'm{number}'}]
+        agent.accept_inbound(photo)
+        assert tick()
+    sent = [s[1] for s in setup['sends']]
+    assert sent[-1].startswith('Thank you, we have received your photos') and len(sent) == 2, sent
+    assert len(scheduled) == 3  # every photo job asks; schedule() itself keeps one reader per sender
+
+    # The reader: all three photos of the burst, one vision call, one reply, claimed so they are never read twice.
+    fetched, sends, notices = [], [], []
+
+    async def fetch(pseudo, index):
+        fetched.append(pseudo['message']['platformMessageId'])
+        return b'img', 'image/jpeg'
+
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {'content': [{'type': 'text', 'text': 'Photo 1: Krusman turbo oil drum, 208L, made in UAE.'}]}
+
+    class Client:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **kw):
+            assert sum(1 for b in kw['json']['messages'][0]['content'] if b['type'] == 'image') == 3
+            return Resp()
+
+    async def answer(question, history=()):
+        assert 'Krusman' in question and history and history[-1]['question'] == 'Please find the shipment details'
+        return 'Thank you Mohammed, the photos show Krusman turbo oil drums.'
+
+    async def send(to, text, **kw):
+        sends.append((to, text))
+
+    async def deliver(text, urgent=False):
+        notices.append(text)
+    monkeypatch.setattr(load_vision, 'fetch_image', fetch)
+    monkeypatch.setattr(ci.httpx, 'AsyncClient', Client)
+    monkeypatch.setattr(wn, 'reply', answer)
+    monkeypatch.setattr(z, 'send', send)
+    monkeypatch.setattr(owner_briefing, 'deliver', deliver)
+    monkeypatch.setattr(ci, 'WAIT_SECONDS', 0)
+    monkeypatch.setattr(ci, 'QUIET_SECONDS', 0)
+    sender = setup['sends'][0][0]
+    asyncio.run(ci._run(ACCOUNT, sender, 'synthetic-conversation'))
+    assert len(fetched) == 3 and sends == [(sender, 'Thank you Mohammed, the photos show Krusman turbo oil drums.')]
+    assert len(notices) == 1 and 'Krusman' in notices[0]
+    asyncio.run(ci._run(ACCOUNT, sender, 'synthetic-conversation'))
+    assert len(sends) == 1  # already read
