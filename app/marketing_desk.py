@@ -39,7 +39,9 @@ Exclude: Afaq Tuwaiq itself, government entities, individuals, and anything alre
 Return ONE JSON array only:
 [{{"company": "...", "city": "...", "activity": "short Arabic description", "phone": "+966... or ''", "email": "... or ''",
    "website": "... or ''", "source": "url where the contact appears"}}]
-Only include a company if at least a phone or an email was found on a public page{email_rule}. Never invent contacts."""
+Only include a company if at least a phone or an email was found on a public page{email_rule}. Never invent contacts.
+Always give the company's own website when it has one: every contact is checked on that site before it is used.
+Keep each field short. Output the JSON array ONLY, with no text before or after it."""
 
 
 def _digits(phone):
@@ -67,19 +69,98 @@ async def _research(segment, area, count, exclude):
         for _ in range(5):
             r = await client.post('https://api.anthropic.com/v1/messages',
                                   headers={'x-api-key': key, 'anthropic-version': '2023-06-01'},
-                                  json={'model': model, 'max_tokens': 4000, 'tools': tools, 'messages': messages})
+                                  json={'model': model, 'max_tokens': 8000, 'tools': tools, 'messages': messages})
             r.raise_for_status()
             data = r.json()
             text = ''.join(b.get('text', '') for b in data.get('content', []) if b.get('type') == 'text')
             if data.get('stop_reason') != 'pause_turn':
                 break
             messages = [messages[0], {'role': 'assistant', 'content': data.get('content', [])}]
-    m = re.search(r'\[.*\]', text or '', re.S)
-    try:
-        items = json.loads(m.group(0)) if m else []
-    except ValueError:
-        items = []
-    return [i for i in items if isinstance(i, dict) and str(i.get('company') or '').strip()]
+    items = parse_items(text)
+    if not items and text.strip():
+        # Owner, 24 Nov 2026: two UAE searches returned 0 because the answer was not clean JSON. Ask once to reformat.
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post('https://api.anthropic.com/v1/messages',
+                                  headers={'x-api-key': key, 'anthropic-version': '2023-06-01'},
+                                  json={'model': model, 'max_tokens': 6000, 'messages': [
+                                      {'role': 'user', 'content': 'Convert these research notes into the JSON array described (company, city, '
+                                       'activity, phone, email, website, source). JSON only, no other text. Never add a contact that is not in '
+                                       'the notes.\n\n' + text[:20000]}]})
+            if r.status_code == 200:
+                items = parse_items(''.join(b.get('text', '') for b in r.json().get('content', []) if b.get('type') == 'text'))
+    print('LEAD_FINDER_RESEARCH', segment, 'candidates', len(items), 'chars', len(text or ''), flush=True)
+    return items
+
+
+def parse_items(text):
+    """The JSON array of companies, tolerant of text, code fences or citations around it."""
+    text = str(text or '')
+    for m in sorted(re.finditer(r'\[\s*\{.*?\}\s*\]', text, re.S), key=lambda m: -len(m.group(0))):
+        try:
+            items = json.loads(m.group(0))
+        except ValueError:
+            continue
+        good = [i for i in items if isinstance(i, dict) and str(i.get('company') or '').strip()]
+        if good:
+            return good
+    return []
+
+
+PHONE_RE = re.compile(r'(?:\+|00)\s?(?:9[67]\d|86|20)[\s().-]*\d(?:[\s().-]*\d){6,11}')
+EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+CONTACT_PATHS = ('', '/contact', '/contact-us', '/contact-us/', '/contact/', '/en/contact', '/about')
+
+
+def _site(url):
+    url = str(url or '').strip()
+    if not url:
+        return ''
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    m = re.match(r'(https?://[^/?#]+)', url)
+    return m.group(1) if m else ''
+
+
+async def verify(items):
+    """Owner, 24 Nov 2026 («المهارات دي ليش ما متوفرة عند قسم المبيعات»): open each company's OWN website and keep only
+    the phone/email actually printed there, with the page as the source. A model's contact that the site does not show
+    is dropped; a company whose site shows none keeps nothing and is skipped by store()."""
+    sem = asyncio.Semaphore(6)
+
+    async def one(it):
+        site = _site(it.get('website'))
+        if not site:
+            it['verified'] = False
+            return it
+        async with sem, httpx.AsyncClient(timeout=12, follow_redirects=True,
+                                          headers={'User-Agent': 'Mozilla/5.0 (AfaqTuwaiq lead check)'}) as client:
+            phones, emails, page = [], [], ''
+            for path in CONTACT_PATHS:
+                try:
+                    r = await client.get(site + path)
+                except (httpx.HTTPError, ValueError):
+                    continue
+                if r.status_code != 200 or 'html' not in r.headers.get('content-type', ''):
+                    continue
+                html = r.text[:600000]
+                found_e = [e for e in EMAIL_RE.findall(html) if not re.search(r'\.(png|jpe?g|webp|svg|gif)$|sentry|example\.|wixpress', e, re.I)]
+                found_p = [_digits(p) for p in PHONE_RE.findall(html)]
+                found_p = [p for p in found_p if p]
+                if found_e or found_p:
+                    emails += found_e
+                    phones += found_p
+                    page = page or str(r.url)
+                if emails and phones:
+                    break
+        model_phone, model_email = _digits(it.get('phone')), str(it.get('email') or '').strip().lower()
+        it['phone'] = model_phone if model_phone and model_phone in phones else (phones[0] if phones else '')
+        it['email'] = model_email if model_email and model_email in [e.lower() for e in emails] else (emails[0].lower() if emails else '')
+        it['verified'] = bool(it['phone'] or it['email'])
+        if page:
+            it['source'] = page
+        return it
+
+    return list(await asyncio.gather(*(one(dict(i)) for i in items)))
 
 
 def store(segment, items):
@@ -106,7 +187,8 @@ def store(segment, items):
                 VALUES(%s,%s,%s,%s,%s,%s,0,%s,%s,%s)''',
                       (name, phone or None, email or None, str(it.get('city') or '')[:60],
                        (SEGMENTS[segment][0] + ' — ' + str(it.get('activity') or ''))[:200], 'lead_finder:' + segment, notes, now, now))
-            added.append(name)
+            added.append(name + (' — +' + phone if phone else '') + (' — ' + email if email else '')
+                         + (' — ' + str(it.get('source'))[:120] if it.get('source') else ''))
     return added, skipped
 
 
@@ -118,12 +200,22 @@ def find_leads(segment='forwarder', area='', count=DAILY_LEADS):
             "SELECT company_name FROM customer_directory WHERE source LIKE 'lead_finder:%%' ORDER BY id DESC LIMIT 60").fetchall()]
     from app.transport_desk import run_async
     items = run_async(lambda: _research(segment, str(area or '')[:60], count, exclude), timeout=290)
+    try:
+        items = run_async(lambda: verify(items), timeout=200)
+    except Exception as exc:
+        print('LEAD_FINDER_VERIFY', type(exc).__name__, str(exc)[:120], flush=True)
+        for it in items:
+            it['verified'] = False
+    if segment == 'uae':  # UAE carriers are the target; Saudi clearance offices (+966) are competitors, not leads
+        items = [i for i in items if not _digits(i.get('phone')).startswith('966') and not re.search(r'\.sa(/|$)', str(i.get('website') or ''))]
+    items = [i for i in items if i.get('verified')]
     added, skipped = store(segment, items)
     print('LEAD_FINDER', segment, 'found', len(items), 'added', len(added), flush=True)
     if not added:
         return f'بحثت عن {SEGMENTS[segment][0]} ولم أجد شركات جديدة بأرقام أو إيميلات منشورة (مكرر/بلا تواصل: {skipped}).'
     return (f"✅ أضفت {len(added)} شركة جديدة ({SEGMENTS[segment][0]}) إلى دليل العملاء المحتملين، وتدخل قائمة التواصل اليومية "
-            f"تلقائيًا (رسالة التعريف المعتمدة، 20 شركة يوميًا):\n" + '\n'.join('• ' + n for n in added[:25])
+            f"تلقائيًا (رسالة التعريف المعتمدة، 20 شركة يوميًا). كل رقم وإيميل تأكدت منه من موقع الشركة نفسها:\n"
+            + '\n'.join('• ' + n for n in added[:25])
             + (f'\n(تجاهلت {skipped} مكررة أو بلا تواصل منشور)' if skipped else ''))
 
 

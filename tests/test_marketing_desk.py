@@ -55,3 +55,31 @@ def test_china_partner_campaign():
     t = china_message('Star')
     assert 'FASAH' in t and '清关' in t and '2513' in t and '沙特' in CHINA_SUBJECT
     assert ROTATION.count('china') == 2
+
+
+def test_lead_contacts_are_verified_on_the_company_site(monkeypatch):
+    """Owner, 24 Nov 2026: Reem must work like the lead finder in Claude — contacts only from the company's own site."""
+    import asyncio
+    import httpx as _httpx
+    from app import marketing_desk as md
+    pages = {
+        'https://good.ae': '<html>Welcome</html>',
+        'https://good.ae/contact': '<html>Call +971 50 123 4567 or mail sales@good.ae <img src="a@2x.png"></html>',
+        'https://nosite.ae': '<html>nothing</html>',
+    }
+
+    def handler(request):
+        url = str(request.url).rstrip('/')
+        if url in pages:
+            return _httpx.Response(200, text=pages[url], headers={'content-type': 'text/html'})
+        return _httpx.Response(404, text='no')
+    real = _httpx.AsyncClient
+    monkeypatch.setattr(md.httpx, 'AsyncClient', lambda **kw: real(transport=_httpx.MockTransport(handler), **{k: v for k, v in kw.items() if k != 'transport'}))
+    out = asyncio.run(md.verify([
+        {'company': 'Good Cargo', 'website': 'good.ae', 'phone': '+971 55 999 0000', 'email': 'fake@good.ae'},
+        {'company': 'No Contacts', 'website': 'https://nosite.ae', 'phone': '+971 50 000 0000'},
+        {'company': 'No Site', 'phone': '+971 50 111 1111'}]))
+    good, none, nosite = out
+    assert good['verified'] and good['phone'] == '971501234567' and good['email'] == 'sales@good.ae' and good['source'].endswith('/contact')
+    assert not none['verified'] and not nosite['verified']
+    assert md.parse_items('Here: ```json\n[{"company":"A","phone":"+971500000000"}]\n``` [1]') == [{'company': 'A', 'phone': '+971500000000'}]
