@@ -65,3 +65,40 @@ def test_api_retries_slow_system_but_never_repeats_claim(monkeypatch):
     with pytest.raises(rn.requests.Timeout):
         api.post('/api/runner/claim')
     assert len(calls) == 4
+
+
+def test_fasah_session_survives_a_browser_restart(tmp_path, monkeypatch):
+    """Owner (24 Nov 2026): signing in to FASAH 3+ times a day. A relaunch/self-update keeps the FASAH session."""
+    monkeypatch.setattr(rn, 'SESSION_FILE', tmp_path / 'fasah-session.json')
+
+    class Page:
+        def __init__(self, url): self.url, self.calls = url, []
+        def is_closed(self): return False
+        def evaluate(self, js): self.calls.append(js); return '{"token":"abc"}'
+        def goto(self, url, **kw): self.url = url
+        class mouse:
+            @staticmethod
+            def move(*a): pass
+        class keyboard:
+            @staticmethod
+            def press(*a): pass
+
+    class Ctx:
+        def __init__(self, pages): self.pages, self.added, self.scripts = pages, [], []
+        def cookies(self): return [{'name': 's', 'value': 'v', 'domain': 'fasah.zatca.gov.sa'}, {'name': 'x', 'domain': 'other.com'}]
+        def add_cookies(self, c): self.added += c
+        def add_init_script(self, js): self.scripts.append(js)
+        def new_page(self): p = Page('about:blank'); self.pages.append(p); return p
+
+    old = Ctx([Page('https://fasah.zatca.gov.sa/home')])
+    rn.save_fasah_session(old)
+    new = Ctx([Page('about:blank')])
+    assert rn.restore_fasah_session(new) is True
+    assert [c['domain'] for c in new.added] == ['fasah.zatca.gov.sa'] and 'token' in new.scripts[0]
+    assert new.pages[0].url == 'https://fasah.zatca.gov.sa/home' and not (tmp_path / 'fasah-session.json').exists()
+    assert rn.restore_fasah_session(Ctx([])) is False  # nothing saved -> normal sign-in
+
+    page = Page('https://fasah.zatca.gov.sa/home')
+    rn._last_refresh[0] = 0
+    rn.keep_fasah_alive(Ctx([page]))
+    assert any('fetch(location.href' in js for js in page.calls)  # a real request extends the server session
