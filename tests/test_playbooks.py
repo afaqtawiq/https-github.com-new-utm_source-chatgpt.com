@@ -15,3 +15,11 @@ def test_all_playbooks_installed_and_found_from_arabic_tasks():
     assert text.startswith('📘 دليل «prospecting»') and len(text) > 2000
     assert 'cold-email' in pb.answer(name='cold-email')
     assert pb.answer('xyz qqq').startswith('ما لقيت دليلًا')
+
+
+def test_video_requests_open_the_afaq_video_desk():
+    from app import playbooks
+    assert playbooks.choose('سوي فيديو سينمائي عن ميناء جدة')[0] == 'afaq-video-production'
+    assert playbooks.choose('سكربت ريلز تيك توك عن التخليص')[0] == 'afaq-video-production'
+    text = playbooks.answer('فيديو احترافي', '', '')
+    assert 'cinematic_video' in text and 'stock_video' in text

@@ -12,10 +12,13 @@ ROOT = os.path.join(os.path.dirname(__file__), 'sales_playbooks')
 OWN = {
     'afaq-b2b-outreach': 'Afaq Tuwaiq B2B sales campaigns: verified logistics/import leads, bilingual outreach emails/WhatsApp, lead tracker',
     'afaq-brand-content': 'Afaq Tuwaiq marketing content: videos, posts, ads, designs, captions with the approved logo, petrol/gold brand, cinematic style',
+    'afaq-video-production': 'Afaq Tuwaiq video desk: which video tool (cinematic_video paid AI commercial, stock_video free), scripts, hooks, storyboards, shot prompts, editing, platform specs, captions, cadence',
 }
 # Arabic words the owner and the team use -> playbooks
 ARABIC = {
     'afaq-b2b-outreach': ('حملة', 'حملات', 'تواصل', 'رسالة تعريف', 'شركات الشحن', 'المستوردين', 'b2b'),
+    'afaq-video-production': ('فيديو', 'فديو', 'ريلز', 'ريل', 'يوتيوب', 'شورتس', 'تيك توك', 'سناب', 'سكربت', 'سيناريو', 'ستوري بورد',
+                              'مونتاج', 'سينمائي', 'اعلان فيديو', 'إعلان فيديو', 'لقطات', 'تصوير', 'video', 'reel'),
     'afaq-brand-content': ('هوية', 'شعار', 'براند', 'تصميم', 'بوستر', 'محتوى آفاق'),
     'cold-email': ('بريد بارد', 'ايميل بارد', 'إيميل بارد', 'رسالة باردة', 'متابعة', 'follow'),
     'prospecting': ('عملاء محتملين', 'عملاء جدد', 'ابحث', 'قائمة شركات', 'استهداف', 'leads'),
@@ -82,9 +85,11 @@ def choose(topic, limit=3):
         if score:
             scores[name] = score
     if 'افاق' in text or 'آفاق' in text or 'طويق' in text:
-        for name in ('afaq-b2b-outreach', 'afaq-brand-content'):
+        for name in ('afaq-b2b-outreach', 'afaq-brand-content', 'afaq-video-production'):
             if name in scores:
                 scores[name] += 3
+    if 'afaq-video-production' in scores:  # our own video desk comes before the generic AI-video guide
+        scores['afaq-video-production'] += 2
     return [n for n, _ in sorted(scores.items(), key=lambda kv: -kv[1])[:limit]]
 
 

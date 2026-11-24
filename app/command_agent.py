@@ -174,8 +174,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'gap_number': {'type': 'string'}, 'question': {'type': 'string'}, 'answer': {'type': 'string'}}, 'required': ['answer']}},
     {'name': 'learned_answers', 'description': 'Approved answers the customer agent learned: action=list shows them; action=revoke with id removes one («الغ الجواب 3»); action=report builds the performance report of yesterday now («تقرير أداء الوكيل»).',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'revoke', 'report']}, 'id': {'type': 'string'}}, 'required': ['action']}},
-    {'name': 'video_status', 'description': 'Status of the recent marketing video requests (stock_video): queued / producing / ready with the preview link / failed with the reason. Use it before asking for a new video or when the manager asks where a video is.',
+    {'name': 'video_status', 'description': 'Status of the recent marketing video requests (free stock_video and paid cinematic_video): queued / producing / ready with the preview link / failed with the reason. Use it before asking for a new video or when the manager asks where a video is.',
      'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'cinematic_video', 'description': 'Produce a PROFESSIONAL cinematic marketing video (premium, like a TV commercial): AI-generated photorealistic shots (Kling) of ports, trucks, customs, warehouses, professional Arabic voice-over, Afaq logo, brand cards and contact end card, ~25 s. It is PAID (fal.ai, a few USD): the manager first gets the storyboard + maximum cost + a «نفذ» code to approve the spend; after production a second «نفذ» publishes to Facebook, Instagram, YouTube and TikTok. Use it whenever the manager asks for a professional / cinematic / ad / commercial / high-quality video («فيديو احترافي» «فيديو سينمائي» «إعلان فيديو»); use stock_video only when he asks for a free/quick video. topic = what the video is about (service, route, port, audience, offer). format = vertical (default) or both (adds 16:9 for YouTube/website).',
+     'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'format': {'type': 'string', 'enum': ['vertical', 'both']}}, 'required': ['topic']}},
     {'name': 'stock_video', 'description': 'Produce a FREE short vertical marketing video: footage from Pexels (free licence), free local Arabic narration, royalty-free music, Afaq brand cards and phone end card. The manager gets a preview link and a «نفذ» code; nothing is published before «نفذ». topic = what the video is about. e.g. «سوي فيديو عن التخليص في ميناء جدة» «فيديو مجاني عن نقل الحاويات للرياض».',
      'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'dialect': {'type': 'string', 'enum': ['fusha', 'saudi'], 'description': 'saudi when the manager asks for Saudi/colloquial dialect, else fusha'}}, 'required': ['topic']}},
     {'name': 'customer_care', 'description': 'Existing customers programme: transport offer to customers we clear for, and win-back messages to customers inactive 60+ days. action=prepare prepares a batch now (sent only after «نفذ»); action=status shows results. e.g. «جهز رسائل العملاء» «نتائج رسائل العملاء الحاليين».',
@@ -761,8 +763,20 @@ def tool_learned_answers(c, a):
 
 
 def tool_video_status(c, a):
-    from app import stock_video
-    return stock_video.status_text()
+    from app import stock_video, video_director
+    text = stock_video.status_text()
+    try:
+        extra = video_director.status_lines()
+    except Exception:
+        extra = []
+    return text + ('\n' + '\n'.join(extra) if extra else '')
+
+
+def tool_cinematic_video(c, a):
+    from app import video_director
+    if not _member().get('manager'):
+        return 'الفيديو السينمائي المدفوع يطلبه المدير فقط؛ أقدر أسوي لك فيديو مجاني (stock_video).'
+    return video_director.start(_clean(a.get('topic'), 400), _member().get('name') or '', a.get('format') or 'vertical')
 
 
 def tool_stock_video(c, a):
@@ -1302,6 +1316,9 @@ def _execute_action(c, action, member):
     if action.get('tool') == 'runner_approve':
         from app import agent_runner
         return agent_runner.decide(action['approval_id'], True, member.get('name') or 'المدير')
+    if action.get('tool') == 'cinematic_approve':
+        from app import video_director
+        return video_director.approve(action['job_id'], member.get('name') or '')
     if action.get('tool') == 'publish_video':
         from app import video_publish
         return video_publish.publish(action['video_id'], member.get('name') or '')

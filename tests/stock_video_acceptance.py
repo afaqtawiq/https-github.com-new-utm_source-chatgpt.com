@@ -67,16 +67,22 @@ def run():
     with patch.dict(os.environ, {'PEXELS_API_KEY': '', 'PIXABAY_API_KEY': ''}):
         assert 'PEXELS_API_KEY' in sv.start('اختبار')
     # 1) Plan guard: prices / digits / guarantees fall back to the safe plan.
-    bad = {'scenes': [{'text': 'أرخص سعر 500 ريال', 'voice': 'نضمن لك', 'query': 'port'}] * 4}
+    bad = {'scenes': [{'text': 'أرخص سعر 500 ريال', 'voice': 'نضمن لك', 'query': 'port'}] * 5}
     assert sv.clean_plan(bad, 'x') == sv.fallback_plan('x')
-    good = sv.clean_plan({'caption': 'c', 'scenes': [{'text': 'شحنتك في أمان', 'voice': 'نخلص شحنتك باحترافية', 'query': 'port cranes!!'}] * 4}, 'x')
-    assert good['scenes'][0]['query'] == 'port cranes' and len(good['scenes']) == 4
+    good = sv.clean_plan({'caption': 'c', 'scenes': [{'text': 'شحنتك في أمان', 'voice': 'نخلص شحنتك باحترافية', 'query': 'port cranes!!'}] * 5}, 'x')
+    assert good['scenes'][0]['query'] == 'port cranes' and len(good['scenes']) == 5
+    # Four scenes are no longer enough for the hook → problem → service → benefit → CTA reel.
+    assert sv.clean_plan({'caption': 'c', 'scenes': [{'text': 'شحنتك', 'voice': 'نخلص شحنتك', 'query': 'port'}] * 4}, 'x') == sv.fallback_plan('x')
+    # Burned-in captions follow the narration (no diacritics), spread over the scene; pans alternate direction.
+    chunks = sv.caption_chunks('نُخَلِّصُ شُحْنَتَكَ فِي جَمِيعِ المَنَافِذِ السُّعُودِيَّةِ بسرعة', 6.0)
+    assert [c[0] for c in chunks] == ['نخلص شحنتك في جميع', 'المنافذ السعودية بسرعة'] and chunks[0][1] < chunks[1][1] < chunks[-1][2] <= 6.0
+    assert sv.caption_chunks('', 5) == [] and '(1-t/' in sv.motion_filter(1, 5) and '(1-t/' not in sv.motion_filter(0, 5)
 
     # 1b) Pronunciation: diacritized narration accepted (guards run on the plain text), brand/platform fixes, dialect pick.
-    voiced = sv.clean_plan({'caption': 'c', 'scenes': [{'text': 'شحنتك في أمان', 'voice': 'نُخَلِّصُ شُحْنَتَكَ فِي جَمِيعِ المَنَافِذِ', 'query': 'port'}] * 4}, 'x')
+    voiced = sv.clean_plan({'caption': 'c', 'scenes': [{'text': 'شحنتك في أمان', 'voice': 'نُخَلِّصُ شُحْنَتَكَ فِي جَمِيعِ المَنَافِذِ', 'query': 'port'}] * 5}, 'x')
     assert voiced['scenes'][0]['voice'].startswith('نُخَلِّصُ')
-    assert sv.clean_plan({'scenes': [{'text': 'ا', 'voice': 'نضمن لك الفسح', 'query': 'p'}] * 4}, 'x') == sv.fallback_plan('x')
-    assert sv.clean_plan({'scenes': [{'text': 'ا', 'voice': 'تواصل على WhatsApp', 'query': 'p'}] * 4}, 'x') == sv.fallback_plan('x')
+    assert sv.clean_plan({'scenes': [{'text': 'ا', 'voice': 'نضمن لك الفسح', 'query': 'p'}] * 5}, 'x') == sv.fallback_plan('x')
+    assert sv.clean_plan({'scenes': [{'text': 'ا', 'voice': 'تواصل على WhatsApp', 'query': 'p'}] * 5}, 'x') == sv.fallback_plan('x')
     said = sv.speakable('«آفاق طويق» تخلص في سابر و #فسح عبر واتساب')
     assert 'آفَاقْ طُوَيْق' in said and 'سَابِر' in said and 'وَاتْسَاب' in said and '«' not in said and '#' not in said
     assert sv.dialect_for('فيديو بلهجة سعودية عن النقل') == 'saudi' and sv.dialect_for('فيديو عن جدة') == 'fusha'
@@ -89,7 +95,7 @@ def run():
         with db() as c:
             job = c.execute("INSERT INTO stock_video_jobs(topic,status,created_at) VALUES('اختبار','queued',NOW()) RETURNING id").fetchone()['id']
         vid, duration, credits, note, caption = sv.produce(job, 'التخليص في ميناء جدة', 'المدير')
-    # 2) Final video: 1080x1920 H.264 with audio, 4 scenes + end card, stored for the existing publisher.
+    # 2) Final video: 1080x1920 H.264 with audio, 5 scenes + end card, stored for the existing publisher.
     with db() as c:
         row = c.execute('SELECT video,caption,status FROM team_videos WHERE id=%s', (vid,)).fetchone()
         usage = c.execute('SELECT COUNT(*) n FROM stock_clip_usage WHERE job_id=%s', (job,)).fetchone()['n']
@@ -103,7 +109,7 @@ def run():
     assert any(s['codec_type'] == 'audio' for s in meta['streams'])
     assert 20 <= float(meta['format']['duration']) <= 40 and abs(float(meta['format']['duration']) - duration) < 1.5, duration
     assert row['status'] == 'ready' and 'Pexels' in row['caption'] and '0507665873' in row['caption']
-    assert usage == 4 and jobrow['status'] == 'ready' and len(json.loads(jobrow['credits_json'])) == 4
+    assert usage == 5 and jobrow['status'] == 'ready' and len(json.loads(jobrow['credits_json'])) == 5
     assert any('خلفية أصلية' in n for n in note)
     # 3) The same clips are never reused by the next video.
     with db() as c:
