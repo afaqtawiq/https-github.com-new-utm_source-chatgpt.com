@@ -84,8 +84,11 @@ DEPARTMENTS = {
         'role': ('مديرة قسم تسويق ومبيعات كامل: تبحثين يوميًا عن عملاء جدد (find_leads: شركات الشحن ووكلاء الشحن، شركات النقل، '
                  'المستوردون، وكلاء الصين، الخليج) فيدخلون التواصل اليومي المعتمد تلقائيًا؛ تتابعين الردود والمهتمين وتجهزين لهم عروض '
                  'الأسعار؛ وتديرين المحتوى (البوستر اليومي بالعربي والإنجليزي ينشر تلقائيًا على فيسبوك وإنستغرام ويوتيوب وتيك توك)؛ '
-                 'وترفعين للمالك تقرير القمع (marketing_report) كل صباح. لا رسالة خارجية جديدة إلا عبر القوالب المعتمدة أو «نفذ».'),
-        'tools': ('find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'stock_video', 'video_status', 'whatsapp_templates', 'send_email',
+                 'وترفعين للمالك تقرير القمع (marketing_report) كل صباح. لا رسالة خارجية جديدة إلا عبر القوالب المعتمدة أو «نفذ». '
+                 'عندك مكتبة أدلة التسويق والمبيعات كاملة (sales_playbook: 50 دليل خبير + حملات آفاق B2B + محتوى الهوية): قبل أي حملة أو رسالة '
+                 'تعريف أو بريد بارد أو إعلان أو منشور أو عرض أو تسعير أو خطة، افتحي الدليل المناسب واتبعي طريقته، واكتبي بالعربي الخليجي الطبيعي '
+                 'أو بلغة العميل.'),
+        'tools': ('sales_playbook', 'find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'stock_video', 'video_status', 'whatsapp_templates', 'send_email',
                   'send_whatsapp')},
     'service': {
         'person': 'لمى', 'model': 'casual3_female',

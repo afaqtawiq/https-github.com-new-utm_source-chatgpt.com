@@ -160,6 +160,8 @@ TOOLS = [
     {'name': 'find_leads', 'description': 'Sales: research NEW prospect companies on the public web and add them (with their public business phone/email) to the prospects directory, so the daily approved outreach contacts them. segment: uae (شركات الشحن البري الإماراتية — حملة البطحاء) | forwarder (شركات الشحن/وكلاء الشحن) | transport (شركات النقل والشاحنات) | importer (مستوردون) | china (وكلاء شحن في الصين) | gcc (شركات خليجية). Optional area (city/country) and count (≤25). e.g. «ابحثي عن شركات نقل في الدمام».',
      'input_schema': {'type': 'object', 'properties': {'segment': {'type': 'string', 'enum': ['uae', 'forwarder', 'transport', 'importer', 'china', 'gcc']},
         'area': {'type': 'string'}, 'count': {'type': 'integer'}}, 'required': ['segment']}},
+    {'name': 'sales_playbook', 'description': 'Sales & marketing playbooks (50 expert methods + Afaq Tuwaiq B2B outreach and brand content): prospecting, cold email and follow-ups, WhatsApp/SMS, paid ads and ad creative, social posts and content calendars, copywriting, offers, pricing, PR, events, referrals, partnerships, competitor research, customer research, sales enablement, landing pages/CRO, SEO, marketing plans, video, launches. Call it BEFORE drafting any campaign, outreach message, ad, post, offer or plan, and follow the returned guide. topic = the task in free words (Arabic or English); or name = an exact playbook; name + heading = one section of that playbook\'s references.',
+     'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'name': {'type': 'string'}, 'heading': {'type': 'string'}}}},
     {'name': 'marketing_report', 'description': 'Sales & marketing funnel report: posters published per platform, companies contacted, replies, interested, new leads found. days default 1 (today), up to 30.',
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'integer'}}}},
     {'name': 'prospect_replies', 'description': 'Which contacted prospect companies replied to the agent outreach and how (interested, asked price, not interested, stop), with quotes prepared. Optional days (default 7). e.g. «مين رد من العملاء المحتملين» «ردود حملة التعريف».',
@@ -699,6 +701,10 @@ def tool_find_leads(c, a):
     except Exception as exc:
         return 'تعذر البحث الآن: ' + type(exc).__name__
 
+
+def tool_sales_playbook(c, a):
+    from app import playbooks
+    return playbooks.answer(a.get('topic') or '', str(a.get('name') or '').strip(), str(a.get('heading') or '').strip())
 
 def tool_marketing_report(c, a):
     from app import marketing_desk
