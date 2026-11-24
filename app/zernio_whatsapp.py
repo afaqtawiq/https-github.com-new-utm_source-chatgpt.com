@@ -334,15 +334,43 @@ def client():
     return httpx.AsyncClient(timeout=20, headers={'Authorization': 'Bearer ' + os.environ['ZERNIO_API_KEY']})
 
 
+_ACCOUNT_OK = {}
+_TEMPLATES = {}
+
+
+def _ttl(name, default):
+    try:
+        return max(0, int(os.getenv(name, default)))
+    except ValueError:
+        return default
+
+
 async def validate_account(c):
+    # A successful check is reused briefly: every send used to call /accounts, which hit Zernio's
+    # 60 requests/minute limit (429) and dropped replies (24 Nov 2026). Failures are never cached.
+    import time as _time
+    key = account_id()
+    if _ttl('ZERNIO_ACCOUNT_CACHE_SECONDS', 0) and _ACCOUNT_OK.get(key, 0) > _time.monotonic():
+        return
     accounts = (await read(c, '/accounts')).get('accounts', [])
     if not any(a.get('_id') == account_id() and a.get('platform') == 'whatsapp'
                and a.get('isActive') is True for a in accounts):
+        _ACCOUNT_OK.pop(key, None)
         raise WhatsAppBlocked('حساب الإرسال المحدد ليس حساب واتساب نشطًا؛ لم تُرسل الرسالة')
+    _ACCOUNT_OK[key] = _time.monotonic() + _ttl('ZERNIO_ACCOUNT_CACHE_SECONDS', 0)
 
 
 async def templates(c):
-    return (await read(c, '/whatsapp/templates', {'accountId': account_id()})).get('templates', [])
+    import time as _time
+    key = account_id()
+    hit = _TEMPLATES.get(key)
+    if hit and hit[0] > _time.monotonic() and _ttl('ZERNIO_TEMPLATES_CACHE_SECONDS', 0):
+        return hit[1]
+    found = (await read(c, '/whatsapp/templates', {'accountId': account_id()})).get('templates', [])
+    ttl = _ttl('ZERNIO_TEMPLATES_CACHE_SECONDS', 0)
+    if ttl:
+        _TEMPLATES[key] = (_time.monotonic() + ttl, found)
+    return found
 
 
 def required_templates():
