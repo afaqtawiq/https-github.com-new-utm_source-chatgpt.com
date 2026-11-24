@@ -27,3 +27,14 @@ def test_clearance_without_saber_gets_import_on_behalf_offer():
     ar = wn.import_on_behalf_reply('ابغى اخلص شحنة بدون سابر')
     assert '800 ريال' in ar and '1400 ريال' in ar and '300 ريال' in ar and '2.5%' in ar and '15%' in ar
     assert wn.import_on_behalf_reply('كم سعر شهادة سابر؟') is None
+
+
+def test_transport_company_is_a_partner_not_a_shipper():
+    from app import carrier_leads as cl
+    assert cl.looks_like_carrier(['كم عدد الشاحنات؟', '100 شاحنه'], 'Shams Alkhaleej للنقليات')
+    assert cl.looks_like_carrier(['عندنا 100 شاحنة ونبي نتعاون معكم'])
+    assert cl.looks_like_carrier(['We have 40 trucks available for KSA routes'])
+    assert not cl.looks_like_carrier(['عندي شحنة من جدة للرياض كم السعر'])
+    assert cl.fleet_hint(['100 شاحنه']) == '100 شاحنه'
+    from app import whatsapp_natural as wn
+    assert 'شريك نحتاجه' in wn.SYSTEM and 'قائمة أسعاره' in wn.SYSTEM
