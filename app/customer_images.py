@@ -23,8 +23,8 @@ unreadable values. Plain text, at most 15 short lines, in English:
 - what each photo shows (product label, drum/carton, invoice, packing list, bill of lading, certificate, truck, cargo ...)
 - shipment facts visible: product names/brands, model/SKU, HS codes, quantities, weights, values and currency,
   origin, destination, company names
-- anything relevant to importing into Saudi Arabia that is visible or clearly missing (SABER/SASO marks, Arabic
-  labelling, country of origin, certificates)"""
+- anything relevant to importing into Saudi Arabia that is visible or clearly missing (SABER/SASO marks, country of
+  origin, certificates). Do not mention Arabic labelling: the owner confirmed it is not required."""
 
 
 def is_image(snapshot):
