@@ -409,6 +409,11 @@ async def reply(question, history=()):
     from app.customs_knowledge import KNOWLEDGE
     from app.port_terminals import KNOWLEDGE as _PORT
     KNOWLEDGE = KNOWLEDGE + _PORT
+    try:
+        from app.rate_card import approved_text
+        KNOWLEDGE = KNOWLEDGE + approved_text()
+    except Exception:
+        pass
     case_guidance = guidance_for(question, history)
     try:
         from app.agent_learning import block as learned_block
