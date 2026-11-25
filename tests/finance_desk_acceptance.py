@@ -93,6 +93,8 @@ def run():
     assert len(fd.index()) == 11
 
     # Posting: the preview holds back the two identical 700 expenses; the old 900 receipt is clean.
+    snap, text = fd.post_preview(exclude=[snap_id for snap_id, _ in fd.post_preview()[0]])
+    assert snap == [] or 'استثناه المدير' in text
     snap, text = fd.post_preview()
     assert [a for _, a in snap] == [90000] and 'قد يكون مكرر' in text and 'مستثنى من الترحيل (2)' in text, text
     with db() as c:
