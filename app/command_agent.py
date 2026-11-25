@@ -8,6 +8,7 @@ Claude picks tools and runs them; the reply states only what the tools actually 
   short confirmation «نفذ CODE» in the same chat; nothing external is sent on interpretation alone.
 - Secrets (passwords, OTP codes, IBAN/card numbers) are never sent or stored by these tools.
 """
+import datetime as dt
 import contextvars
 import json
 import os
@@ -178,7 +179,7 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'count': {'type': 'integer'}}}},
     {'name': 'carrier_partners', 'description': 'Status of the carrier partnership invitations: invited, replied (with their reply / rates), declined, failed. Use for «حالة الناقلين الشركاء» «مين رد من شركات النقل».',
      'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'documents_total', 'description': 'Total the payment receipts and invoices (photos or PDFs) THIS person sent on WhatsApp and, when an amount received is given, subtract it and give the remainder — one statement with every file, its reference and amount, the total, the amount received and what is left; unreadable amounts, other currencies, supplier goods invoices and duplicate files are listed apart and not counted. Read-only (nothing recorded in finance). Use for «اجمع الإيصالات والفواتير» «جمع لي المبالغ في الإيصالات واخصمها من 41 ألف» «كم الباقي من 41 ألف بعد الفواتير» «ارسل لي كشف المصاريف من الإيصالات». received = the amount received in SAR (e.g. 41000 for «41 ألف»); hours = only files of the last N hours; count = only the last N files. Default: today\'s files.',
+    {'name': 'documents_total', 'description': 'Total the payment receipts and invoices (photos or PDFs) THIS person sent on WhatsApp and, when an amount received is given, subtract it and give the remainder — one statement with every file, its reference and amount, the total, the amount received and what is left; unreadable amounts, other currencies, supplier goods invoices and duplicate files are listed apart and not counted. Read-only (nothing recorded in finance). Use only for a plain total: «اجمع الإيصالات والفواتير» «ارسل لي كشف المصاريف من الإيصالات». Any request to deduct from / settle an amount received («اخصمها من 41 ألف» «كم الباقي من 41 ألف» «تسوية الـ41») goes to advance_settlement. received = the amount received in SAR (e.g. 41000 for «41 ألف»); hours = only files of the last N hours; count = only the last N files. Default: today\'s files. For a settlement that matches invoices to receipts (paid / remaining cash / unpaid invoices) use advance_settlement instead.',
      'input_schema': {'type': 'object', 'properties': {'received': {'type': 'string'}, 'hours': {'type': 'number'}, 'count': {'type': 'integer'}}}},
     {'name': 'finance_overview', 'description': 'Finance management summary for a month (default this month): billed (posted claims), collected (posted receipts), expenses, collection rate, receivables now and over 90 days, drafts waiting for the owner to post, unbilled FASAH declarations. Use for «ملخص المالية» «وضع الحسابات» «تقرير الشهر المالي». month = YYYY-MM.',
      'input_schema': {'type': 'object', 'properties': {'month': {'type': 'string'}}}},
@@ -188,6 +189,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'finance_post', 'description': 'Post (رحّل) draft accounting entries to the ledger — manager only, after his «نفذ» code. Without ids: prepares ALL clean drafts and holds back possible duplicates (same party/kind/amount/date) and opening/reconciliation entries. With ids: only those document numbers (manager decided). exclude = document numbers the manager wants left as drafts. Use for «رحّلي القيود» «رحّل الحسابات» «رحّلي القيد رقم 67» «رحّلي الكل ما عدا 12 و15».',
      'input_schema': {'type': 'object', 'properties': {'ids': {'type': 'array', 'items': {'type': 'integer'}}, 'exclude': {'type': 'array', 'items': {'type': 'integer'}}}}},
+    {'name': 'advance_settlement', 'description': 'Settle an amount of cash received (e.g. «الـ41 ألف») against the ORIGINAL receipts and invoices THIS person sent on WhatsApp: counts proven payments only (payment receipts), matches each invoice to its receipt by reference without double counting, and gives 3 numbers: paid, remaining cash, unpaid invoices. Missing/unclear documents are named and the result is marked «مبدئية». Sends the line-by-line PDF to this chat. Read-only. Use for «تسوية الـ41 ألف» «سوي تسوية المبلغ المستلم مع الإيصالات» «كم دفعنا من الـ41 وكم باقي وكم فواتير ما انسددت». received = amount in SAR; day = YYYY-MM-DD of the files (default today); hours / count to narrow.',
+     'input_schema': {'type': 'object', 'properties': {'received': {'type': 'string'}, 'day': {'type': 'string'}, 'hours': {'type': 'number'}, 'count': {'type': 'integer'}}}},
+    {'name': 'customer_statement', 'description': 'Customer account statement for a period with payment allocation: closing balance at period end (posted), later movements after the period listed apart (they do not change the closing), remaining to collect today, unposted drafts apart (provisional), which invoice each payment settled (proven allocation only), and payments without a proven allocation listed alone. Sends the PDF to this chat. Read-only, no posting needed. Use for «كشف حساب العميل X لشهر أكتوبر» «كشف عميل مع تخصيص الدفعات». start/end = YYYY-MM-DD (default: last month); currency default SAR; owner = the company account if the customer has more than one.',
+     'input_schema': {'type': 'object', 'properties': {'customer': {'type': 'string'}, 'start': {'type': 'string'}, 'end': {'type': 'string'}, 'currency': {'type': 'string'}, 'owner': {'type': 'string'}}, 'required': ['customer']}},
     {'name': 'finance_playbook', 'description': 'Accounting playbooks for Afaq (Saudi VAT for clearance & transport incl. zero-rated international transport and disbursements, ZATCA e-invoicing / Fatoora phase 2, chart of accounts & booking rules, month-end close, receivables & collections policy, 13-week cash flow, shipment profitability, expense & petty-cash controls, bank reconciliation, zakat basics, customer statements). Call it BEFORE answering any accounting, VAT, invoicing, closing or reporting question, and follow it. topic = the question in free words; or name = exact playbook.',
      'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'name': {'type': 'string'}}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
@@ -821,16 +826,73 @@ def tool_finance_checks(c, a):
 
 
 def tool_finance_post(c, a):
+    """The «نفذ» code is printed only inside the PDF, after every entry and the per-currency totals."""
     from app import finance_desk
     if not _member().get('manager'):
         return 'ترحيل القيود يعتمده المدير فقط؛ أرسل له الطلب.'
+
     def nums(key):
         return [int(re.sub(r'\D', '', str(i))) for i in (a.get(key) or []) if re.sub(r'\D', '', str(i))]
-    snapshot, text = finance_desk.post_preview(nums('ids'), nums('exclude'))
-    if not snapshot:
-        return text
+    chosen, held, missing = finance_desk.post_preview(nums('ids'), nums('exclude'))
+    if not chosen:
+        return 'لا توجد مسودات جاهزة للترحيل.' + (f" أرقام غير موجودة أو ليست مسودة: {', '.join(map(str, missing))}" if missing else '')
+    explicit = set(nums('ids'))
+    snapshot = [(r['id'], finance_desk.fingerprint(r), r['id'] in explicit) for r in chosen]
+    chat = CHAT.get()
     token = _pending(c, {'tool': 'finance_post', 'docs': snapshot})
-    return text + f'\n\nللترحيل اكتب: نفذ {token}'
+    if not token or len(token) > 8:
+        return token
+    c.execute("UPDATE whatsapp_voice_pending SET expires_at=NOW()+INTERVAL '60 minutes' WHERE token=%s", (token,))
+    expires = dt.datetime.now(finance_desk.RIYADH) + dt.timedelta(minutes=60)
+    summary = finance_desk.preview_text(chosen, held, missing)
+    if chat and chat[0] and chat[1] and not OFFICE.get():
+        from app.advance_reconcile import send_pdf
+        from app.transport_desk import run_async
+        content = finance_desk.preview_pdf(chosen, held, missing, token, expires)
+        try:
+            sent = run_async(lambda: send_pdf(chat, content, 'Afaq-Posting-Preview.pdf', 'معاينة ترحيل القيود — الرمز في آخر الملف'), timeout=90)
+        except Exception:
+            sent = False
+        if not sent:
+            c.execute('DELETE FROM whatsapp_voice_pending WHERE token=%s', (token,))
+            return summary + '\n⚠️ تعذر إرسال ملف المعاينة، فلم أجهز رمز ترحيل. أعد الطلب بعد دقيقة.'
+        return summary + '\n📎 أرسلت ملف المعاينة بكل القيود (المصدر، الحساب، العملة). رمز «نفذ» في آخر الملف فقط بعد القائمة.'
+    if len(chosen) > 20:
+        c.execute('DELETE FROM whatsapp_voice_pending WHERE token=%s', (token,))
+        return summary + '\nالدفعة أكبر من أن تُعرض هنا بندًا بندًا؛ اطلبها من واتساب (يصلك ملف المعاينة) أو حدد أرقام القيود.'
+    lines = [f"{i}. #{r['id']} {r['name']} | {finance_desk._account(r['kind'])} | {finance_desk.money(r['amount_minor'], r['currency'])} | "
+             f"{r['document_date']} | المصدر {r['source_ref'] or '—'} / {r['source_locator'] or '—'}" for i, r in enumerate(chosen, 1)]
+    return summary + '\n' + '\n'.join(lines) + f'\n\nانقل القائمة كاملة كما هي. بعد مراجعتها، للترحيل: نفذ {token}'
+
+
+def tool_advance_settlement(c, a):
+    from app import advance_reconcile, document_totals, staff_documents
+    chat = CHAT.get()
+    owner = staff_documents.SENDER.get() or (chat[0] if chat else None)
+    if not owner:
+        return 'ما عرفت مين أرسل الملفات؛ أرسلها هنا في واتساب ثم اطلب التسوية.'
+    received = document_totals.parse_amount(a.get('received')) if a.get('received') not in (None, '') else None
+    day = None
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(a.get('day') or '')):
+        day = dt.date.fromisoformat(a['day'])
+    count = int(a['count']) if str(a.get('count') or '').isdigit() else None
+    hours = float(a['hours']) if isinstance(a.get('hours'), (int, float)) and a['hours'] > 0 else None
+    return advance_reconcile.run(owner, received, day, hours, count, chat=chat, who=_member().get('name') or '')
+
+
+def tool_customer_statement(c, a):
+    from app import finance_customer_statement as fcs
+    name = _clean(a.get('customer'), 120)
+    if not name:
+        return 'اذكر اسم العميل.'
+    today = dt.datetime.now(fcs.RIYADH).date()
+    first = today.replace(day=1)
+    start = str(a.get('start') or (first - dt.timedelta(days=1)).replace(day=1))
+    end = str(a.get('end') or (first - dt.timedelta(days=1)))
+    try:
+        return fcs.run(name, start, end, (_clean(a.get('currency'), 3) or 'SAR').upper(), _clean(a.get('owner'), 80) or None, chat=CHAT.get())
+    except Exception as exc:  # statement_data raises HTTPException on inconsistent claim details
+        return 'تعذر إعداد الكشف: ' + str(getattr(exc, 'detail', None) or exc)[:200]
 
 
 def tool_finance_playbook(c, a):

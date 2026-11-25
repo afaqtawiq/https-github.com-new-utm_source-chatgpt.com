@@ -245,68 +245,141 @@ def playbook(topic='', name=''):
 
 
 # ---------- posting (Noura prepares, the manager approves with «نفذ») ----------
+# Owner, 25 Nov 2026: «لا يظهر رمز «نفذ» قبل ما تعرض نورة كل قيد بمصدره وحسابه وعملته، مع الإجماليات منفصلة لكل عملة. وإذا
+# تغيّر قيد أو ظهر تكرار بعد المعاينة، يوقف ترحيله ويطلب مراجعة جديدة.»
+# → the full list goes out as a PDF and the code is printed ONLY inside that PDF, after the last entry and the per-currency
+#   totals. Each entry is fingerprinted at preview time; at «نفذ» every entry is re-checked first and, if any one changed,
+#   left draft status or became a possible duplicate, NOTHING is posted and a new review is required.
+
+import hashlib  # noqa: E402
 
 SPECIAL_KINDS = ('opening_receivable', 'opening_payable', 'receivable_reconciliation')  # need extra acknowledgements in the workspace
+ACCOUNT_AR = {'receivable': 'ذمم مدينة (العملاء)', 'payable': 'ذمم دائنة (الموردون)'}
+FIELDS = ('owner_id', 'counterparty_id', 'kind', 'currency', 'amount_minor', 'document_date', 'source_ref', 'source_locator',
+          'economic_ref', 'invoice_ref', 'customs_ref')
+SELECT = """SELECT d.id, d.status, d.owner_id, d.counterparty_id, d.kind, d.currency, d.amount_minor, d.document_date, d.source_ref,
+    d.source_locator, d.economic_ref, d.invoice_ref, d.customs_ref, p.name, o.name owner_name
+    FROM finance_documents d JOIN finance_party_display p ON p.id=d.counterparty_id JOIN finance_party_display o ON o.id=d.owner_id"""
+DUP_SQL = """SELECT d.id FROM finance_documents d WHERE d.id = ANY(%s) AND EXISTS(
+    SELECT 1 FROM finance_documents o WHERE o.id<>d.id AND o.status NOT IN ('void','reversed')
+    AND o.counterparty_id=d.counterparty_id AND o.kind=d.kind AND o.amount_minor=d.amount_minor AND o.document_date=d.document_date)"""
+
+
+def fingerprint(row):
+    return hashlib.sha256('|'.join(str(row[k]) for k in FIELDS).encode()).hexdigest()[:20]
+
+
+def money(minor, currency):
+    from app.finance_core import display_minor
+    try:
+        return display_minor(minor or 0, currency) + ' ' + currency
+    except ValueError:
+        return f'{(minor or 0) / 100:,.2f} {currency or "؟"}'
+
+
+def _account(kind):
+    from app.finance_core import KINDS
+    side = KINDS.get(kind, ('?', 0))[0]
+    return f"{ACCOUNT_AR.get(side, side)} — {KIND_AR.get(kind, kind)}"
 
 
 def _postable(c):
-    """Open drafts/reviewed documents, split into clean ones and ones held back (possible duplicates, special kinds)."""
-    rows_ = c.execute("""SELECT d.id, d.kind, d.amount_minor, d.document_date, d.counterparty_id, p.name
-        FROM finance_documents d JOIN finance_party_display p ON p.id=d.counterparty_id
-        WHERE d.status IN ('draft','reviewed') ORDER BY d.document_date, d.id""").fetchall()
-    dup_ids = {r['id'] for r in c.execute("""SELECT d.id FROM finance_documents d WHERE d.status IN ('draft','reviewed') AND EXISTS(
-        SELECT 1 FROM finance_documents o WHERE o.id<>d.id AND o.status NOT IN ('void','reversed')
-        AND o.counterparty_id=d.counterparty_id AND o.kind=d.kind AND o.amount_minor=d.amount_minor AND o.document_date=d.document_date)""").fetchall()}
+    rows_ = [dict(r) for r in c.execute(SELECT + " WHERE d.status IN ('draft','reviewed') ORDER BY d.currency, d.document_date, d.id").fetchall()]
+    dup_ids = {r['id'] for r in c.execute(DUP_SQL, ([r['id'] for r in rows_],)).fetchall()} if rows_ else set()
+    # Same party + kind + amount within 60 days on different dates: shown as a warning, not held (could be a recurring fee).
+    near = {r['id'] for r in c.execute("""SELECT d.id FROM finance_documents d WHERE d.status IN ('draft','reviewed') AND EXISTS(
+        SELECT 1 FROM finance_documents o WHERE o.id<>d.id AND o.status NOT IN ('void','reversed') AND o.counterparty_id=d.counterparty_id
+        AND o.kind=d.kind AND o.amount_minor=d.amount_minor AND o.document_date<>d.document_date
+        AND abs(o.document_date - d.document_date) <= 60)""").fetchall()}
     clean, held = [], []
     for r in rows_:
+        r['near'] = r['id'] in near
         if r['kind'] in SPECIAL_KINDS:
             held.append((r, 'رصيد افتتاحي/مطابقة — يُرحّل من شاشة الحسابات'))
         elif r['id'] in dup_ids:
-            held.append((r, 'قد يكون مكرر'))
+            held.append((r, 'تكرار محتمل: نفس الجهة والنوع والمبلغ والتاريخ'))
+        elif not r['currency'] or not r['amount_minor'] or not r['document_date']:
+            held.append((r, 'العملة أو المبلغ أو التاريخ غير مكتمل'))
         else:
             clean.append(r)
     return clean, held
 
 
 def _line(r):
-    return f"#{r['id']} {r['name']} — {KIND_AR.get(r['kind'], r['kind'])} {sar(r['amount_minor'] or 0)} بتاريخ {r['document_date']}"
+    return f"#{r['id']} {r['name']} — {KIND_AR.get(r['kind'], r['kind'])} {money(r['amount_minor'], r['currency'])} بتاريخ {r['document_date']}"
 
 
 def post_preview(ids=None, exclude=None):
-    """Return (snapshot, text). snapshot = [(id, amount_minor)] to post; explicit ids may include held duplicates (manager's call)."""
+    """→ (chosen rows, held [(row, why)], missing ids). Nothing is posted; no code here."""
     ids = {int(i) for i in (ids or [])}
+    skip = {int(i) for i in (exclude or [])}
     with db() as c:
         if not c.execute("SELECT to_regclass('finance_documents') t").fetchone()['t']:
-            return [], 'لا توجد حسابات مسجلة بعد.'
+            return [], [], []
         clean, held = _postable(c)
     if ids:
-        pool = {r['id']: r for r in clean} | {r['id']: r for r, why in held if r['kind'] not in SPECIAL_KINDS}
+        pool = {r['id']: r for r in clean} | {r['id']: r for r, why in held if r['kind'] not in SPECIAL_KINDS and r['amount_minor'] and r['currency']}
         chosen = [pool[i] for i in sorted(ids) if i in pool]
         missing = sorted(ids - set(pool))
         held_out = []
     else:
         chosen, missing, held_out = clean, [], held
-    skip = {int(i) for i in (exclude or [])}
-    if skip:
-        held_out = held_out + [(r, 'استثناه المدير') for r in chosen if r['id'] in skip]
-        chosen = [r for r in chosen if r['id'] not in skip]
-    if not chosen:
-        return [], ('لا توجد مسودات جاهزة للترحيل.' + (f" الأرقام غير موجودة أو مرحّلة: {', '.join(map(str, missing))}" if missing else ''))
-    by_kind = {}
-    for r in chosen:
-        n, s = by_kind.get(r['kind'], (0, 0))
-        by_kind[r['kind']] = (n + 1, s + (r['amount_minor'] or 0))
-    out = [f'📒 جاهز للترحيل ({len(chosen)} قيد):']
-    out += [f'• {n} قيد {KIND_AR.get(k, k)} = {sar(s)}' for k, (n, s) in by_kind.items()]
-    if len(chosen) <= 15:
-        out += ['', *(_line(r) for r in chosen)]
-    if held_out:
-        out += ['', f'⛔ مستثنى من الترحيل ({len(held_out)}):'] + [f'• {_line(r)} — {why}' for r, why in held_out[:20]]
-        out.append('لترحيل قيد منها بعد التأكد اكتب: «نورة رحّلي القيد رقم …».')
+    held_out += [(r, 'استثناه المدير') for r in chosen if r['id'] in skip]
+    chosen = [r for r in chosen if r['id'] not in skip]
+    return chosen, held_out, missing
+
+
+def totals_by_currency(rows_):
+    out = {}
+    for r in rows_:
+        cur = out.setdefault(r['currency'], {})
+        n, s = cur.get(r['kind'], (0, 0))
+        cur[r['kind']] = (n + 1, s + r['amount_minor'])
+    return out
+
+
+def preview_pdf(chosen, held, missing, token, expires):
+    from app.finance_monthly_pdf import Report
+    rep = Report('معاينة ترحيل القيود', f'{len(chosen)} قيد | صدر {dt.datetime.now(RIYADH):%Y-%m-%d %H:%M}')
+    rep.line('راجع كل قيد: المصدر، الحساب، العملة، المبلغ. الرمز في آخر الملف بعد القائمة والإجماليات.', bold=True)
+    rep.rule()
+    from app.finance_pdf_table import table
+    table(rep, ['#', 'رقم القيد', 'الجهة', 'التاريخ', 'الحساب', 'العملة', 'المبلغ', 'المصدر / الموضع', 'فاتورة / بيان', '✓'],
+          [[str(i), '#' + str(r['id']), r['name'], str(r['document_date']), _account(r['kind']), r['currency'], money(r['amount_minor'], r['currency']),
+            f"{r['source_ref'] or '—'} / {r['source_locator'] or '—'}", f"{r['invoice_ref'] or '—'} / {r['customs_ref'] or '—'}",
+            '⚠ مبلغ متكرر' if r.get('near') else '☐'] for i, r in enumerate(chosen, 1)],
+          [.04, .07, .13, .12, .16, .05, .11, .14, .12, .06])
+    if any(r.get('near') for r in chosen):
+        rep.line('⚠ مبلغ متكرر = نفس المبلغ لنفس الجهة خلال 60 يومًا بتاريخ مختلف — تأكد أنه ليس مكررًا قبل الترحيل.', size=9)
+    rep.rule()
+    rep.line('الإجماليات لكل عملة (لا تُجمع العملات معًا)', bold=True, size=13)
+    for cur, kinds in totals_by_currency(chosen).items():
+        rep.line(f"{cur}: " + ' | '.join(f'{KIND_AR.get(k, k)} {n} قيد = {money(s, cur)}' for k, (n, s) in kinds.items()), bold=True)
+    if held:
+        rep.rule()
+        rep.line(f'مستثنى من الترحيل ({len(held)})', bold=True, size=13)
+        for r, why in held:
+            rep.line(f"• {_line(r)} | المصدر {r['source_ref'] or '—'} — {why}", size=9)
     if missing:
-        out.append(f"⚠️ أرقام غير موجودة أو ليست مسودة: {', '.join(map(str, missing))}")
-    out.append('الترحيل يثبت القيود في الذمم والكشوف، والتصحيح بعده يكون بقيد عكسي.')
-    return [(r['id'], r['amount_minor']) for r in chosen], '\n'.join(out)
+        rep.line('أرقام غير موجودة أو ليست مسودة: ' + ', '.join(map(str, missing)), size=9)
+    rep.rule()
+    rep.line(f'بعد مراجعة كل القيود أعلاه، للترحيل اكتب في واتساب: نفذ {token}', bold=True, size=14)
+    rep.line(f'صالح حتى {expires:%H:%M}. أي تعديل أو تكرار يظهر بعد هذه المعاينة يوقف الدفعة كاملة ويطلب معاينة جديدة. التصحيح بعد الترحيل بقيد عكسي.', size=9)
+    return rep.finish()
+
+
+def preview_text(chosen, held, missing):
+    out = [f'📒 معاينة ترحيل: {len(chosen)} قيد']
+    for cur, kinds in totals_by_currency(chosen).items():
+        out.append(f'{cur}: ' + ' | '.join(f'{KIND_AR.get(k, k)} {n} = {money(s, cur)}' for k, (n, s) in kinds.items()))
+    if held:
+        out.append(f'⛔ مستثنى {len(held)} (تكرار محتمل/افتتاحي/ناقص/استثناء المدير) — مذكورة في الملف.')
+    near = sum(1 for r in chosen if r.get('near'))
+    if near:
+        out.append(f'⚠️ {near} قيد بنفس المبلغ لنفس الجهة خلال 60 يوم — معلّمة في الملف.')
+    if missing:
+        out.append('أرقام غير موجودة أو ليست مسودة: ' + ', '.join(map(str, missing)))
+    return '\n'.join(out)
 
 
 def _actor():
@@ -318,28 +391,50 @@ def _actor():
     return row['id'] if row else None
 
 
+def verify(snapshot):
+    """[(id, fingerprint, dup_ok)] → list of problems (empty = everything still exactly as previewed)."""
+    ids = [int(i) for i, _, _ in snapshot]
+    with db() as c:
+        now = {r['id']: dict(r) for r in c.execute(SELECT + ' WHERE d.id = ANY(%s)', (ids,)).fetchall()}
+        dups = {r['id'] for r in c.execute(DUP_SQL, (ids,)).fetchall()}
+    problems = []
+    for doc_id, fp, dup_ok in snapshot:
+        row = now.get(int(doc_id))
+        if not row or row['status'] not in ('draft', 'reviewed'):
+            problems.append(f"#{doc_id}: لم يعد مسودة ({row['status'] if row else 'محذوف'})")
+        elif fingerprint(row) != fp:
+            problems.append(f'#{doc_id}: تغيّر بعد المعاينة (المبلغ/العملة/التاريخ/المصدر/الجهة)')
+        elif int(doc_id) in dups and not dup_ok:
+            problems.append(f'#{doc_id}: ظهر له قيد مطابق بعد المعاينة (تكرار محتمل)')
+    return problems
+
+
 def post_execute(snapshot, approver):
-    """Review + post each document still matching its preview amount. Each one alone: a failure never blocks the rest."""
+    """All-or-nothing gate: if any entry changed since the preview, post NOTHING. Then review + post each one."""
     from app import finance_service as ledger
+    snapshot = [(int(s[0]), s[1], bool(s[2]) if len(s) > 2 else False) for s in snapshot]
+    problems = verify(snapshot)
+    if problems:
+        return ('⛔ أوقفت الترحيل كاملًا — لم يُرحّل أي قيد:\n' + '\n'.join('• ' + p for p in problems[:20]) +
+                '\nاطلب معاينة جديدة: «نورة: رحّلي القيود».')
     actor = _actor()
     if not actor:
         return 'تعذر الترحيل: لا يوجد مستخدم مدير نشط في المنصة.'
-    reason = f'ترحيل بأمر المدير عبر واتساب — نورة ({approver})'
-    done, skipped = [], []
-    for doc_id, amount in snapshot:
-        with db() as c:
-            row = c.execute('SELECT status, amount_minor FROM finance_documents WHERE id=%s', (doc_id,)).fetchone()
-        if not row or row['status'] not in ('draft', 'reviewed') or row['amount_minor'] != amount:
-            skipped.append(f'#{doc_id}: تغيّر أو رُحّل بعد التجهيز')
-            continue
+    reason = f'ترحيل بأمر المدير عبر واتساب بعد معاينة كاملة — نورة ({approver})'
+    done, failed = [], []
+    for doc_id, _, _ in snapshot:
         try:
             ledger.review_document(doc_id, actor, {'confirmation': '1', 'reason': reason})
             ledger.post_document(doc_id, actor, {'confirmation': '1', 'reason': reason})
-            done.append((doc_id, amount))
+            done.append(doc_id)
         except Exception as e:  # HTTPException from finance_service.fail, or a DB conflict
-            skipped.append(f"#{doc_id}: {getattr(e, 'detail', None) or e}")
-    out = [f'✅ رُحّل {len(done)} قيد بقيمة {sar(sum(a or 0 for _, a in done))}.']
-    if skipped:
-        out += [f'⚠️ لم يُرحّل {len(skipped)}:'] + [f'• {s}' for s in skipped[:20]]
+            failed.append(f"#{doc_id}: {getattr(e, 'detail', None) or e}")
+    with db() as c:
+        rows_ = [dict(r) for r in c.execute(SELECT + ' WHERE d.id = ANY(%s)', (done,)).fetchall()] if done else []
+    out = [f'✅ رُحّل {len(done)} قيد.']
+    for cur, kinds in totals_by_currency(rows_).items():
+        out.append(f'{cur}: ' + ' | '.join(f'{KIND_AR.get(k, k)} {n} = {money(s, cur)}' for k, (n, s) in kinds.items()))
+    if failed:
+        out += [f'⚠️ لم يُرحّل {len(failed)}:'] + [f'• {s}' for s in failed[:20]]
     out.append('اكتب «نورة: فحص الحسابات» للتأكد بعد الترحيل.')
     return '\n'.join(out)
