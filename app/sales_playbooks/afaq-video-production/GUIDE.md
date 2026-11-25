@@ -43,6 +43,8 @@ One video = one idea. Short sentences, Saudi business tone or clear Fusha with d
 
 ## 4. Hook bank (Arabic)
 
+- «من مصنع المورد… إلى باب مستودعك» (عرضنا الرئيسي: الاستيراد على سجلنا من الباب إلى الباب)
+- «ما عندك سجل استيراد؟ ولا تعرف تطلع سابر؟ نستورد لك على سجلنا»
 - «شحنتك وصلت الميناء… ومحد يرد عليك؟»
 - «تستورد من الصين؟ هذا اللي لازم تعرفه قبل ما توصل شحنتك»
 - «من الرصيف إلى مستودعك… بخطوة وحدة»
@@ -55,7 +57,8 @@ One video = one idea. Short sentences, Saudi business tone or clear Fusha with d
 
 ## 5. Content series that work for Afaq
 
-1. **رحلة شحنة** — ship → crane → clearance → truck → warehouse (cinematic).
+1. **من الباب إلى الباب (العرض الرئيسي)** — supplier's factory abroad → port → SABER & clearance → truck → the customer's warehouse; "imported on our record, you need no import registration" (cinematic).
+1b. **رحلة شحنة** — ship → crane → clearance → truck → warehouse (cinematic).
 2. **سؤال وجواب** — one customer question per video (SABER, documents, port choice, delivery).
 3. **خلف الكواليس** — real clips from the team at Jeddah Islamic Port / Dammam / Batha (team-filmed).
 4. **قبل/بعد** — "without a clearance partner" vs "with Afaq" (no competitor names).

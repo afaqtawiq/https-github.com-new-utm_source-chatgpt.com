@@ -144,32 +144,37 @@ SYSTEM = """أنت موظف خدمة العملاء على واتساب لمؤس
 
 
 # Import on Afaq's record with SABER issued by Afaq (owner, 24 Nov 2026). Prices exactly as the owner gave them.
-IMPORT_ON_BEHALF = """خدمة الاستيراد على سجل آفاق طويق (اعتمدها المالك 24 نوفمبر 2026):
-- حاليًا كل البضائع الواردة إلى السعودية لا بد لها من شهادات سابر، ولا يوجد تخليص بدون سابر.
-- إذا ما عند العميل طريقة لإصدار سابر: يستورد على سجل شركتنا ونتكفل نحن بإصدار سابر، بالتكاليف التالية:
-  سجل تجاري 800 ريال، سابر 1400 ريال، تخليص 300 ريال، زكاة 2.5% من قيمة الفاتورة، ضريبة القيمة المضافة 15% من قيمة الفاتورة، بالإضافة إلى الرسوم الجمركية حسب البند.
-- عند السؤال عن التخليص بدون سابر أو صعوبة إصدار سابر اذكر هذا الحل بأرقامه كما هي، ثم اطلب نوع البضاعة وقيمة الفاتورة التقريبية لتجهيز العرض."""
+IMPORT_ON_BEHALF = """خدمة الاستيراد على سجل آفاق طويق = خدمة من الباب إلى الباب (اعتمدها المالك 24 و25 نوفمبر 2026):
+- نستلم بضاعة العميل من المورد في بلد المنشأ (الصين، الإمارات، تركيا… أي بلد) ونسلّمها في مستودعه بالسعودية.
+- الاستيراد يكون على سجل شركتنا، ونتكفل نحن بإصدار سابر والتخليص الجمركي والنقل؛ العميل ما يحتاج سجل استيراد ولا يتعامل مع سابر أو الجمارك.
+- حاليًا كل البضائع الواردة إلى السعودية لا بد لها من شهادات سابر، ولا يوجد تخليص بدون سابر — وهذه الخدمة هي الحل لمن ما عنده طريقة لإصدار سابر.
+- التكاليف المعتمدة: سجل تجاري 800 ريال، سابر 1400 ريال، تخليص 300 ريال، زكاة 2.5% من قيمة الفاتورة، ضريبة القيمة المضافة 15% من قيمة الفاتورة، بالإضافة إلى الرسوم الجمركية حسب البند.
+  أجور الشحن من بلد المنشأ والنقل حتى المستودع تُسعّر لكل شحنة (لا تخترع لها رقمًا؛ استعمل فقط أسعار النقل المعتمدة إن انطبقت).
+- اعرضها عند: التخليص بدون سابر أو صعوبة سابر، ومن يسأل عن الاستيراد من الخارج أو «من الباب للباب» أو ما عنده سجل استيراد.
+  اذكر الأرقام كما هي، ثم اطلب: نوع البضاعة، قيمة الفاتورة التقريبية، مدينة/بلد المورد، الوزن أو الحجم (عدد الكراتين أو الحاويات)، ومدينة التسليم."""
 
 _WITHOUT_SABER = re.compile(
     r'(?:without|no|not\s+(?:have|having|requir\w*)|don\W?t\s+have|bypass|skip|avoid)\W+(?:\w+\W+){0,4}saber|'
     r'saber\W+(?:\w+\W+){0,3}(?:not\s+requir|exempt|without)|'
     r'(?:بدون|بلا|من\s*غير|دون|ما\s*عندي|ماعندي|مافي|ما\s*في|ما\s*يحتاج|مايحتاج|ما\s*نقدر\s*نطلع|صعب)\s*(?:\S+\s+){0,3}(?:شهاد[ةه]\s*)?سابر', re.I)
 
-IMPORT_ON_BEHALF_AR = ('حياك الله. حاليًا كل البضائع الواردة إلى السعودية لا بد لها من إصدار شهادات سابر، فما نقدر نخلّص بدون سابر.\n'
-                       'ولو ما عندك طريقة لإصدار سابر، تقدر تستورد على سجل شركتنا ونحن نتكفل بإصدار سابر بالتكاليف التالية:\n'
+IMPORT_ON_BEHALF_AR = ('حياك الله. عندنا خدمة من الباب إلى الباب: نستلم بضاعتك من المورد في بلدها ونسلّمها في مستودعك بالسعودية.\n'
+                       'الاستيراد يكون على سجل شركتنا، ونتكفل نحن بإصدار سابر والتخليص والنقل — لأن كل البضائع الواردة للسعودية حاليًا لا بد لها من شهادات سابر، وما فيه تخليص بدونها.\n'
+                       'التكاليف:\n'
                        '• سجل تجاري: 800 ريال\n• سابر: 1400 ريال\n• تخليص: 300 ريال\n'
                        '• زكاة: 2.5% من قيمة الفاتورة\n• ضريبة القيمة المضافة: 15% من قيمة الفاتورة\n'
-                       '• بالإضافة إلى الرسوم الجمركية حسب البند\n'
-                       'أرسل لنا نوع البضاعة وقيمة الفاتورة التقريبية ونجهز لك العرض. للتواصل: 0507665873')
-IMPORT_ON_BEHALF_EN = ('Good day, and thank you for reaching out. Currently, all goods imported into Saudi Arabia must have SABER '
-                       'certificates, so clearance without SABER is not possible.\n'
-                       'If you have no way to issue SABER, you can import under our company\'s record and we take care of issuing SABER, '
-                       'at the following costs:\n'
+                       '• بالإضافة إلى الرسوم الجمركية حسب البند، وأجور الشحن والنقل حسب الشحنة\n'
+                       'أرسل لنا نوع البضاعة وقيمة الفاتورة التقريبية ومدينة المورد والوزن أو عدد الكراتين ومدينة التسليم، ونجهز لك العرض. للتواصل: 0507665873')
+IMPORT_ON_BEHALF_EN = ('Good day, and thank you for reaching out. We offer a door-to-door service: we collect your goods from the supplier '
+                       'in their country and deliver them to your warehouse in Saudi Arabia.\n'
+                       'The goods are imported under our company\'s record, and we take care of SABER, customs clearance and transport — '
+                       'all goods imported into Saudi Arabia currently require SABER certificates, and clearance without SABER is not possible.\n'
+                       'Costs:\n'
                        '• Commercial registration: SAR 800\n• SABER: SAR 1,400\n• Customs clearance: SAR 300\n'
                        '• Zakat: 2.5% of the invoice value\n• VAT: 15% of the invoice value\n'
-                       '• Plus customs duties according to the HS code\n'
-                       'Please share the type of goods and the approximate invoice value, and we will prepare your quotation. '
-                       'Contact: +966 50 766 5873')
+                       '• Plus customs duties according to the HS code, and freight/transport quoted per shipment\n'
+                       'Please share the type of goods, the approximate invoice value, the supplier\'s city, the weight or number of cartons, '
+                       'and the delivery city, and we will prepare your quotation. Contact: +966 50 766 5873')
 
 
 def import_on_behalf_reply(question):
