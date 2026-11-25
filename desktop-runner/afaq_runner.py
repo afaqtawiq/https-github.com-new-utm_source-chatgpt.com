@@ -367,6 +367,73 @@ class Task:
         path.write_text(text, encoding='utf-8')
         return self.upload(path, page.url)
 
+    FORM_JS = """() => {
+      const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+      const clean = t => (t || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+      const lab = e => { let t = '';
+        if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.innerText; }
+        if (!t && e.closest('label')) t = e.closest('label').innerText;
+        if (!t) t = e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.getAttribute('title') || '';
+        let p = e.parentElement;
+        for (let i = 0; i < 4 && p && !t; i++) {
+          const c = [...p.querySelectorAll('label,span,div,td,th')].find(x => x.children.length === 0 && !x.contains(e)
+                     && x.innerText && x.innerText.trim().length < 60);
+          if (c) t = c.innerText; p = p.parentElement; }
+        return clean(t); };
+      const fields = [];
+      document.querySelectorAll('input,select,textarea,[role=combobox],[contenteditable=true]').forEach(e => {
+        if (!vis(e)) return;
+        const type = e.tagName === 'SELECT' ? 'select' : (e.getAttribute('type') || e.tagName.toLowerCase());
+        if (['hidden', 'password', 'submit', 'button', 'image'].includes(type)) return;
+        const f = {label: lab(e), type, name: e.name || '', id: e.id || '',
+                   required: !!e.required || e.getAttribute('aria-required') === 'true', locked: !!e.disabled || !!e.readOnly};
+        if (e.tagName === 'SELECT') f.options = [...e.options].slice(0, 25).map(x => clean(x.text)).filter(Boolean);
+        fields.push(f); });
+      const buttons = [...document.querySelectorAll('button,[role=button],input[type=submit],a.btn')].filter(vis)
+        .map(b => clean(b.innerText || b.value)).filter(t => t && t.length < 40).slice(0, 50);
+      const heads = [...document.querySelectorAll('h1,h2,h3,h4,h5,legend,[role=tab],.card-header,.panel-heading,.nav-link')]
+        .filter(vis).map(h => clean(h.innerText)).filter(Boolean).slice(0, 50);
+      return {title: document.title, fields: fields.slice(0, 250), buttons, heads}; }"""
+
+    def do_inspect_form(self):
+        """Describe the FASAH screen the manager already opened (e.g. «بيان جديد») WITHOUT navigating, clicking or typing:
+        every visible field (label, type, name, required, drop-down options), buttons, section headings and a screenshot.
+        Field values are never read. Used to build draft filling later (submitting always stays with the manager)."""
+        pages = [p for p in self.context.pages if allowed(p.url, self.domains, self.loopback) and 'zatca' in p.url]
+        if not pages:
+            self.step('ما لقيت صفحة فسح مفتوحة في متصفح الجهاز. افتح شاشة «بيان جديد» ثم أعد الطلب.', False)
+            return False
+        page = pages[-1]
+        self.keep.add(page)
+        if not self.safe_for_screenshot(page):
+            self.step('الصفحة المفتوحة صفحة دخول؛ سجّل الدخول وافتح «بيان جديد» ثم أعد الطلب.', False)
+            return False
+        lines = ['الصفحة: ' + (page.title() or '') + ' — ' + page.url.split('?')[0]]
+        total = 0
+        for frame in page.frames:
+            try:
+                info = frame.evaluate(self.FORM_JS)
+            except Exception:
+                continue
+            if not info.get('fields') and not info.get('buttons'):
+                continue
+            lines.append('')
+            lines.append('== إطار: ' + (frame.url.split('?')[0] or 'الرئيسي'))
+            if info.get('heads'):
+                lines.append('الأقسام: ' + ' | '.join(info['heads']))
+            for f in info.get('fields', []):
+                total += 1
+                lines.append(f"- {f['label'] or '(بدون عنوان)'} | نوع {f['type']} | name={f['name']} id={f['id']}"
+                             + (' | إلزامي' if f.get('required') else '') + (' | مقفل' if f.get('locked') else '')
+                             + (' | خيارات: ' + '، '.join(f['options']) if f.get('options') else ''))
+            if info.get('buttons'):
+                lines.append('الأزرار: ' + ' | '.join(info['buttons']))
+        self.step(f'قرأت هيكل الشاشة المفتوحة: {total} خانة — بدون تعبئة أو ضغط', total > 0, page=page)
+        path = self.dir / 'fasah-form.txt'
+        path.write_text('\n'.join(lines), encoding='utf-8')
+        return self.upload(path, page.url)
+
     def do_fill_form(self):
         page = self.open(self.params['url'])
         self.wait(page, 2)
