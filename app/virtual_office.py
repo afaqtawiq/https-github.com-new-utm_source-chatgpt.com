@@ -37,7 +37,7 @@ DEPARTMENTS = {
                  'وتعطي النتيجة كاملة: التناقضات أولًا (مثل أن المورد مصنع سعودي = شراء محلي لا استيراد)، البند والرسم، سابر، الجهات '
                  'والتصاريح، القيود، المستندات، ثم رسالة جاهزة للعميل. لا تقل «لم أستطع التحقق» قبل أن تشغّل الأداة، وما لم يتأكد '
                  'من مصدر رسمي تضعه تحت «غير متحقق».'),
-        'tools': ('tariff', 'import_requirements', 'saber_exemptions', 'clearance_expert', 'zatca_rules', 'port_storage', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
+        'tools': ('shipment_live', 'tariff', 'import_requirements', 'saber_exemptions', 'clearance_expert', 'zatca_rules', 'port_storage', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
                   'fasah_importer_phone', 'fasah_authorizations', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
                   'runner_deny', 'fasah_billing'),
         'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
@@ -68,7 +68,7 @@ DEPARTMENTS = {
         'name': 'الحاويات ووكلاء الملاحة', 'manager': 'مدير الحاويات والملاحة', 'icon': '🚢',
         'aliases': ('الحاويات', 'الملاحة', 'وكلاء الملاحة', 'الغرامات', 'الشحن البحري'),
         'role': 'تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول.',
-        'tools': ('track_container', 'container_update', 'containers_status', 'container_line', 'line_tariff',
+        'tools': ('shipment_live', 'track_container', 'container_update', 'containers_status', 'container_line', 'line_tariff',
                   'free_time_extension', 'free_time_result', 'detention_claim', 'detention_exposure', 'port_storage',
                   'track_shipment', 'ask_eta_by_email', 'send_email')},
     'finance': {

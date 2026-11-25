@@ -60,6 +60,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'month': {'type': 'string'}}}},
     {'name': 'shipment_workflow', 'description': 'RUN THE CLEARANCE FLOW of one shipment (سيّر الشحنة) end to end: 1) FASAH authorization of the importer (active/expired/none → prepares the request to the importer with our establishment name and licence 2513), 2) documents check (prepares the request for missing ones), 3) arrival date → arrival report to the customer, 4) prints the declaration from FASAH via the desktop runner → sends it to the customer, 5) delivery order request email to the shipping line, 6) the remaining steps to empty-container return. Every send is prepared with a «نفذ CODE». query = bill/container/customer. Use it whenever the manager asks to process/follow a shipment.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
+    {'name': 'shipment_live', 'description': 'PILOT, read-only live card of a shipment: the latest DOCUMENTED status with its source and time (a FASAH status older than the last read is shown as old, never as current), what blocks it, who owns the next step and by when, and team alerts for a documented last free day. query = bill/container/declaration; «مراجعة المستندات» = WhatsApp documents waiting for reference matching. Nothing is sent.',
+     'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
     {'name': 'shipment_file_update', 'description': 'Update a shipment file: stage (booked/arriving/arrived/declared/inspection/duties/released/trucking/delivered/returned/closed or its Arabic label), declaration_no, customer phone/contact_name/email, or a note. query = bill/container/customer.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_no': {'type': 'string'},
         'phone': {'type': 'string'}, 'contact_name': {'type': 'string'}, 'email': {'type': 'string'}, 'note': {'type': 'string'},
@@ -779,6 +781,18 @@ def tool_carrier_invite(c, a):
 def tool_carrier_partners(c, a):
     from app import carrier_partners
     return carrier_partners.status_text()
+
+
+def tool_shipment_live(c, a):
+    from app import shipment_files, shipment_live
+    q = _clean(a.get('query'), 80)
+    if 'مراجع' in q or 'review' in q.lower():
+        return shipment_live.review_text()
+    rows = shipment_files.find(q)
+    if len(rows) != 1:
+        return ('ما لقيت شحنة بهذا المرجع.' if not rows else 'المرجع يطابق أكثر من شحنة: ' + '، '.join(r['bill_no'] for r in rows[:6])
+                + ' — حدّد البوليصة.')
+    return shipment_live.card_text(shipment_live.build(dict(rows[0])))
 
 
 def tool_driver_prices(c, a):

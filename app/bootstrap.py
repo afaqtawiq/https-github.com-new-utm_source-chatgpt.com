@@ -317,3 +317,5 @@ _threading.Thread(target=_shipment_backfill, daemon=True).start()
 from app import clearance_card
 clearance_card.install()
 app.include_router(clearance_card.router)
+from app import shipment_live
+shipment_live.register(app)
