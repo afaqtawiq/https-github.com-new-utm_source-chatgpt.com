@@ -12,6 +12,7 @@ The checklist lives on the shipment file (app.shipment_files) so every employee 
 """
 import datetime as dt
 import json
+import os
 import re
 
 from app.storage import db, utcnow
@@ -194,8 +195,11 @@ def note_document(fields):
     with db() as c:
         rows = c.execute("SELECT * FROM shipment_files WHERE stage NOT IN ('closed','returned')").fetchall()
     party = fields.get('consignee') or fields.get('importer') or fields.get('buyer') or ''
-    targets = [r for r in rows if bill and r['bill_no'] == bill] or \
-        [r for r in rows if party and same_party(party, r['customer'])]
+    targets = [r for r in rows if bill and r['bill_no'] == bill]
+    if not targets and os.getenv('DOC_LINK_BY_NAME', '1') == '1':
+        # Legacy fallback (unchanged in production): a document with no bill is ticked on files of the same customer name.
+        # The live-shipment-file pilot tests it OFF (DOC_LINK_BY_NAME=0): name-only documents go to review instead.
+        targets = [r for r in rows if party and same_party(party, r['customer'])]
     for row in targets[:4]:
         docs = _docs(row)
         if kind not in docs:

@@ -496,27 +496,34 @@ class Task:
         if not target.count():
             target = page.get_by_role('button', name=str(number), exact=True)
         if not target.count():
-            return False
+            return None   # no next-page button: the real end of the list (falsy for the other callers)
         target.last.click(timeout=8000)
         for _ in range(10):
             self.wait(page, 1.5)
             rows = self.list_rows(page)
             if rows and rows[0][0] != before:
                 return True
-        return False
+        return False      # the button exists but the page did not change: the read is NOT complete
 
     def collect(self, page, since=None, pages=3):
         rows, seen = [], set()
-        for number in range(1, max(1, min(int(pages or 3), 20)) + 1):
-            if number > 1 and not self.next_page(page, number):
-                break
+        limit = max(1, min(int(pages or 3), 20))
+        end = 'page_limit'  # coverage proof for the server: did this read reach its date window or the list's last page?
+        for number in range(1, limit + 1):
+            if number > 1:
+                moved = self.next_page(page, number)
+                if not moved:
+                    end = 'last_page' if moved is None else 'page_stuck'
+                    break
             fresh = [r for r in self.list_rows(page) if r[0] not in seen]
             seen.update(r[0] for r in fresh)
             rows += fresh
             if since and fresh:
                 dates = [time.strptime(r[2], '%d/%m/%Y') for r in fresh if r[2]]
                 if dates and min(dates) < time.strptime(since, '%Y-%m-%d'):
+                    end = 'since'
                     break
+        self.coverage = {'end': end, 'complete': end in ('since', 'last_page'), 'since': since or '', 'pages_read': min(number, limit)}
         if since:
             rows = [r for r in rows if not r[2] or time.strptime(r[2], '%d/%m/%Y') >= time.strptime(since, '%Y-%m-%d')]
         return rows
@@ -535,6 +542,10 @@ class Task:
             w.writerow(['رقم المرجع', 'رقم البيان', 'التاريخ', 'التفاصيل'])
             w.writerows(rows)
         self.step(f'قرأت {len(rows)} بيان (قراءة فقط)')
+        cov = dict(getattr(self, 'coverage', {}) or {})
+        if party and not filtered:
+            cov['complete'] = False  # the party filter could not be applied: the read only covers what it happened to see
+        self.result = {'coverage': {**cov, 'which': which, 'party': party or '', 'rows': len(rows)}}
         return self.upload(path, page.url)
 
     AUTH_MENUS = ('التفاويض', 'تفويض المخلص', 'التفويضات')
@@ -963,6 +974,8 @@ def run_one(api, got, context):
     status, result = 'failed', {}
     try:
         status = 'done' if task.run() else 'failed'
+        if status == 'done' and isinstance(getattr(task, 'result', None), dict):
+            result = task.result
     except Stop:
         status, result = 'stopped', {'note': 'أوقفت'}
     except Exception as exc:
