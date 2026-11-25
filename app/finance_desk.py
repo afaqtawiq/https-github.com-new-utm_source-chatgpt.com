@@ -242,3 +242,100 @@ def playbook(topic='', name=''):
     others = [n for n in names[1:]]
     return (f'📘 دليل «{names[0]}»\n' + text + ('\n\nأدلة قريبة: ' + '، '.join(others) if others else '')
             + '\n\nطبّق الدليل على بيانات آفاق الفعلية من أدوات المالية؛ لا تخترع أرقامًا، وأي حكم ضريبي/زكوي يُراجع مع المحاسب القانوني.')
+
+
+# ---------- posting (Noura prepares, the manager approves with «نفذ») ----------
+
+SPECIAL_KINDS = ('opening_receivable', 'opening_payable', 'receivable_reconciliation')  # need extra acknowledgements in the workspace
+
+
+def _postable(c):
+    """Open drafts/reviewed documents, split into clean ones and ones held back (possible duplicates, special kinds)."""
+    rows_ = c.execute("""SELECT d.id, d.kind, d.amount_minor, d.document_date, d.counterparty_id, p.name
+        FROM finance_documents d JOIN finance_party_display p ON p.id=d.counterparty_id
+        WHERE d.status IN ('draft','reviewed') ORDER BY d.document_date, d.id""").fetchall()
+    dup_ids = {r['id'] for r in c.execute("""SELECT d.id FROM finance_documents d WHERE d.status IN ('draft','reviewed') AND EXISTS(
+        SELECT 1 FROM finance_documents o WHERE o.id<>d.id AND o.status NOT IN ('void','reversed')
+        AND o.counterparty_id=d.counterparty_id AND o.kind=d.kind AND o.amount_minor=d.amount_minor AND o.document_date=d.document_date)""").fetchall()}
+    clean, held = [], []
+    for r in rows_:
+        if r['kind'] in SPECIAL_KINDS:
+            held.append((r, 'رصيد افتتاحي/مطابقة — يُرحّل من شاشة الحسابات'))
+        elif r['id'] in dup_ids:
+            held.append((r, 'قد يكون مكرر'))
+        else:
+            clean.append(r)
+    return clean, held
+
+
+def _line(r):
+    return f"#{r['id']} {r['name']} — {KIND_AR.get(r['kind'], r['kind'])} {sar(r['amount_minor'] or 0)} بتاريخ {r['document_date']}"
+
+
+def post_preview(ids=None):
+    """Return (snapshot, text). snapshot = [(id, amount_minor)] to post; explicit ids may include held duplicates (manager's call)."""
+    ids = {int(i) for i in (ids or [])}
+    with db() as c:
+        if not c.execute("SELECT to_regclass('finance_documents') t").fetchone()['t']:
+            return [], 'لا توجد حسابات مسجلة بعد.'
+        clean, held = _postable(c)
+    if ids:
+        pool = {r['id']: r for r in clean} | {r['id']: r for r, why in held if r['kind'] not in SPECIAL_KINDS}
+        chosen = [pool[i] for i in sorted(ids) if i in pool]
+        missing = sorted(ids - set(pool))
+        held_out = []
+    else:
+        chosen, missing, held_out = clean, [], held
+    if not chosen:
+        return [], ('لا توجد مسودات جاهزة للترحيل.' + (f" الأرقام غير موجودة أو مرحّلة: {', '.join(map(str, missing))}" if missing else ''))
+    by_kind = {}
+    for r in chosen:
+        n, s = by_kind.get(r['kind'], (0, 0))
+        by_kind[r['kind']] = (n + 1, s + (r['amount_minor'] or 0))
+    out = [f'📒 جاهز للترحيل ({len(chosen)} قيد):']
+    out += [f'• {n} قيد {KIND_AR.get(k, k)} = {sar(s)}' for k, (n, s) in by_kind.items()]
+    if len(chosen) <= 15:
+        out += ['', *(_line(r) for r in chosen)]
+    if held_out:
+        out += ['', f'⛔ مستثنى من الترحيل ({len(held_out)}):'] + [f'• {_line(r)} — {why}' for r, why in held_out[:20]]
+        out.append('لترحيل قيد منها بعد التأكد اكتب: «نورة رحّلي القيد رقم …».')
+    if missing:
+        out.append(f"⚠️ أرقام غير موجودة أو ليست مسودة: {', '.join(map(str, missing))}")
+    out.append('الترحيل يثبت القيود في الذمم والكشوف، والتصحيح بعده يكون بقيد عكسي.')
+    return [(r['id'], r['amount_minor']) for r in chosen], '\n'.join(out)
+
+
+def _actor():
+    with db() as c:
+        active = c.execute("""SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='is_active'
+            AND table_schema=current_schema()""").fetchone()
+        row = c.execute("SELECT id FROM users WHERE role='admin'" + (" AND is_active::text IN ('1','true','t')" if active else '')
+                        + ' ORDER BY id LIMIT 1').fetchone()
+    return row['id'] if row else None
+
+
+def post_execute(snapshot, approver):
+    """Review + post each document still matching its preview amount. Each one alone: a failure never blocks the rest."""
+    from app import finance_service as ledger
+    actor = _actor()
+    if not actor:
+        return 'تعذر الترحيل: لا يوجد مستخدم مدير نشط في المنصة.'
+    reason = f'ترحيل بأمر المدير عبر واتساب — نورة ({approver})'
+    done, skipped = [], []
+    for doc_id, amount in snapshot:
+        with db() as c:
+            row = c.execute('SELECT status, amount_minor FROM finance_documents WHERE id=%s', (doc_id,)).fetchone()
+        if not row or row['status'] not in ('draft', 'reviewed') or row['amount_minor'] != amount:
+            skipped.append(f'#{doc_id}: تغيّر أو رُحّل بعد التجهيز')
+            continue
+        try:
+            ledger.review_document(doc_id, actor, {'confirmation': '1', 'reason': reason})
+            ledger.post_document(doc_id, actor, {'confirmation': '1', 'reason': reason})
+            done.append((doc_id, amount))
+        except Exception as e:  # HTTPException from finance_service.fail, or a DB conflict
+            skipped.append(f"#{doc_id}: {getattr(e, 'detail', None) or e}")
+    out = [f'✅ رُحّل {len(done)} قيد بقيمة {sar(sum(a or 0 for _, a in done))}.']
+    if skipped:
+        out += [f'⚠️ لم يُرحّل {len(skipped)}:'] + [f'• {s}' for s in skipped[:20]]
+    out.append('اكتب «نورة: فحص الحسابات» للتأكد بعد الترحيل.')
+    return '\n'.join(out)

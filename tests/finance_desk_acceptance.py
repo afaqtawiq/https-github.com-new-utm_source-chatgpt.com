@@ -1,5 +1,5 @@
 """Finance desk upgrade on isolated PostgreSQL with synthetic ledger data (finance_service, the real posting path).
-Read-only analysis: aging (FIFO), monthly overview, control checks, accounting playbooks. Nothing posted by the desk."""
+Aging (FIFO), monthly overview, control checks, playbooks (read-only); posting only through the manager-approved preview."""
 import datetime as dt
 import os
 import secrets
@@ -69,7 +69,7 @@ def run():
     assert 'نسبة التحصيل للشهر: 68%' in ov and 'المصروفات المسجلة: 1,400.00 ريال (2 مصروف' in ov
     assert 'الذمم المدينة الآن: 13,500.00 ريال' in ov and 'بانتظار اعتمادك وترحيلك' in ov
 
-    ck = fd.checks(as_of)
+    ck = fd.checks(as_of)  # (before posting)
     assert 'قد تكون مكررة' in ck and 'مصروفات 700.00' in ck and 'مسودات عمرها أكثر من 7 أيام' not in ck
     later = fd.checks(dt.date(2026, 12, 5))  # the same drafts, 10 days on: now unposted for more than 7 days
     assert 'مسودات عمرها أكثر من 7 أيام' in later and 'سندات قبض: 1 بقيمة 900.00' in later
@@ -92,8 +92,29 @@ def run():
     assert pb.startswith('📘 دليل «saudi-vat-logistics»') and '0%' in pb and 'المحاسب القانوني' in pb
     assert len(fd.index()) == 11
 
+    # Posting: the preview holds back the two identical 700 expenses; the old 900 receipt is clean.
+    snap, text = fd.post_preview()
+    assert [a for _, a in snap] == [90000] and 'قد يكون مكرر' in text and 'مستثنى من الترحيل (2)' in text, text
+    with db() as c:
+        assert c.execute('SELECT COUNT(*) n, COALESCE(SUM(signed_minor),0) s FROM finance_entries').fetchone() == before  # preview posts nothing
+    res = fd.post_execute(snap, 'المدير')
+    assert 'رُحّل 1 قيد بقيمة 900.00' in res, res
+    # Manager picks one of the duplicates by number; the other stays a draft. A stale snapshot (amount changed) is refused.
+    with db() as c:
+        dup = [r['id'] for r in c.execute("SELECT id FROM finance_documents WHERE status='draft' ORDER BY id").fetchall()]
+    snap, text = fd.post_preview([dup[0], 99999])
+    assert [i for i, _ in snap] == [dup[0]] and '99999' in text
+    assert 'تغيّر أو رُحّل' in fd.post_execute([(dup[1], 1)], 'المدير')
+    assert 'رُحّل 1 قيد بقيمة 700.00' in fd.post_execute(snap, 'المدير')
+    with db() as c:
+        assert c.execute("SELECT status FROM finance_documents WHERE id=%s", (dup[1],)).fetchone()['status'] == 'draft'
+    assert fd.post_execute(snap, 'المدير').startswith('✅ رُحّل 0')  # replaying the code never posts twice
+    assert fd.aging(as_of)['عميل متأخر']['total'] == 510000  # the 900 receipt now settles part of B's balance
+
     from app import command_agent, virtual_office
-    for name in ('finance_overview', 'receivables_aging', 'finance_checks', 'finance_playbook'):
+    with patch.object(command_agent, '_member', return_value={'name': 'موظف'}):
+        assert 'المدير فقط' in command_agent.tool_finance_post(None, {})
+    for name in ('finance_post', 'finance_overview', 'receivables_aging', 'finance_checks', 'finance_playbook'):
         assert name in command_agent.HANDLERS and name in virtual_office.DEPARTMENTS['finance']['tools']
 
 
@@ -118,7 +139,7 @@ def main():
     finally:
         with psycopg.connect(url, autocommit=True) as c:
             c.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
-    print('PASS: finance desk — FIFO aging, monthly overview, control checks, 11 accounting playbooks; nothing posted.')
+    print('PASS: finance desk — FIFO aging, monthly overview, control checks, 11 accounting playbooks; posting only after manager approval, duplicates held back.')
 
 
 if __name__ == '__main__':
