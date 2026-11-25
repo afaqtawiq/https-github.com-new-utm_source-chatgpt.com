@@ -141,7 +141,8 @@ def run():
     assert len(upset) == 1 and '966500000055' in upset[0] and 'مهزله' in upset[0] and 'تسليم المحادثة' in upset[0], out
     with db() as c:
         assert c.execute("SELECT reason FROM whatsapp_handoff_summaries WHERE conversation_id='conv-E'").fetchone()['reason'] == 'upset'
-        assert '966500000055' in customer_care.blocked(c)
+        with patch.object(no_wait, 'utcnow', lambda: t2 + dt.timedelta(minutes=3)):  # the hold is judged at the test's clock
+            assert '966500000055' in customer_care.blocked(c)
     assert not [t for t in tick(t2 + dt.timedelta(minutes=4)) if '😠' in t]
 
     # 7) Night: nothing delivered; held upset alert goes out in the morning.
