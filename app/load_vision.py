@@ -288,6 +288,11 @@ async def handle_image(c, payload, sender, index):
         fields = await extract(data, mime)
         if not isinstance(fields, dict):
             fields = {}
+        try:  # photos are kept too (owner, 25 Nov 2026: receipts sent as photos must be totalled later)
+            from app import staff_documents
+            staff_documents.save(sender, staff_documents.filename_of(payload, index), mime, data, fields)
+        except Exception as exc:
+            print('STAFF_IMAGE_SAVE_FAILED', type(exc).__name__, str(exc)[:120], flush=True)
         kind = fields.get('document_kind')
         description = _text(fields.get('summary'), 1600)
         kind_label = {'rate_table': 'جدول أسعار', 'load_listing': 'حمولة',

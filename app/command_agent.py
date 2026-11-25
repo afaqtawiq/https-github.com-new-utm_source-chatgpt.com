@@ -178,6 +178,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'count': {'type': 'integer'}}}},
     {'name': 'carrier_partners', 'description': 'Status of the carrier partnership invitations: invited, replied (with their reply / rates), declined, failed. Use for «حالة الناقلين الشركاء» «مين رد من شركات النقل».',
      'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'documents_total', 'description': 'Total the payment receipts and invoices (photos or PDFs) THIS person sent on WhatsApp and, when an amount received is given, subtract it and give the remainder — one statement with every file, its reference and amount, the total, the amount received and what is left; unreadable amounts, other currencies, supplier goods invoices and duplicate files are listed apart and not counted. Read-only (nothing recorded in finance). Use for «اجمع الإيصالات والفواتير» «جمع لي المبالغ في الإيصالات واخصمها من 41 ألف» «كم الباقي من 41 ألف بعد الفواتير» «ارسل لي كشف المصاريف من الإيصالات». received = the amount received in SAR (e.g. 41000 for «41 ألف»); hours = only files of the last N hours; count = only the last N files. Default: today\'s files.',
+     'input_schema': {'type': 'object', 'properties': {'received': {'type': 'string'}, 'hours': {'type': 'number'}, 'count': {'type': 'integer'}}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'teach_answer', 'description': 'Teach the CUSTOMER agent an approved answer (learning loop). Use for «جواب 2: …» (gap_number from the morning performance report) or «علّم الوكيل: السؤال … الجواب …». answer = exactly what the manager wrote. Needs the manager confirmation code.',
@@ -779,6 +781,18 @@ def tool_carrier_invite(c, a):
 def tool_carrier_partners(c, a):
     from app import carrier_partners
     return carrier_partners.status_text()
+
+
+def tool_documents_total(c, a):
+    from app import document_totals, staff_documents
+    chat = CHAT.get()
+    owner = staff_documents.SENDER.get() or (chat[0] if chat else None)
+    if not owner:
+        return 'ما عرفت مين أرسل الملفات؛ أرسلها هنا في واتساب ثم اطلب المجموع.'
+    received = document_totals.parse_amount(a.get('received')) if a.get('received') not in (None, '') else None
+    count = int(a['count']) if str(a.get('count') or '').isdigit() else None
+    hours = float(a['hours']) if isinstance(a.get('hours'), (int, float)) and a['hours'] > 0 else None
+    return document_totals.run(owner, received, hours, count)
 
 
 def tool_driver_prices(c, a):
