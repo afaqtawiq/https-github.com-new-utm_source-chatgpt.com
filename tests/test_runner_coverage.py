@@ -10,21 +10,24 @@ _spec.loader.exec_module(rn)
 
 class FakeList:
     """pages: list of row lists; rows are (ref, number, 'dd/mm/yyyy', details)."""
-    def __init__(self, pages):
-        self.pages, self.at = pages, 0
+    def __init__(self, pages, stuck_at=()):
+        self.pages, self.at, self.stuck_at = pages, 0, set(stuck_at)
 
     def rows(self, _page):
         return self.pages[self.at]
 
     def next_page(self, _page, number):
+        """Real runner contract: True = moved, None = no next button (end of list), False = button but page unchanged."""
+        if number - 1 in self.stuck_at:
+            return False
         if number - 1 < len(self.pages):
             self.at = number - 1
             return True
-        return False
+        return None
 
 
-def run(pages, since, limit):
-    fake = FakeList(pages)
+def run(pages, since, limit, stuck_at=()):
+    fake = FakeList(pages, stuck_at)
     task = rn.Task.__new__(rn.Task)
     task.list_rows, task.next_page = fake.rows, fake.next_page
     rows = rn.Task.collect(task, None, since, limit)
@@ -62,3 +65,37 @@ def test_party_read_whose_filter_failed_is_never_complete(tmp_path):
     assert rn.Task.do_fasah_declarations(task) is True
     cov = task.result['coverage']
     assert cov['complete'] is False and cov['party'] == 'سلة' and cov['which'] == 'import'
+
+
+def test_next_button_present_but_page_unchanged_is_incomplete():
+    # page 2 exists (button present) but the list did not move after the click → never «last page».
+    rows, cov = run([page(1, 24), page(2, 20), page(3, 3)], '2026-11-04', 20, stuck_at={1})
+    assert cov['complete'] is False and cov['end'] == 'page_stuck' and len(rows) == 3
+
+
+def test_next_page_contract_on_a_real_page_object():
+    """next_page itself: no button → None; button clicked but rows unchanged → False; rows changed → True."""
+    class Loc:
+        def __init__(self, n):
+            self.n, self.last = n, self
+        def count(self):
+            return self.n
+        def get_by_text(self, *a, **k):
+            return self
+        def click(self, **k):
+            pass
+    class Page:
+        def __init__(self, buttons):
+            self.buttons = buttons
+        def locator(self, *_):
+            return Loc(self.buttons)
+        def get_by_role(self, *a, **k):
+            return Loc(self.buttons)
+    task = rn.Task.__new__(rn.Task)
+    task.wait = lambda *a: None
+    task.list_rows = lambda p: [('R1', '1', '24/11/2026', 'x')]
+    assert rn.Task.next_page(task, Page(0), 2) is None
+    assert rn.Task.next_page(task, Page(1), 2) is False
+    seq = iter([[('R1',)], [('R2',)]])
+    task.list_rows = lambda p: next(seq)
+    assert rn.Task.next_page(task, Page(1), 2) is True

@@ -29,7 +29,7 @@ from app.storage import db, utcnow
 
 RIYADH = dt.timezone(dt.timedelta(hours=3))
 FRESH_HOURS = 6          # FASAH is read every 2 h (7:00–23:00); older than this is not «current»
-READ_GRACE_MIN = 30      # a declaration missing from a later successful read is stale too
+READ_GRACE_MIN = 2       # a read that finished after the declaration's last sighting (ingest stamps seen_at after the read)
 ALERT_DAYS = 2           # team alert from 2 days before the documented last free day
 
 
@@ -117,12 +117,14 @@ def fasah_evidence(c, file, now):
     from app.fasah_tracking import LABELS
     row = dict(row)
     age_h = (now - row['seen_at']).total_seconds() / 3600
-    fresh = age_h <= FRESH_HOURS
-    proof = covering_reads(c, row, row['seen_at'] + dt.timedelta(minutes=READ_GRACE_MIN)) if not fresh else []
-    if fresh:
-        why, state = '', 'current'
-    elif proof:
+    # A later complete read of the same scope without this declaration wins over age: even a status seen 1 hour ago
+    # is then only «آخر حالة معروفة».
+    proof = covering_reads(c, row, row['seen_at'] + dt.timedelta(minutes=READ_GRACE_MIN))
+    fresh = age_h <= FRESH_HOURS and not proof
+    if proof:
         why, state = f'لم يظهر في قراءة كاملة لفسح تشمل نطاقه ({_when(proof[0])})', 'missing'
+    elif fresh:
+        why, state = '', 'current'
     else:
         why, state = 'تعذر التحقق: لا توجد قراءة كاملة أحدث تشمل هذا البيان', 'unverified'
     return {'stage': row['stage'], 'label': LABELS.get(row['stage'], row['details'] or row['stage']), 'number': row['number'],

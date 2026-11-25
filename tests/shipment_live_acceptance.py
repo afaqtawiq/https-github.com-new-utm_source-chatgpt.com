@@ -137,7 +137,25 @@ def run():
         Path(os.environ['PREVIEW_OUT']).with_suffix('.txt').write_text(
             '\n\n'.join(sl.card_text(k) for k in ordered) + '\n\n' + rtext, encoding='utf-8')
 
-    # 6) Legacy behaviour in production is unchanged (flag default = on): the name fallback still ticks files.
+    # 6) A FRESH status (ANONBL002, seen 08:30 today) loses «current» when a later complete read of the same scope
+    #    (import, window 04/11+, no importer filter) finished at 08:50 without it — even though it is < 6 hours old.
+    with db() as c:
+        c.execute("DELETE FROM runner_tasks WHERE finished_at=%s", (fx.COVERING_READ[0],))
+        add_read(c, fx.t(25, 8, 50), {'which': 'import', 'since': '2026-11-04', 'pages': 20},
+                 {'complete': False, 'end': 'page_stuck', 'which': 'import', 'party': '', 'since': '2026-11-04'})
+    k2 = sl.build(dict(sl_row('ANONBL002')), fx.NOW)
+    assert k2['stale_fasah'] is None and k2['source'] == 'فسح — قراءة جهاز العمل'       # a stuck (incomplete) read proves nothing
+    with db() as c:
+        add_read(c, fx.t(25, 8, 55), {'which': 'import', 'since': '2026-11-04', 'pages': 20},
+                 {'complete': True, 'end': 'last_page', 'which': 'import', 'party': '', 'since': '2026-11-04'})
+    k2 = sl.build(dict(sl_row('ANONBL002')), fx.NOW)
+    assert k2['stale_fasah']['state'] == 'missing' and not k2['stale_fasah']['fresh']
+    assert 'لم يظهر في قراءة كاملة لفسح تشمل نطاقه (25/11/2026 08:55)' in k2['stale_fasah']['why_stale']
+    assert k2['source'] != 'فسح — قراءة جهاز العمل' and 'بانتظار سداد الرسوم الجمركية (بيان' not in k2['status']
+    assert 'آخر حالة معروفة في فسح: بانتظار سداد الرسوم الجمركية — 25/11/2026 08:30' in sl.card_text(k2)
+    assert snapshot() == before
+
+    # 7) Legacy behaviour in production is unchanged (flag default = on): the name fallback still ticks files.
     assert shipment_workflow.note_document(name_doc)
     from app import command_agent, virtual_office
     assert 'shipment_live' in command_agent.HANDLERS and 'shipment_live' in virtual_office.DEPARTMENTS['clearance']['tools']

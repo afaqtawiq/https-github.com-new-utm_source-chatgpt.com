@@ -496,23 +496,25 @@ class Task:
         if not target.count():
             target = page.get_by_role('button', name=str(number), exact=True)
         if not target.count():
-            return False
+            return None   # no next-page button: the real end of the list (falsy for the other callers)
         target.last.click(timeout=8000)
         for _ in range(10):
             self.wait(page, 1.5)
             rows = self.list_rows(page)
             if rows and rows[0][0] != before:
                 return True
-        return False
+        return False      # the button exists but the page did not change: the read is NOT complete
 
     def collect(self, page, since=None, pages=3):
         rows, seen = [], set()
         limit = max(1, min(int(pages or 3), 20))
         end = 'page_limit'  # coverage proof for the server: did this read reach its date window or the list's last page?
         for number in range(1, limit + 1):
-            if number > 1 and not self.next_page(page, number):
-                end = 'last_page'
-                break
+            if number > 1:
+                moved = self.next_page(page, number)
+                if not moved:
+                    end = 'last_page' if moved is None else 'page_stuck'
+                    break
             fresh = [r for r in self.list_rows(page) if r[0] not in seen]
             seen.update(r[0] for r in fresh)
             rows += fresh
