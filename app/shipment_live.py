@@ -59,16 +59,51 @@ def _when(t):
 
 # ---------- evidence ----------
 
-def last_fasah_read(c):
+def _declared(value):
+    for fmt in ('%d/%m/%Y', '%Y-%m-%d'):
+        try:
+            return dt.datetime.strptime(str(value or '').strip(), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def covering_reads(c, row, after):
+    """Successful, COMPLETE FASAH list reads after `after` whose scope includes this declaration: same list (import/
+    export), date window reaching its declaration date, and no importer filter other than its own. A read of other
+    shipments (another importer's filtered list), a read that stopped at its page limit, or a read with no coverage
+    proof (older runner) never counts."""
     if not _has(c, 'runner_tasks'):
-        return None
-    row = c.execute("""SELECT MAX(COALESCE(finished_at, created_at)) t FROM runner_tasks
-        WHERE kind='fasah_declarations' AND status='done'""").fetchone()
-    return row['t'] if row else None
+        return []
+    declared = _declared(row.get('declared_on'))
+    party = str(row.get('party') or '')
+    out = []
+    for t in c.execute("""SELECT id, params_json, result_json, COALESCE(finished_at, created_at) AS at FROM runner_tasks
+            WHERE kind='fasah_declarations' AND status='done' AND COALESCE(finished_at, created_at) > %s
+            ORDER BY COALESCE(finished_at, created_at) DESC""", (after,)).fetchall():
+        try:
+            params, res = json.loads(t['params_json'] or '{}'), json.loads(t['result_json'] or '{}')
+        except ValueError:
+            continue
+        cov = res.get('coverage') if isinstance(res, dict) else None
+        if not isinstance(cov, dict) or cov.get('complete') is not True:
+            continue
+        if (cov.get('which') or params.get('which') or 'import') != row['kind']:
+            continue
+        read_party = str(cov.get('party') or params.get('party') or '')
+        if read_party and read_party not in party:
+            continue
+        since = _declared(cov.get('since') or params.get('since'))
+        if since and (declared is None or declared < since):
+            continue
+        out.append(t['at'])
+    return out
 
 
 def fasah_evidence(c, file, now):
-    """The FASAH row for this shipment (by declaration number, else by the bill as its reference) with freshness."""
+    """The FASAH row for this shipment (by declaration number, else by the bill as its reference) with its state:
+    current (seen in a read within FRESH_HOURS), missing (absent from a later complete read covering it) or
+    unverified (old, and no later complete read covers it) — the last two are shown only as «آخر حالة معروفة»."""
     if not _has(c, 'fasah_status'):
         return None
     row = None
@@ -80,14 +115,19 @@ def fasah_evidence(c, file, now):
     if not row:
         return None
     from app.fasah_tracking import LABELS
-    last_read = last_fasah_read(c)
+    row = dict(row)
     age_h = (now - row['seen_at']).total_seconds() / 3600
-    missing_from_read = bool(last_read and row['seen_at'] < last_read - dt.timedelta(minutes=READ_GRACE_MIN))
-    fresh = age_h <= FRESH_HOURS and not missing_from_read
+    fresh = age_h <= FRESH_HOURS
+    proof = covering_reads(c, row, row['seen_at'] + dt.timedelta(minutes=READ_GRACE_MIN)) if not fresh else []
+    if fresh:
+        why, state = '', 'current'
+    elif proof:
+        why, state = f'لم يظهر في قراءة كاملة لفسح تشمل نطاقه ({_when(proof[0])})', 'missing'
+    else:
+        why, state = 'تعذر التحقق: لا توجد قراءة كاملة أحدث تشمل هذا البيان', 'unverified'
     return {'stage': row['stage'], 'label': LABELS.get(row['stage'], row['details'] or row['stage']), 'number': row['number'],
             'seen_at': row['seen_at'], 'changed_at': row['changed_at'], 'duties_since': row.get('duties_since'),
-            'fresh': fresh, 'why_stale': ('لم يظهر في آخر قراءة لفسح (' + _when(last_read) + ')') if missing_from_read
-            else (f'آخر ظهور في فسح قبل {int(age_h)} ساعة' if not fresh else '')}
+            'fresh': fresh, 'state': state, 'why_stale': why}
 
 
 def tracking_evidence(c, file):
@@ -163,7 +203,7 @@ def build(file, now=None):
     # 2) what blocks it, 3) who owns the next step and by when (only from documented facts).
     blocker, owner, due = None, None, None
     if stale:
-        blocker = 'حالة فسح غير محدّثة — ' + stale['why_stale']
+        blocker = ('البيان غاب عن قراءة فسح الكاملة — ' if stale['state'] == 'missing' else 'حالة فسح غير مؤكدة — ') + stale['why_stale']
         owner, due = 'فيصل (التخليص)', 'اليوم — قراءة فسح جديدة قبل أي إبلاغ'
     elif fasah and fasah['stage'] == 'duties_due':
         since = fasah.get('duties_since') or fasah['changed_at']
@@ -217,7 +257,7 @@ def card_text(k):
              f"📍 آخر حالة موثّقة: {k['status']}", f"   المصدر: {k['source']} — {_when(k['at'])}"]
     if k['stale_fasah']:
         s = k['stale_fasah']
-        lines.append(f"⚠️ آخر حالة معروفة في فسح (قديمة، ليست الحالة الحالية): {s['label']} — {_when(s['seen_at'])}")
+        lines.append(f"⚠️ آخر حالة معروفة في فسح: {s['label']} — {_when(s['seen_at'])} (ليست الحالة الحالية: {s['why_stale']})")
     lines.append('⛔ الموقف: ' + (k['blocker'] or 'لا يوجد عائق موثّق'))
     lines.append(f"➡️ الخطوة الجاية: {k['owner']} — الموعد: {k['due']}")
     for a in k['alerts']:
@@ -241,51 +281,64 @@ def refs_of(fields):
     return {'bill': sorted(bills), 'declaration': sorted(decls), 'container': sorted(boxes)}
 
 
-def candidates(c, refs):
-    """{bill_no: [how matched]} — every shipment any reference points to."""
-    found = {}
-    for b in refs['bill']:
-        for r in c.execute('SELECT bill_no FROM shipment_files WHERE bill_no=%s', (b,)).fetchall():
-            found.setdefault(r['bill_no'], []).append(('البوليصة', b))
-    for d in refs['declaration']:
-        for r in c.execute('SELECT bill_no FROM shipment_files WHERE declaration_no=%s', (d,)).fetchall():
-            found.setdefault(r['bill_no'], []).append(('رقم البيان', d))
+NAME_KEYS = ('consignee', 'importer', 'buyer', 'customer', 'party')
+REF_AR = {'bill': 'البوليصة', 'declaration': 'رقم البيان', 'container': 'الحاوية'}
+
+
+def resolve(c, kind, value):
+    """The set of shipments one reference points to."""
+    out = set()
+    if kind == 'bill':
+        out |= {r['bill_no'] for r in c.execute('SELECT bill_no FROM shipment_files WHERE bill_no=%s', (value,)).fetchall()}
+    elif kind == 'declaration':
+        out |= {r['bill_no'] for r in c.execute('SELECT bill_no FROM shipment_files WHERE declaration_no=%s', (value,)).fetchall()}
         if _has(c, 'fasah_status'):
-            for r in c.execute('''SELECT f.bill_no FROM fasah_status s JOIN shipment_files f
-                    ON upper(regexp_replace(s.ref,'[^A-Za-z0-9]','','g'))=f.bill_no WHERE s.number=%s''', (d,)).fetchall():
-                found.setdefault(r['bill_no'], []).append(('رقم البيان', d))
-    for box in refs['container']:
-        for r in c.execute('SELECT bill_no FROM shipment_files WHERE containers LIKE %s', ('%' + box + '%',)).fetchall():
-            found.setdefault(r['bill_no'], []).append(('الحاوية', box))
-    return found
+            out |= {r['bill_no'] for r in c.execute("""SELECT f.bill_no FROM fasah_status s JOIN shipment_files f
+                ON upper(regexp_replace(s.ref,'[^A-Za-z0-9]','','g'))=f.bill_no WHERE s.number=%s""", (value,)).fetchall()}
+    elif kind == 'container':
+        out |= {r['bill_no'] for r in c.execute('SELECT bill_no FROM shipment_files WHERE containers LIKE %s', ('%' + value + '%',)).fetchall()}
+    return out
+
+
+def decide(c, refs, fields):
+    """(bill, how, [bill]) only when EVERY reference on the document points to the same single shipment;
+    else (None, reason, candidates). A customer name alone is never a reference."""
+    pairs = [(k, v) for k, vs in refs.items() for v in vs]
+    if not pairs:
+        named = any(str((fields or {}).get(k) or '').strip() for k in NAME_KEYS)
+        return None, ('name_only' if named else 'no_reference'), []
+    sets = [(k, v, resolve(c, k, v)) for k, v in pairs]
+    every = set().union(*(x for _, _, x in sets))
+    if any(not x for _, _, x in sets):
+        return None, 'unknown_reference', sorted(every)
+    if len(every) != 1:
+        return None, 'ambiguous', sorted(every)
+    bill = next(iter(every))
+    return bill, ' + '.join(sorted({REF_AR[k] for k, _, _ in sets})), [bill]
 
 
 def link_document(doc_id, fields):
-    """Exact, unique reference → linked; otherwise → review. Returns ('linked', bill) or ('review', reason)."""
+    """All references agree on one shipment → linked; otherwise → review. Returns ('linked', bill) or ('review', reason)."""
     init()
     refs = refs_of(fields)
     with db() as c:
-        if c.execute('SELECT 1 FROM shipment_live_links WHERE doc_id=%s', (doc_id,)).fetchone():
-            return 'linked', c.execute('SELECT bill_no FROM shipment_live_links WHERE doc_id=%s', (doc_id,)).fetchone()['bill_no']
-        if not any(refs.values()):
-            reason, found = 'no_reference', {}
-        else:
-            found = candidates(c, refs)
-            reason = None if len(found) == 1 else ('ambiguous' if found else 'unknown_reference')
-        if reason is None:
-            bill, how = next(iter(found.items()))
-            c.execute('''INSERT INTO shipment_live_links(doc_id,bill_no,matched_by,matched_value,created_at) VALUES(%s,%s,%s,%s,%s)
-                ON CONFLICT(doc_id) DO NOTHING''', (doc_id, bill, how[0][0], how[0][1], utcnow()))
+        done = c.execute('SELECT bill_no FROM shipment_live_links WHERE doc_id=%s', (doc_id,)).fetchone()
+        if done:
+            return 'linked', done['bill_no']
+        bill, how, cands = decide(c, refs, fields)
+        if bill:
+            c.execute("""INSERT INTO shipment_live_links(doc_id,bill_no,matched_by,matched_value,created_at) VALUES(%s,%s,%s,%s,%s)
+                ON CONFLICT(doc_id) DO NOTHING""", (doc_id, bill, how, json.dumps(refs, ensure_ascii=False), utcnow()))
             c.execute('DELETE FROM shipment_live_review WHERE doc_id=%s', (doc_id,))
             return 'linked', bill
-        c.execute('''INSERT INTO shipment_live_review(doc_id,reason,refs_json,candidates_json,created_at) VALUES(%s,%s,%s,%s,%s)
-            ON CONFLICT(doc_id) DO UPDATE SET reason=EXCLUDED.reason, refs_json=EXCLUDED.refs_json, candidates_json=EXCLUDED.candidates_json''',
-                  (doc_id, reason, json.dumps(refs, ensure_ascii=False), json.dumps(sorted(found)), utcnow()))
-        return 'review', reason
+        c.execute("""INSERT INTO shipment_live_review(doc_id,reason,refs_json,candidates_json,created_at) VALUES(%s,%s,%s,%s,%s)
+            ON CONFLICT(doc_id) DO UPDATE SET reason=EXCLUDED.reason, refs_json=EXCLUDED.refs_json, candidates_json=EXCLUDED.candidates_json""",
+                  (doc_id, how, json.dumps(refs, ensure_ascii=False), json.dumps(cands), utcnow()))
+        return 'review', how
 
 
 REASON_AR = {'no_reference': 'لا يحمل رقم بوليصة أو بيان أو حاوية', 'ambiguous': 'المراجع تشير لأكثر من شحنة',
-             'unknown_reference': 'المرجع لا يطابق أي شحنة مسجلة'}
+             'unknown_reference': 'فيه مرجع لا يطابق أي شحنة مسجلة', 'name_only': 'ما فيه إلا اسم العميل — لا يُربط بالاسم'}
 
 
 def link_recent(hours=72):
@@ -370,7 +423,7 @@ def page_html(cards, review='', title='ملف حي لكل شحنة — تجرب�
         if k['stale_fasah']:
             s = k['stale_fasah']
             body.append(f'<div class="stale">⚠️ آخر حالة معروفة في فسح: {e(s["label"])} — {e(_when(s["seen_at"]))}<br>'
-                        f'قديمة ولا تُعرض كحالة حالية ({e(s["why_stale"])})</div>')
+                        f'ليست الحالة الحالية — {e(s["why_stale"])}</div>')
         body.append(f'<div class="row"><span class="lbl">الموقف:</span> {e(k["blocker"] or "لا يوجد عائق موثّق")}</div>')
         body.append(f'<div class="row"><span class="lbl">الخطوة الجاية:</span> {e(k["owner"])}<br><span class="lbl">الموعد:</span> {e(k["due"])}</div>')
         for a in k['alerts']:

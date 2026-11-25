@@ -131,7 +131,7 @@ jobs:
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: pip install -r desktop-runner/requirements.txt && python -m playwright install --with-deps chromium
-      - run: python -m pytest tests/test_agent_runner.py tests/test_runner_client.py -q
+      - run: python -m pytest tests/test_agent_runner.py tests/test_runner_client.py tests/test_runner_coverage.py -q
       - run: python tests/runner_e2e_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test

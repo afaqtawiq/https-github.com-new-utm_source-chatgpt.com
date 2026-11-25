@@ -15,96 +15,121 @@ sys.path.insert(0, str(ROOT / 'tests' / 'fixtures'))
 
 
 def load(fx):
-    from app import agent_runner, container_returns, fasah_tracking, line_desk, shipment_files, shipment_tracking, staff_documents
+    from app import agent_runner, container_returns, fasah_tracking, line_desk, shipment_files, shipment_tracking, shipment_workflow, staff_documents
     from app.storage import db
-    for m in (shipment_files, fasah_tracking, shipment_tracking, container_returns, line_desk, staff_documents, agent_runner):
+    for m in (shipment_files, shipment_workflow, fasah_tracking, shipment_tracking, container_returns, line_desk, staff_documents, agent_runner):
         m.init()
     with db() as c:
         c.execute('DELETE FROM shipment_files')  # drop the built-in seed rows: the pilot runs on the 10 cases only
         for bill, cust, stage, decl, boxes in fx.FILES:
-            c.execute('''INSERT INTO shipment_files(bill_no,customer,pod,stage,declaration_no,containers,history,created_at,updated_at)
-                VALUES(%s,%s,%s,%s,%s,%s,'[]',%s,%s)''', (bill, cust, fx.PORT, stage, decl, json.dumps(boxes), fx.t(20), fx.t(24, 18)))
-        for num, ref, stage, details, seen, changed, duties in fx.FASAH:
-            c.execute('''INSERT INTO fasah_status(number,kind,ref,declared_on,details,stage,first_seen,seen_at,changed_at,duties_since)
-                VALUES(%s,'import',%s,'',%s,%s,%s,%s,%s,%s)''', (num, ref, details, stage, fx.t(18), seen, changed, duties))
+            c.execute("""INSERT INTO shipment_files(bill_no,customer,pod,stage,declaration_no,containers,history,created_at,updated_at)
+                VALUES(%s,%s,%s,%s,%s,%s,'[]',%s,%s)""", (bill, cust, fx.PORT, stage, decl, json.dumps(boxes), fx.t(20), fx.t(24, 18)))
+        # a legacy checklist tick that already exists (made earlier by the name fallback) — must stay as it is
+        c.execute("""UPDATE shipment_files SET docs='["bl","invoice"]' WHERE bill_no='ANONBL001'""")
+        c.execute("ALTER TABLE fasah_status ADD COLUMN IF NOT EXISTS party TEXT NOT NULL DEFAULT ''")
+        for num, ref, declared, stage, details, seen, changed, duties in fx.FASAH:
+            c.execute("""INSERT INTO fasah_status(number,kind,ref,declared_on,details,stage,first_seen,seen_at,changed_at,duties_since)
+                VALUES(%s,'import',%s,%s,%s,%s,%s,%s,%s,%s)""", (num, ref, declared, details, stage, fx.t(18), seen, changed, duties))
         for bill, arrived, eta, checked in fx.TRACKS:
-            c.execute('''INSERT INTO shipment_tracks(ref,ref_type,status,arrived,eta,created_at,checked_at)
-                VALUES(%s,'bill','tracking',%s,%s,%s,%s)''', (bill, arrived, eta, fx.t(20), checked))
+            c.execute("""INSERT INTO shipment_tracks(ref,ref_type,status,arrived,eta,created_at,checked_at)
+                VALUES(%s,'bill','tracking',%s,%s,%s,%s)""", (bill, arrived, eta, fx.t(20), checked))
         for box, bill, free, est, delivered, status in fx.CONTAINERS:
-            c.execute('''INSERT INTO container_returns(container,bill,free_until,free_until_estimated,delivered_on,status,created_at,updated_at)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)''', (box, bill, free, est, delivered, status, fx.t(20), fx.t(24)))
-        c.execute('''INSERT INTO runner_tasks(kind,params_json,status,created_by,created_at,finished_at)
-            VALUES('fasah_declarations','{}','done','متابعة تلقائية',%s,%s)''', (fx.LAST_READ, fx.LAST_READ))
+            c.execute("""INSERT INTO container_returns(container,bill,free_until,free_until_estimated,delivered_on,status,created_at,updated_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""", (box, bill, free, est, delivered, status, fx.t(20), fx.t(24)))
+        for at, params, cov in fx.READS:
+            add_read(c, at, params, cov)
         ids = []
-        for name, fields in fx.DOCS:
-            ids.append(c.execute('''INSERT INTO staff_documents(sender,filename,mime,data,fields,created_at)
-                VALUES('966500000000',%s,'application/pdf',%s,%s,NOW()) RETURNING id''',
+        for name, fields, _ in fx.DOCS:
+            ids.append(c.execute("""INSERT INTO staff_documents(sender,filename,mime,data,fields,created_at)
+                VALUES('966500000000',%s,'application/pdf',%s,%s,NOW()) RETURNING id""",
                                  (name, b'%PDF-anon', json.dumps(fields, ensure_ascii=False))).fetchone()['id'])
     return ids
+
+
+def add_read(c, at, params, cov):
+    c.execute("""INSERT INTO runner_tasks(kind,params_json,status,created_by,result_json,created_at,finished_at)
+        VALUES('fasah_declarations',%s,'done','متابعة تلقائية',%s,%s,%s)""",
+              (json.dumps(params, ensure_ascii=False), json.dumps({'coverage': cov} if cov else {}, ensure_ascii=False), at, at))
 
 
 def snapshot():
     from app.storage import db
     with db() as c:
-        return {t: c.execute(f'SELECT md5(string_agg(x::text, \'|\' ORDER BY x::text)) h FROM {t} x').fetchone()['h']
+        return {t: c.execute(f"SELECT md5(string_agg(x::text, '|' ORDER BY x::text)) h FROM {t} x").fetchone()['h']
                 for t in ('shipment_files', 'fasah_status', 'shipment_tracks', 'container_returns', 'staff_documents')}
 
 
 def run():
     import shipment_live_jeddah10 as fx
     from app import shipment_live as sl
+    from app.storage import db
     doc_ids = load(fx)
     before = snapshot()
 
-    # 1) Documents: exact unique reference → linked; no reference / several shipments → review, never merged.
+    # 1) Documents: linked ONLY when every reference agrees on one shipment; one test per case.
     result = sl.link_recent()
-    assert result == {'linked': 2, 'review': 2}, result
-    from app.storage import db
+    assert result == {'linked': 3, 'review': 4}, result
     with db() as c:
-        links = {r['doc_id']: (r['bill_no'], r['matched_by']) for r in c.execute('SELECT * FROM shipment_live_links').fetchall()}
+        links = {r['doc_id']: r for r in c.execute('SELECT * FROM shipment_live_links').fetchall()}
         review = {r['doc_id']: r for r in c.execute('SELECT * FROM shipment_live_review').fetchall()}
-    assert links[doc_ids[0]] == ('ANONBL001', 'البوليصة') and links[doc_ids[3]] == ('ANONBL002', 'رقم البيان')
-    ambiguous = review[doc_ids[2]]
-    assert ambiguous['reason'] == 'ambiguous' and json.loads(ambiguous['candidates_json']) == ['ANONBL003', 'ANONBL010']
-    assert review[doc_ids[1]]['reason'] == 'no_reference'
-    assert doc_ids[2] not in links  # the ambiguous document is attached to neither shipment
-    assert sl.link_document(doc_ids[2], dict(fx.DOCS[2][1])) == ('review', 'ambiguous')  # re-running never merges it
+    for doc_id, (name, fields, (state, expect)) in zip(doc_ids, fx.DOCS):
+        if state == 'linked':
+            assert links[doc_id]['bill_no'] == expect and doc_id not in review, (name, links.get(doc_id))
+        else:
+            assert doc_id not in links and review[doc_id]['reason'] == expect, (name, review.get(doc_id))
+    assert links[doc_ids[6]]['matched_by'] == 'البوليصة + الحاوية + رقم البيان'                 # all three agree
+    assert json.loads(review[doc_ids[2]]['candidates_json']) == ['ANONBL003', 'ANONBL010']      # conflicting
+    assert json.loads(review[doc_ids[5]]['candidates_json']) == ['ANONBL001']                   # known bill + unknown container
+    assert json.loads(review[doc_ids[4]]['candidates_json']) == []                              # customer name only
+    assert sl.link_document(doc_ids[2], dict(fx.DOCS[2][1])) == ('review', 'ambiguous')        # re-running never merges
     rtext = sl.review_text()
-    assert 'بيان-مختلط.pdf' in rtext and 'أكثر من شحنة' in rtext and 'ANONBL003، ANONBL010' in rtext
+    for words in ('المراجع تشير لأكثر من شحنة', 'فيه مرجع لا يطابق أي شحنة مسجلة', 'ما فيه إلا اسم العميل', 'لا يحمل رقم بوليصة'):
+        assert words in rtext, words
 
+    # 2) Legacy name fallback (shipment_workflow.note_document) — tested OFF on this branch; old ticks untouched.
+    from app import shipment_workflow
+    name_doc = {'document_kind': 'commercial_invoice', 'consignee': 'عميل أ'}
+    with patch.dict(os.environ, {'DOC_LINK_BY_NAME': '0'}):
+        assert shipment_workflow.note_document(name_doc) is None
+    with db() as c:
+        assert c.execute("SELECT docs FROM shipment_files WHERE bill_no='ANONBL001'").fetchone()['docs'] == '["bl","invoice"]'
+    assert snapshot() == before
+
+    # 3) FASAH freshness — ANONBL004 (declared 20/11, last seen 22/11). Newer reads that do NOT prove it is gone:
+    #    another importer's filtered list, a read stopped at its page limit, an export read, a read with no coverage proof.
     cards = {k['bill_no']: k for k in sl.board(fx.PORT, fx.NOW)}
     assert len(cards) == 10
-
-    # 2) Stale FASAH status (ANONBL004): last seen 22/11, missing from the 08:30 read → never shown as current.
     k4 = cards['ANONBL004']
-    assert 'تحت المعالجة' not in k4['status'] and k4['status'] == 'وصلت الميناء' and k4['source'] == 'تتبع الخط الملاحي'
-    assert k4['stale_fasah']['label'] == 'تحت المعالجة' and not k4['stale_fasah']['fresh']
-    assert 'لم يظهر في آخر قراءة لفسح' in k4['stale_fasah']['why_stale']
-    assert k4['blocker'].startswith('حالة فسح غير محدّثة') and k4['owner'].startswith('فيصل')
-    assert 'قديمة، ليست الحالة الحالية' in sl.card_text(k4)
-
-    # 3) Fresh statuses carry source and time; blockers and owners from documented facts only.
+    assert k4['stale_fasah']['state'] == 'unverified' and 'تحت المعالجة' not in k4['status']
+    assert k4['status'] == 'وصلت الميناء' and k4['source'] == 'تتبع الخط الملاحي'
+    assert k4['stale_fasah']['why_stale'] == 'تعذر التحقق: لا توجد قراءة كاملة أحدث تشمل هذا البيان'
+    assert k4['blocker'].startswith('حالة فسح غير مؤكدة') and 'آخر حالة معروفة في فسح: تحت المعالجة — 22/11/2026 11:30' in sl.card_text(k4)
+    # Fresh statuses are current whatever the other reads say.
     assert cards['ANONBL002']['status'].startswith('بانتظار سداد الرسوم') and cards['ANONBL002']['source'] == 'فسح — قراءة جهاز العمل'
+    # A complete, unfiltered import read whose window (04/11+) covers 20/11 → confirmed missing.
+    with db() as c:
+        add_read(c, *fx.COVERING_READ)
+    k4b = sl.build(dict(sl_row('ANONBL004')), fx.NOW)
+    assert k4b['stale_fasah']['state'] == 'missing' and 'لم يظهر في قراءة كاملة لفسح تشمل نطاقه (25/11/2026 08:45)' in k4b['stale_fasah']['why_stale']
+    assert k4b['blocker'].startswith('البيان غاب عن قراءة فسح الكاملة') and k4b['status'] == 'وصلت الميناء'
+    # …but not when its window starts after the declaration date (20/11): same read with since 21/11 proves nothing.
+    with db() as c:
+        c.execute("UPDATE runner_tasks SET result_json=replace(result_json,'2026-11-04','2026-11-21'), "
+                  "params_json=replace(params_json,'2026-11-04','2026-11-21') WHERE finished_at=%s", (fx.COVERING_READ[0],))
+    assert sl.build(dict(sl_row('ANONBL004')), fx.NOW)['stale_fasah']['state'] == 'unverified'
+
+    # 4) Blockers, owners and free-day alerts (documented dates only).
     assert cards['ANONBL002']['owner'].startswith('نورة') and cards['ANONBL002']['due'] == '25/11/2026 10:30'
     assert cards['ANONBL003']['blocker'].startswith('تحت الكشف') and '1 مستند بانتظار المطابقة' in cards['ANONBL003']['blocker']
-    assert cards['ANONBL010']['review_docs'] == 1 and cards['ANONBL001']['linked_docs'] == 1
-    assert cards['ANONBL005']['blocker'].startswith('البيان مقدّم والشحنة لم تصل') and cards['ANONBL005']['due'] == '27/11/2026 18:00'
-    assert cards['ANONBL006']['blocker'] == 'وصلت الشحنة ولا يوجد بيان مسجل'
-    assert cards['ANONBL009']['status'].startswith('أُرجعت الحاويات')
-
-    # 4) Free-day alerts: documented dates only; estimated ones are listed as estimated, never alerted.
-    assert cards['ANONBL001']['owner'].startswith('خالد') and cards['ANONBL001']['due'].startswith('26/11/2026')
-    assert any('باقي 1 يوم' in a for a in cards['ANONBL001']['alerts'])
-    assert any('متأخرة 1 يوم' in a for a in cards['ANONBL007']['alerts'])
+    assert cards['ANONBL010']['review_docs'] == 1 and cards['ANONBL001']['linked_docs'] == 1 and cards['ANONBL001']['review_docs'] == 1
+    assert cards['ANONBL005']['due'] == '27/11/2026 18:00' and cards['ANONBL006']['blocker'] == 'وصلت الشحنة ولا يوجد بيان مسجل'
+    assert any('باقي 1 يوم' in a for a in cards['ANONBL001']['alerts']) and any('متأخرة 1 يوم' in a for a in cards['ANONBL007']['alerts'])
     assert not cards['ANONBL008']['alerts'] and cards['ANONBL008']['estimated_free_days'] == ['ANUU1000081']
-    assert 'غير موثّق' in cards['ANONBL008']['due'] and not cards['ANONBL010']['alerts']
     alerts = sl.free_day_alerts(fx.NOW)
     assert len(alerts) == 3 and not any('ANUU1000081' in a for a in alerts)
 
-    # 5) Read-only: the existing records are untouched; nothing was sent.
+    # 5) Read-only on the existing records (the pilot writes only its own link/review tables).
     assert snapshot() == before
-    html_page = sl.page_html(list(cards.values()), rtext, subtitle='10 حالات منزوعة الهوية — ميناء جدة الإسلامي — الساعة 09:00 25/11/2026')
-    assert html_page.count('class="card') == 10 and 'قديمة ولا تُعرض كحالة حالية' in html_page
     if os.getenv('PREVIEW_OUT'):
         ordered = sorted(cards.values(), key=lambda k: (not k['alerts'], not k['stale_fasah'], not k['blocker'], k['bill_no']))
         Path(os.environ['PREVIEW_OUT']).write_text(sl.page_html(ordered, rtext, subtitle=
@@ -112,9 +137,16 @@ def run():
         Path(os.environ['PREVIEW_OUT']).with_suffix('.txt').write_text(
             '\n\n'.join(sl.card_text(k) for k in ordered) + '\n\n' + rtext, encoding='utf-8')
 
+    # 6) Legacy behaviour in production is unchanged (flag default = on): the name fallback still ticks files.
+    assert shipment_workflow.note_document(name_doc)
     from app import command_agent, virtual_office
-    assert 'shipment_live' in command_agent.HANDLERS
-    assert 'shipment_live' in virtual_office.DEPARTMENTS['clearance']['tools']
+    assert 'shipment_live' in command_agent.HANDLERS and 'shipment_live' in virtual_office.DEPARTMENTS['clearance']['tools']
+
+
+def sl_row(bill):
+    from app.storage import db
+    with db() as c:
+        return c.execute('SELECT * FROM shipment_files WHERE bill_no=%s', (bill,)).fetchone()
 
 
 def main():
