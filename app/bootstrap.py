@@ -265,6 +265,8 @@ from app.customer_care import register_worker as register_customer_care
 register_customer_care(app)
 from app.driver_quotes import register_worker as register_driver_quotes
 register_driver_quotes(app)
+from app.carrier_partners import register_worker as register_carrier_partners
+register_carrier_partners(app)
 from app.invoice_collection import register_worker as register_invoice_collection
 register_invoice_collection(app)
 from app.daily_statements import register_worker as register_daily_statements
