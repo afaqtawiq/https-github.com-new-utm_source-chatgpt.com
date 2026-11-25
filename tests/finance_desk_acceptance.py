@@ -28,12 +28,12 @@ def run():
     def form(**extra):
         return dict(idempotency_key=str(uuid.uuid4()), **extra)
 
-    def doc(party, kind, amount, day, posted=True, refs=True):
+    def doc(party, kind, amount, day, posted=True, refs=True, inv=None):
         seq[0] += 1
         did = ledger.create_document(form(owner_id=owner, counterparty_id=party, kind=kind, currency='SAR', amount=amount, document_date=day,
                                           source_ref='SRC', source_locator='LOC-' + str(seq[0]), economic_ref='EV-' + str(seq[0]),
                                           source_role='detail', amount_basis='gross', notes='',
-                                          invoice_ref=('INV-' + str(seq[0])) if refs else '', customs_ref=('C-' + str(seq[0])) if refs else ''), actor)
+                                          invoice_ref=inv if inv is not None else (('INV-' + str(seq[0])) if refs else ''), customs_ref=('C-' + str(seq[0])) if refs else ''), actor)
         if posted:
             ledger.review_document(did, actor, form(confirmation='1'))
             ledger.post_document(did, actor, form(confirmation='1', reason='test'))
@@ -92,31 +92,105 @@ def run():
     assert pb.startswith('📘 دليل «saudi-vat-logistics»') and '0%' in pb and 'المحاسب القانوني' in pb
     assert len(fd.index()) == 11
 
-    # Posting: the preview holds back the two identical 700 expenses; the old 900 receipt is clean.
-    snap, text = fd.post_preview(exclude=[snap_id for snap_id, _ in fd.post_preview()[0]])
-    assert snap == [] or 'استثناه المدير' in text
-    snap, text = fd.post_preview()
-    assert [a for _, a in snap] == [90000] and 'قد يكون مكرر' in text and 'مستثنى من الترحيل (2)' in text, text
-    with db() as c:
-        assert c.execute('SELECT COUNT(*) n, COALESCE(SUM(signed_minor),0) s FROM finance_entries').fetchone() == before  # preview posts nothing
+    # ---------- Posting: full preview, all-or-nothing gate ----------
+    def entries():
+        with db() as c:
+            return c.execute('SELECT COUNT(*) n, COALESCE(SUM(signed_minor),0) s FROM finance_entries').fetchone()
+    chosen, held, missing = fd.post_preview()
+    assert [r['amount_minor'] for r in chosen] == [90000] and len(held) == 2 and all('تكرار محتمل' in w for _, w in held)
+    receipt = chosen[0]
+    assert receipt['source_ref'] == 'SRC' and receipt['currency'] == 'SAR'
+    snap = [(receipt['id'], fd.fingerprint(receipt), False)]
+    pdf_bytes = fd.preview_pdf(chosen, held, missing, 'ABC123', dt.datetime(2026, 11, 25, 15, 0))
+    assert pdf_bytes.startswith(b'%PDF')
+    # A duplicate appears after the preview → nothing posted, new review required.
+    twin = doc(b, 'receipt', '900', '2026-11-02', posted=False)
+    stop = fd.post_execute(snap, 'المدير')
+    assert stop.startswith('⛔ أوقفت الترحيل كاملًا') and 'تكرار محتمل' in stop and entries() == before, stop
+    ledger.void_document(twin, actor, form(confirmation='1', reason='duplicate'))
+    # A changed entry (fingerprint differs) → nothing posted.
+    assert 'تغيّر بعد المعاينة' in fd.post_execute([(receipt['id'], 'x' * 20, False)], 'المدير') and entries() == before
     res = fd.post_execute(snap, 'المدير')
-    assert 'رُحّل 1 قيد بقيمة 900.00' in res, res
-    # Manager picks one of the duplicates by number; the other stays a draft. A stale snapshot (amount changed) is refused.
+    assert res.startswith('✅ رُحّل 1 قيد.') and 'SAR: سندات قبض 1 = 900.00 SAR' in res, res
+    # Replaying the code never posts twice (the whole batch stops).
+    assert 'لم يعد مسودة' in fd.post_execute(snap, 'المدير')
+    # Manager picks one held duplicate by number; the other stays a draft.
     with db() as c:
         dup = [r['id'] for r in c.execute("SELECT id FROM finance_documents WHERE status='draft' ORDER BY id").fetchall()]
-    snap, text = fd.post_preview([dup[0], 99999])
-    assert [i for i, _ in snap] == [dup[0]] and '99999' in text
-    assert 'تغيّر أو رُحّل' in fd.post_execute([(dup[1], 1)], 'المدير')
-    assert 'رُحّل 1 قيد بقيمة 700.00' in fd.post_execute(snap, 'المدير')
+    chosen, held, missing = fd.post_preview([dup[0], 99999])
+    assert [r['id'] for r in chosen] == [dup[0]] and missing == [99999]
+    assert fd.post_execute([(dup[0], fd.fingerprint(chosen[0]), True)], 'المدير').startswith('✅ رُحّل 1')
     with db() as c:
         assert c.execute("SELECT status FROM finance_documents WHERE id=%s", (dup[1],)).fetchone()['status'] == 'draft'
-    assert fd.post_execute(snap, 'المدير').startswith('✅ رُحّل 0')  # replaying the code never posts twice
-    assert fd.aging(as_of)['عميل متأخر']['total'] == 510000  # the 900 receipt now settles part of B's balance
+    assert fd.aging(as_of)['عميل متأخر']['total'] == 510000
 
-    from app import command_agent, virtual_office
+    # The WhatsApp tool: the «نفذ» code is only inside the PDF; if the PDF cannot be sent, no code exists.
+    from app import command_agent, virtual_office, advance_reconcile
+    sent = []
+
+    async def ok_send(chat, content, name, caption):
+        sent.append(content)
+        return True
+
+    async def bad_send(chat, content, name, caption):
+        return False
+    from app import whatsapp_admin
+    with db() as c:
+        whatsapp_admin.ensure_admin(c)
+    doc(a, 'expense', '250', '2026-11-21', posted=False)  # one clean draft to preview
+    tok = command_agent.CHAT.set(('966500000001', 'conv-1'))
+    try:
+        with patch.object(command_agent, '_member', return_value={'name': 'المدير', 'manager': True}):
+            with patch.object(advance_reconcile, 'send_pdf', ok_send), db() as c:
+                out = command_agent.tool_finance_post(c, {})
+                codes = [r['token'] for r in c.execute('SELECT token FROM whatsapp_voice_pending').fetchall()]
+            assert len(codes) == 1 and codes[0] not in out and 'في آخر الملف' in out and sent[0].startswith(b'%PDF'), out
+            with patch.object(advance_reconcile, 'send_pdf', bad_send), db() as c:
+                out = command_agent.tool_finance_post(c, {})
+                assert len(c.execute('SELECT token FROM whatsapp_voice_pending').fetchall()) == 1  # the failed one was removed
+            assert 'لم أجهز رمز' in out
+    finally:
+        command_agent.CHAT.reset(tok)
     with patch.object(command_agent, '_member', return_value={'name': 'موظف'}):
         assert 'المدير فقط' in command_agent.tool_finance_post(None, {})
-    for name in ('finance_post', 'finance_overview', 'receivables_aging', 'finance_checks', 'finance_playbook'):
+
+    # ---------- Customer statement with allocation (October), as of 25 Nov ----------
+    from app import finance_customer_statement as fcs
+    cc = ledger.create_party(dict(name='عميل الكشف', kind='counterparty', identity_ref='C-C', confirmed='1'), actor)
+    a_ = doc(cc, 'claim', '10000', '2026-10-05', inv='F-100')
+    doc(cc, 'claim', '6000', '2026-10-20', inv='F-101')
+    doc(cc, 'receipt', '4000', '2026-10-25', inv='F-101')            # proven by the invoice number on the receipt
+    r3 = doc(cc, 'receipt', '3000', '2026-10-28', inv='')            # proven by a ledger allocation below
+    nov = doc(cc, 'receipt', '5000', '2026-11-10', inv='')           # November, no proof → unallocated, after close
+    doc(cc, 'claim', '2000', '2026-10-30', posted=False, inv='F-102')  # draft
+    doc(cc, 'receipt', '1000', '2026-11-12', posted=False, inv='F-102')
+    ledger.create_allocation(form(credit_id=str(r3), document_id=str(a_), amount='3000'), actor)
+    with db() as c:
+        before_stmt = c.execute('SELECT COUNT(*) n FROM finance_entries').fetchone()['n']
+    st = fcs.build(owner, cc, 'SAR', '2026-10-01', '2026-10-31', today=dt.date(2026, 11, 25))
+    assert st['official']['closing_minor'] == 900000          # the November payment does not change October's closing
+    assert [x['id'] for x in st['later']] == [nov] and st['posted_today'] == 400000
+    assert st['closing_incl'] == 1100000 and st['today_incl'] == 500000
+    left = {d['invoice_ref']: d['left'] for d in st['debits']}
+    assert left == {'F-100': 700000, 'F-101': 200000, 'F-102': 100000}, left
+    how = {d['invoice_ref']: [h for _, _, h in d['paid']] for d in st['debits']}
+    assert how['F-100'] == ['تخصيص مسجل'] and how['F-101'] == ['رقم الفاتورة في سند القبض']
+    assert [(x['id'], x['left']) for x in st['unallocated']] == [(nov, 500000)] and st['balanced']
+    text = fcs.summary_text(st)
+    assert 'رصيد الإقفال في 2026-10-31 (مرحّل): 9000.00 SAR' in text and 'المتبقي للتحصيل اليوم (مرحّل): 4000.00 SAR' in text, text
+    assert 'دفعات بدون تخصيص مثبت: 1 بمبلغ 5000.00 SAR' in text and '✅ المطابقة' in text
+    statement_pdf = fcs.pdf(st)
+    assert statement_pdf.startswith(b'%PDF')
+    if os.environ.get('FINANCE_PDF_DUMP'):  # local visual check only
+        open(os.path.join(os.environ['FINANCE_PDF_DUMP'], 'statement.pdf'), 'wb').write(statement_pdf)
+        open(os.path.join(os.environ['FINANCE_PDF_DUMP'], 'preview.pdf'), 'wb').write(sent[0])
+    with db() as c:
+        assert c.execute('SELECT COUNT(*) n FROM finance_entries').fetchone()['n'] == before_stmt  # read-only
+    found, msg = fcs.find('عميل الكشف')
+    assert found == (owner, cc, 'عميل الكشف'), msg
+    assert 'أي عميل تقصد' in fcs.find('عميل')[1]
+
+    for name in ('advance_settlement', 'customer_statement', 'finance_post', 'finance_overview', 'receivables_aging', 'finance_checks', 'finance_playbook'):
         assert name in command_agent.HANDLERS and name in virtual_office.DEPARTMENTS['finance']['tools']
 
 
@@ -141,7 +215,7 @@ def main():
     finally:
         with psycopg.connect(url, autocommit=True) as c:
             c.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
-    print('PASS: finance desk — FIFO aging, monthly overview, control checks, 11 accounting playbooks; posting only after manager approval, duplicates held back.')
+    print('PASS: finance desk — FIFO aging, monthly overview, control checks, 11 accounting playbooks; posting only after a full PDF preview (all-or-nothing), customer statement with proven allocation.')
 
 
 if __name__ == '__main__':

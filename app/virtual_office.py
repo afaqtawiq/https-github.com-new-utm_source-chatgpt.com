@@ -81,8 +81,11 @@ DEPARTMENTS = {
                  'وتخصمها من أي مبلغ مستلم (documents_total). تقدم للمالك ملخص الشهر (finance_overview)، وأعمار الذمم وخطة التحصيل '
                  '(receivables_aging)، وفحص الأخطاء قبل الإقفال (finance_checks). قبل أي سؤال ضريبي أو فوترة إلكترونية أو إقفال أو تقرير أو '
                  'تصنيف قيد افتحي دليل المحاسبة المناسب (finance_playbook) واتبعيه: افصلي خدمات آفاق (15% أو 0% للنقل الدولي) عن المدفوعات نيابة '
-                 'عن العميل، ولا تخترعي أرقامًا، وأي حكم ضريبي أو زكوي غير محسوم يُرفع للمحاسب القانوني. ترحيل القيود (finance_post): تجهّزه نورة وتستثني المكرر المحتمل، ويُنفَّذ فقط بعد «نفذ» من المدير.'),
-        'tools': ('finance_post', 'finance_playbook', 'finance_overview', 'receivables_aging', 'finance_checks', 'documents_total', 'fasah_count', 'billing_gap', 'declaration_info', 'record_declaration_billing', 'customer_balance', 'record_payment', 'record_expense', 'expenses_list', 'collect_invoice', 'collections_followup', 'party_statement', 'fasah_billing',
+                 'عن العميل، ولا تخترعي أرقامًا، وأي حكم ضريبي أو زكوي غير محسوم يُرفع للمحاسب القانوني. تسوية أي مبلغ مستلم مع الإيصالات والفواتير الأصلية (advance_settlement: المدفوع المثبت فقط، والنقد المتبقي، والفواتير غير المسددة، ومبدئية إذا نقص مستند)، '
+                 'وكشف العميل لفترة مع تخصيص الدفعات (customer_statement: رصيد الإقفال منفصل عن المتبقي اليوم، ولا تخصيص بالتخمين). '
+                 'ترحيل القيود (finance_post): يصل المدير ملف معاينة بكل قيد ومصدره وحسابه وعملته، والرمز في آخر الملف فقط؛ أي تغيير بعد المعاينة يوقف الدفعة. '
+                 'انقلي أرقام هذه الأدوات كما هي بلا تقريب ولا تلخيص يغيّرها.'),
+        'tools': ('advance_settlement', 'customer_statement', 'finance_post', 'finance_playbook', 'finance_overview', 'receivables_aging', 'finance_checks', 'documents_total', 'fasah_count', 'billing_gap', 'declaration_info', 'record_declaration_billing', 'customer_balance', 'record_payment', 'record_expense', 'expenses_list', 'collect_invoice', 'collections_followup', 'party_statement', 'fasah_billing',
                   'statement_to_group', 'open_fasah', 'runner_status', 'runner_stop', 'runner_deny'),
         'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
                     ('📋 سجّل كشوفات سلة الرحائب من فسح', 'سجل حسابات سلة الرحائب من فسح'),

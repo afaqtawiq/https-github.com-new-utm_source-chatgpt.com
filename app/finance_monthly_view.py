@@ -12,7 +12,7 @@ def query(report):
 def render_statement(session, report):
     e = v.esc
     currency = e(report['currency'])
-    body = '<div class="actions no-print"><a class="btn secondary" href="/finance">العودة إلى المالية</a><a class="btn" href="/finance/monthly-statement.pdf?'+e(query(report))+'">تنزيل كشف العميل PDF</a></div>'
+    body = '<div class="actions no-print"><a class="btn secondary" href="/finance">العودة إلى المالية</a><a class="btn" href="/finance/monthly-statement.pdf?'+e(query(report))+'">تنزيل كشف العميل PDF</a><a class="btn secondary" href="/finance/customer-statement.pdf?'+e(query(report))+'">الكشف مع تخصيص الدفعات والمتبقي اليوم PDF</a></div>'
     body += v._hero('كشف حساب مفصل',report['counterparty_name']+' · '+report['start']+' إلى '+report['end'],eyebrow=report['owner_name'])
     body += '<div class="notice neutral">كشف حسب الحركات المثبتة حاليًا. تاريخ القيد العكسي هو يوم تسجيله بتوقيت الرياض. لا يعني الكشف تأكيد السداد خارج القيود المسجلة.</div>'
     body += '<section class="card"><dl class="detail-grid">'

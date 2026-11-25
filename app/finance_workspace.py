@@ -212,6 +212,16 @@ def monthly_statement_pdf(request: Request, owner_id: int, counterparty_id: int,
         'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
 
 
+@router.get('/finance/customer-statement.pdf')
+def customer_statement_pdf(request: Request, owner_id: int, counterparty_id: int, currency: str, start: str, end: str):
+    auth(request)
+    from app import finance_customer_statement as fcs
+    report=invoke(fcs.build,owner_id,counterparty_id,currency,start,end)
+    return Response(fcs.pdf(report),media_type='application/pdf',headers={
+        'Content-Disposition':'attachment; filename="customer-statement-allocation-'+report['official']['end']+'.pdf"',
+        'Cache-Control':'no-store','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'})
+
+
 @router.get('/finance/monthly-closing', response_class=HTMLResponse)
 def monthly_closing(request: Request, owner_id: int, month: str):
     session=auth(request)
