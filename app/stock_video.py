@@ -477,7 +477,7 @@ def manager_text(c, vid, duration, note, caption):
     chat = transport_desk.manager_chat(c)
     if chat:
         code = transport_desk.pending(c, chat[0], chat[1], {'tool': 'publish_video', 'video_id': vid}, 24 * 60)
-        lines.append(f'للنشر على فيسبوك وإنستغرام ويوتيوب وتيك توك اكتب: نفذ {code}')
+        lines.append(f'للنشر على كل المنصات المربوطة (فيسبوك، إنستغرام، يوتيوب، تيك توك، لينكدإن، إكس…) اكتب: نفذ {code}')
     return '\n'.join(lines)
 
 
