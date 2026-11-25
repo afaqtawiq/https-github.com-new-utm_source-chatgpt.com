@@ -178,6 +178,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'count': {'type': 'integer'}}}},
     {'name': 'carrier_partners', 'description': 'Status of the carrier partnership invitations: invited, replied (with their reply / rates), declined, failed. Use for «حالة الناقلين الشركاء» «مين رد من شركات النقل».',
      'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'transport_drafts', 'description': 'Internal transport quote drafts built from customer WhatsApp requests (pilot): ready drafts for Reem with the approved rate-card amount, requests missing details (only the missing fields), and requests sent to Khaled for pricing without any amount. Nothing is sent to customers. Use for «مسودات النقل» «طلبات النقل من واتساب».',
+     'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'teach_answer', 'description': 'Teach the CUSTOMER agent an approved answer (learning loop). Use for «جواب 2: …» (gap_number from the morning performance report) or «علّم الوكيل: السؤال … الجواب …». answer = exactly what the manager wrote. Needs the manager confirmation code.',
@@ -779,6 +781,11 @@ def tool_carrier_invite(c, a):
 def tool_carrier_partners(c, a):
     from app import carrier_partners
     return carrier_partners.status_text()
+
+
+def tool_transport_drafts(c, a):
+    from app import transport_intake
+    return transport_intake.drafts_text()
 
 
 def tool_driver_prices(c, a):
