@@ -186,6 +186,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'finance_checks', 'description': 'Accounting control check (read-only): possible duplicate documents, drafts unposted for more than 7 days, posted claims without invoice/declaration reference, receivables over 90 days. Use for «فحص الحسابات» «راجع الأخطاء في الحسابات» and before month-end close.',
      'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'finance_post', 'description': 'Post (رحّل) draft accounting entries to the ledger — manager only, after his «نفذ» code. Without ids: prepares ALL clean drafts and holds back possible duplicates (same party/kind/amount/date) and opening/reconciliation entries. With ids: only those document numbers (manager decided). Use for «رحّلي القيود» «رحّل الحسابات» «رحّلي القيد رقم 67».',
+     'input_schema': {'type': 'object', 'properties': {'ids': {'type': 'array', 'items': {'type': 'integer'}}}}},
     {'name': 'finance_playbook', 'description': 'Accounting playbooks for Afaq (Saudi VAT for clearance & transport incl. zero-rated international transport and disbursements, ZATCA e-invoicing / Fatoora phase 2, chart of accounts & booking rules, month-end close, receivables & collections policy, 13-week cash flow, shipment profitability, expense & petty-cash controls, bank reconciliation, zakat basics, customer statements). Call it BEFORE answering any accounting, VAT, invoicing, closing or reporting question, and follow it. topic = the question in free words; or name = exact playbook.',
      'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'name': {'type': 'string'}}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
@@ -818,6 +820,18 @@ def tool_finance_checks(c, a):
     return finance_desk.checks()
 
 
+def tool_finance_post(c, a):
+    from app import finance_desk
+    if not _member().get('manager'):
+        return 'ترحيل القيود يعتمده المدير فقط؛ أرسل له الطلب.'
+    ids = [int(re.sub(r'\D', '', str(i))) for i in (a.get('ids') or []) if re.sub(r'\D', '', str(i))]
+    snapshot, text = finance_desk.post_preview(ids)
+    if not snapshot:
+        return text
+    token = _pending(c, {'tool': 'finance_post', 'docs': snapshot})
+    return text + f'\n\nللترحيل اكتب: نفذ {token}'
+
+
 def tool_finance_playbook(c, a):
     from app import finance_desk
     return finance_desk.playbook(str(a.get('topic') or ''), str(a.get('name') or '').strip())
@@ -1344,6 +1358,9 @@ def _execute_action(c, action, member):
     if action.get('tool') == 'driver_price_request':
         from app import driver_quotes
         return driver_quotes.start(action, member.get('name') or '')
+    if action.get('tool') == 'finance_post':
+        from app import finance_desk
+        return finance_desk.post_execute([tuple(d) for d in action['docs']], member.get('name') or 'المدير')
     if action.get('tool') == 'record_bank_payments':
         from app import bank_reconcile
         return bank_reconcile.record(int(action['batch']), 'مطابقة كشف البنك — ' + (member.get('name') or 'المدير'))
