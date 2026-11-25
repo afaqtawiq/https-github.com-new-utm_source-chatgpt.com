@@ -272,7 +272,7 @@ def _line(r):
     return f"#{r['id']} {r['name']} — {KIND_AR.get(r['kind'], r['kind'])} {sar(r['amount_minor'] or 0)} بتاريخ {r['document_date']}"
 
 
-def post_preview(ids=None):
+def post_preview(ids=None, exclude=None):
     """Return (snapshot, text). snapshot = [(id, amount_minor)] to post; explicit ids may include held duplicates (manager's call)."""
     ids = {int(i) for i in (ids or [])}
     with db() as c:
@@ -286,6 +286,10 @@ def post_preview(ids=None):
         held_out = []
     else:
         chosen, missing, held_out = clean, [], held
+    skip = {int(i) for i in (exclude or [])}
+    if skip:
+        held_out = held_out + [(r, 'استثناه المدير') for r in chosen if r['id'] in skip]
+        chosen = [r for r in chosen if r['id'] not in skip]
     if not chosen:
         return [], ('لا توجد مسودات جاهزة للترحيل.' + (f" الأرقام غير موجودة أو مرحّلة: {', '.join(map(str, missing))}" if missing else ''))
     by_kind = {}

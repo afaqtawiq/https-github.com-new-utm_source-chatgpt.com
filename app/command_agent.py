@@ -186,8 +186,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'finance_checks', 'description': 'Accounting control check (read-only): possible duplicate documents, drafts unposted for more than 7 days, posted claims without invoice/declaration reference, receivables over 90 days. Use for «فحص الحسابات» «راجع الأخطاء في الحسابات» and before month-end close.',
      'input_schema': {'type': 'object', 'properties': {}}},
-    {'name': 'finance_post', 'description': 'Post (رحّل) draft accounting entries to the ledger — manager only, after his «نفذ» code. Without ids: prepares ALL clean drafts and holds back possible duplicates (same party/kind/amount/date) and opening/reconciliation entries. With ids: only those document numbers (manager decided). Use for «رحّلي القيود» «رحّل الحسابات» «رحّلي القيد رقم 67».',
-     'input_schema': {'type': 'object', 'properties': {'ids': {'type': 'array', 'items': {'type': 'integer'}}}}},
+    {'name': 'finance_post', 'description': 'Post (رحّل) draft accounting entries to the ledger — manager only, after his «نفذ» code. Without ids: prepares ALL clean drafts and holds back possible duplicates (same party/kind/amount/date) and opening/reconciliation entries. With ids: only those document numbers (manager decided). exclude = document numbers the manager wants left as drafts. Use for «رحّلي القيود» «رحّل الحسابات» «رحّلي القيد رقم 67» «رحّلي الكل ما عدا 12 و15».',
+     'input_schema': {'type': 'object', 'properties': {'ids': {'type': 'array', 'items': {'type': 'integer'}}, 'exclude': {'type': 'array', 'items': {'type': 'integer'}}}}},
     {'name': 'finance_playbook', 'description': 'Accounting playbooks for Afaq (Saudi VAT for clearance & transport incl. zero-rated international transport and disbursements, ZATCA e-invoicing / Fatoora phase 2, chart of accounts & booking rules, month-end close, receivables & collections policy, 13-week cash flow, shipment profitability, expense & petty-cash controls, bank reconciliation, zakat basics, customer statements). Call it BEFORE answering any accounting, VAT, invoicing, closing or reporting question, and follow it. topic = the question in free words; or name = exact playbook.',
      'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'name': {'type': 'string'}}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
@@ -824,8 +824,9 @@ def tool_finance_post(c, a):
     from app import finance_desk
     if not _member().get('manager'):
         return 'ترحيل القيود يعتمده المدير فقط؛ أرسل له الطلب.'
-    ids = [int(re.sub(r'\D', '', str(i))) for i in (a.get('ids') or []) if re.sub(r'\D', '', str(i))]
-    snapshot, text = finance_desk.post_preview(ids)
+    def nums(key):
+        return [int(re.sub(r'\D', '', str(i))) for i in (a.get(key) or []) if re.sub(r'\D', '', str(i))]
+    snapshot, text = finance_desk.post_preview(nums('ids'), nums('exclude'))
     if not snapshot:
         return text
     token = _pending(c, {'tool': 'finance_post', 'docs': snapshot})
