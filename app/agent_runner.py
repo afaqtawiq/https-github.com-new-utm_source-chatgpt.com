@@ -43,6 +43,7 @@ KINDS = {
     'fasah_details': 'قراءة تفاصيل بيان واحد في فسح (الفاتورة والرسوم) — قراءة فقط',
     'fasah_release_notice': 'تنزيل إشعار الفسح أو طباعة البيان PDF من فسح — قراءة فقط',
     'fasah_authorizations': 'قراءة قائمة تفاويض المخلص في فسح (المستورد وتاريخ الانتهاء) — قراءة فقط',
+    'inspect_form': 'وصف شاشة فسح المفتوحة (الخانات وأنواعها والأزرار) — قراءة فقط بدون تعبئة أو ضغط',
 }
 FILE_TYPES = {'application/pdf', 'text/csv', 'text/plain', 'image/png', 'image/jpeg',
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
@@ -393,6 +394,10 @@ async def upload(tid: int, request: Request):
             VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(task_id,sha256) DO NOTHING RETURNING id''',
                         (tid, re.sub(r'[^\w.\-؀-ۿ ]', '_', str(body.get('name') or 'file'))[:120], mime, len(data), digest,
                          bool(body.get('verified')), data, utcnow())).fetchone()
+    if task['kind'] == 'inspect_form' and mime == 'text/plain':
+        # Structure only (labels, types, options — never values): kept in the log so the filling can be built from it.
+        for line in data.decode('utf-8', 'replace').splitlines()[:400]:
+            print('RUNNER_FORM', tid, line[:400], flush=True)
     return {'id': row['id'] if row else None, 'duplicate': row is None, 'sha256': digest}
 
 
@@ -409,7 +414,7 @@ async def finish(tid: int, request: Request):
             status = 'stopped'
         if status == 'done':
             verified = c.execute('SELECT COUNT(*) n FROM runner_files WHERE task_id=%s AND verified', (tid,)).fetchone()['n']
-            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'read_page') and not verified:
+            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'read_page', 'inspect_form') and not verified:
                 status = 'failed'  # never «done» without a verified result
         c.execute('UPDATE runner_tasks SET status=%s,result_json=%s,finished_at=%s WHERE id=%s',
                   (status, json.dumps(body.get('result') or {}, ensure_ascii=False)[:20000], utcnow(), tid))
