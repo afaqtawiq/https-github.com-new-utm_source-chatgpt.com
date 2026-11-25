@@ -139,6 +139,8 @@ app.include_router(production_monitor_router)
 register_monitor_worker(app)
 
 app.include_router(zernio_receiver_router)
+from app.zernio_receiver import register_worker as register_zernio_jobs
+register_zernio_jobs(app)
 app.include_router(readiness_router)
 
 from app.spacemail import router as spacemail_router, register_worker as register_spacemail_worker

@@ -139,12 +139,108 @@ async def receive(request: Request):
     if takeover is not None:
         p['_takeover_generation'] = takeover['generation']
     legacy_local_only = False
+    queued = None
     if durable_inbound is not None:
         queued = await run_in_threadpool(durable_inbound, p)
         if queued is not None and queued.get('legacy_local_only') is True:
             legacy_local_only = queued.get('team_agent') is not True
         elif queued is not None:
             return queued
+    attachments = message.get('attachments')
+    if queued is not None and queued.get('team_agent') is True and isinstance(attachments, list) and attachments:
+        # Team documents (PDFs, photos) take minutes to read: the provider gives up after ~5 s (499) and a restart
+        # used to roll the whole message back (owner, 25 Nov 2026: Promate documents never reached Faisal).
+        # Save the message first, answer the webhook at once, process in the background, resume after a restart.
+        if not await run_in_threadpool(_enqueue_job, p, takeover, legacy_local_only):
+            return {'ok': True, 'duplicate': True}
+        _spawn(event_id)
+        return {'ok': True, 'queued': True, 'background': True}
+    return await process(p, takeover, legacy_local_only)
+
+
+JOBS_TABLE = '''CREATE TABLE IF NOT EXISTS zernio_inbound_jobs(event_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+    payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempts INT NOT NULL DEFAULT 0, result TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())'''
+_TASKS = set()
+
+
+def _enqueue_job(p, takeover, legacy_local_only):
+    with db() as c:
+        c.execute(JOBS_TABLE)
+        row = c.execute('''INSERT INTO zernio_inbound_jobs(event_id,conversation_id,payload) VALUES(%s,%s,%s)
+            ON CONFLICT DO NOTHING RETURNING event_id''',
+            (p['id'], (p.get('conversation') or {}).get('id') or '',
+             json.dumps({'p': p, 'takeover': takeover, 'legacy': legacy_local_only}, ensure_ascii=False, default=str))).fetchone()
+    return bool(row)
+
+
+def _claim_job(event_id):
+    with db() as c:
+        row = c.execute('''UPDATE zernio_inbound_jobs SET state='running',attempts=attempts+1,updated_at=NOW()
+            WHERE event_id=%s AND state IN ('pending','running') AND attempts<3 RETURNING payload''', (event_id,)).fetchone()
+    return json.loads(row['payload']) if row else None
+
+
+def _finish_job(event_id, state, result):
+    with db() as c:
+        c.execute("UPDATE zernio_inbound_jobs SET state=%s,result=%s,updated_at=NOW() WHERE event_id=%s",
+                  (state, str(result)[:500], event_id))
+
+
+async def run_job(event_id):
+    job = await run_in_threadpool(_claim_job, event_id)
+    if not job:
+        return None
+    try:
+        result = await process(job['p'], job['takeover'], job['legacy'])
+        await run_in_threadpool(_finish_job, event_id, 'done', json.dumps(result, ensure_ascii=False, default=str))
+        return result
+    except Exception as exc:
+        logging.getLogger(__name__).exception('Background WhatsApp job %s failed', event_id)
+        print('ZERNIO_JOB_FAILED', event_id, type(exc).__name__, str(exc)[:160], flush=True)
+        await run_in_threadpool(_finish_job, event_id, 'failed', type(exc).__name__)
+        return None
+
+
+def _spawn(event_id):
+    task = asyncio.create_task(run_job(event_id))
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
+
+
+def unfinished_jobs(min_age_seconds=60):
+    with db() as c:
+        c.execute(JOBS_TABLE)
+        return [r['event_id'] for r in c.execute('''SELECT event_id FROM zernio_inbound_jobs WHERE state IN ('pending','running')
+            AND attempts<3 AND created_at > NOW() - INTERVAL '3 hours' AND updated_at < NOW() - make_interval(secs => %s)
+            ORDER BY created_at''', (min_age_seconds,)).fetchall()]
+
+
+def register_worker(app):
+    """After a restart, finish team messages that were saved but not processed (prepare_reply's claim makes a re-run of
+    an already answered message a no-op, so a resume never answers twice)."""
+    async def resume():
+        await asyncio.sleep(45)
+        try:
+            for event_id in await run_in_threadpool(unfinished_jobs):
+                print('ZERNIO_JOB_RESUME', event_id, flush=True)
+                await run_job(event_id)
+        except Exception as exc:
+            print('ZERNIO_JOB_RESUME_FAILED', type(exc).__name__, str(exc)[:160], flush=True)
+
+    @app.on_event('startup')
+    async def start():
+        app.state.zernio_job_resume = asyncio.create_task(resume())
+
+
+async def process(p, takeover, legacy_local_only):
+    metadata = p.get("metadata") or {}
+    account = p.get("account") or {}
+    message = p.get("message") or {}
+    key = os.getenv("ZERNIO_API_KEY", "")
+    event_id = p.get("id")
+    conversation_id = (p.get("conversation") or {}).get("id")
+    account_id = account.get("accountId") or account.get("id")
     from app.whatsapp_admin import owner_sender, admin_reply, is_admin_command
     sender = owner_sender(p)
     transport_action = {}

@@ -118,7 +118,7 @@ def test_signed_paused_inbound_is_retained_without_new_or_legacy_reply(monkeypat
     from fastapi.responses import JSONResponse
     tree = ast.parse(Path('app/zernio_receiver.py').read_text())
     selected = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name in ('receive', 'valid_signature')]
+                and node.name in ('receive', 'valid_signature', 'process')]
     for node in selected: node.decorator_list = []
     retained = []
     def forbidden(*args): raise AssertionError('Paused inbound cannot reach either automatic reply lane')
@@ -196,10 +196,10 @@ def test_legacy_direct_post_is_blocked_when_pause_wins_after_preparation(protect
     provider, state = protected
     tree = ast.parse(Path('app/zernio_receiver.py').read_text())
     selected = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name in ('receive', 'valid_signature')]
+                and node.name in ('receive', 'valid_signature', 'process')]
     for node in selected:
         node.decorator_list = []
-        if node.name == 'receive':
+        if node.name == 'process':
             for inner in node.body:
                 if isinstance(inner, ast.FunctionDef) and inner.name == 'prepare_reply':
                     inner.body = ast.parse("return 'afaaq', {'message': 'Synthetic reply'}").body
