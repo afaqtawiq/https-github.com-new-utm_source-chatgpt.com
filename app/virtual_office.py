@@ -36,8 +36,13 @@ DEPARTMENTS = {
                  'أنت مدير تخليص: أي سؤال «وش المطلوب لاستيراد مادة» (حتى لو مرفق MSDS أو مواصفات) تشغّل له import_requirements '
                  'وتعطي النتيجة كاملة: التناقضات أولًا (مثل أن المورد مصنع سعودي = شراء محلي لا استيراد)، البند والرسم، سابر، الجهات '
                  'والتصاريح، القيود، المستندات، ثم رسالة جاهزة للعميل. لا تقل «لم أستطع التحقق» قبل أن تشغّل الأداة، وما لم يتأكد '
-                 'من مصدر رسمي تضعه تحت «غير متحقق».'),
-        'tools': ('tariff', 'import_requirements', 'saber_exemptions', 'clearance_expert', 'zatca_rules', 'port_storage', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
+                 'من مصدر رسمي تضعه تحت «غير متحقق». '
+                 'شهادات سابر: «شهادة الإرسالية SC» تصدر لكل شحنة من جهة مطابقة معتمدة وتغطي منتجات بنودها وكمياتها والفاتورة التجارية، '
+                 'و«شهادة المطابقة للمنتج PC» لكل منتج خاضع للائحة فنية، والمنتج غير الخاضع للوائح يكفيه إقرار المستورد داخل الإرسالية. '
+                 'إذا أُرفقت شهادة سابر اقرأها أولًا بأداة saber_certificate (أو من النص المرفق في الرسالة) واعرض: الرقم والسريان وجهة المطابقة '
+                 'وكل منتج ببنده وشهادته وكميته، ثم طابق البنود والكميات ورقم الفاتورة مع الفاتورة وقائمة التعبئة والبوليصة؛ '
+                 'وأي اختلاف تذكره بالاسم. لا تقل «لم أتمكن من التحقق» عن شهادة موجودة أمامك.'),
+        'tools': ('saber_certificate', 'tariff', 'import_requirements', 'saber_exemptions', 'clearance_expert', 'zatca_rules', 'port_storage', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
                   'fasah_importer_phone', 'fasah_authorizations', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
                   'runner_deny', 'fasah_billing'),
         'actions': (('🖥️ افتح فسح على جهاز آفاق طويق', 'افتح فسح على جهاز آفاق طويق، وأنا أدخل معلومات الدخول'),
@@ -554,6 +559,16 @@ async def office_upload(key: str, request: Request):
     doc_id = await run_in_threadpool(staff_documents.save, owner, name, mime, data)
     text = str(form.get('text') or '').strip()[:2000]
     if data[:4] == b'%PDF':
+        # A SABER certificate is read from its own text layer and handed to the manager as facts (owner, 25 Nov 2026:
+        # Faisal answered «لم أتمكن من التحقق» to an attached Promate SABER certificate).
+        try:
+            from app import saber_certificate
+            saber = await run_in_threadpool(saber_certificate.read, data)
+            if saber:
+                text = (text + '\n\n' if text else '') + ('[هذه شهادة سابر، قرأها النظام من نص الملف نفسه — اعتمد عليها في ردك واعرضها كاملة، '
+                        'ولا تقل «لم أتمكن من التحقق» ولا تسأل عن وصف المنتج:\n' + saber + ']')
+        except Exception as exc:
+            print('OFFICE_SABER_READ', type(exc).__name__, str(exc)[:160], flush=True)
         # Every shipping document uploaded in the office opens/updates its shipment file (customer, contact, containers).
         try:
             from app import load_vision, shipping_docs
