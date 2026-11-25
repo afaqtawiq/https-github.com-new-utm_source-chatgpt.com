@@ -27,6 +27,10 @@ def test_clearance_without_saber_gets_import_on_behalf_offer():
     ar = wn.import_on_behalf_reply('ابغى اخلص شحنة بدون سابر')
     assert '800 ريال' in ar and '1400 ريال' in ar and '300 ريال' in ar and '2.5%' in ar and '15%' in ar
     assert wn.import_on_behalf_reply('كم سعر شهادة سابر؟') is None
+    # Owner, 25 Nov 2026: importing on our record IS the door-to-door service — collected abroad, delivered to the warehouse.
+    assert 'من الباب إلى الباب' in ar and 'من المورد في بلدها' in ar and 'مستودعك' in ar
+    assert 'door-to-door' in en and 'warehouse' in en
+    assert 'من الباب إلى الباب' in wn.IMPORT_ON_BEHALF and 'لا تخترع' in wn.IMPORT_ON_BEHALF
 
 
 def test_transport_company_is_a_partner_not_a_shipper():
