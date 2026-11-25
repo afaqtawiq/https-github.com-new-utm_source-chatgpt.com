@@ -180,6 +180,14 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'documents_total', 'description': 'Total the payment receipts and invoices (photos or PDFs) THIS person sent on WhatsApp and, when an amount received is given, subtract it and give the remainder — one statement with every file, its reference and amount, the total, the amount received and what is left; unreadable amounts, other currencies, supplier goods invoices and duplicate files are listed apart and not counted. Read-only (nothing recorded in finance). Use for «اجمع الإيصالات والفواتير» «جمع لي المبالغ في الإيصالات واخصمها من 41 ألف» «كم الباقي من 41 ألف بعد الفواتير» «ارسل لي كشف المصاريف من الإيصالات». received = the amount received in SAR (e.g. 41000 for «41 ألف»); hours = only files of the last N hours; count = only the last N files. Default: today\'s files.',
      'input_schema': {'type': 'object', 'properties': {'received': {'type': 'string'}, 'hours': {'type': 'number'}, 'count': {'type': 'integer'}}}},
+    {'name': 'finance_overview', 'description': 'Finance management summary for a month (default this month): billed (posted claims), collected (posted receipts), expenses, collection rate, receivables now and over 90 days, drafts waiting for the owner to post, unbilled FASAH declarations. Use for «ملخص المالية» «وضع الحسابات» «تقرير الشهر المالي». month = YYYY-MM.',
+     'input_schema': {'type': 'object', 'properties': {'month': {'type': 'string'}}}},
+    {'name': 'receivables_aging', 'description': 'Receivables aging per customer (posted only; payments settle the oldest claims first): total, 0–30 / 31–60 / 61–90 / over 90 days, oldest open claim, advances. Use for «أعمار الذمم» «مين متأخر في السداد» «الديون القديمة».',
+     'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'finance_checks', 'description': 'Accounting control check (read-only): possible duplicate documents, drafts unposted for more than 7 days, posted claims without invoice/declaration reference, receivables over 90 days. Use for «فحص الحسابات» «راجع الأخطاء في الحسابات» and before month-end close.',
+     'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'finance_playbook', 'description': 'Accounting playbooks for Afaq (Saudi VAT for clearance & transport incl. zero-rated international transport and disbursements, ZATCA e-invoicing / Fatoora phase 2, chart of accounts & booking rules, month-end close, receivables & collections policy, 13-week cash flow, shipment profitability, expense & petty-cash controls, bank reconciliation, zakat basics, customer statements). Call it BEFORE answering any accounting, VAT, invoicing, closing or reporting question, and follow it. topic = the question in free words; or name = exact playbook.',
+     'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'name': {'type': 'string'}}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'teach_answer', 'description': 'Teach the CUSTOMER agent an approved answer (learning loop). Use for «جواب 2: …» (gap_number from the morning performance report) or «علّم الوكيل: السؤال … الجواب …». answer = exactly what the manager wrote. Needs the manager confirmation code.',
@@ -793,6 +801,26 @@ def tool_documents_total(c, a):
     count = int(a['count']) if str(a.get('count') or '').isdigit() else None
     hours = float(a['hours']) if isinstance(a.get('hours'), (int, float)) and a['hours'] > 0 else None
     return document_totals.run(owner, received, hours, count)
+
+
+def tool_finance_overview(c, a):
+    from app import finance_desk
+    return finance_desk.overview(_clean(a.get('month'), 7))
+
+
+def tool_receivables_aging(c, a):
+    from app import finance_desk
+    return finance_desk.aging_text()
+
+
+def tool_finance_checks(c, a):
+    from app import finance_desk
+    return finance_desk.checks()
+
+
+def tool_finance_playbook(c, a):
+    from app import finance_desk
+    return finance_desk.playbook(str(a.get('topic') or ''), str(a.get('name') or '').strip())
 
 
 def tool_driver_prices(c, a):
