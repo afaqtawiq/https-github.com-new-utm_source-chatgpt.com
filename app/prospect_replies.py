@@ -33,7 +33,7 @@ def init():
 
 # ---------- approved prices (read from the agent knowledge, never invented) ----------
 
-def price_table():
+def price_table(include_extra=True):
     from app.customs_knowledge import KNOWLEDGE
     section = KNOWLEDGE.split('16) أسعار آفاق طويق المعتمدة', 1)[-1].split('17)', 1)[0]
     tiers = {}
@@ -44,6 +44,10 @@ def price_table():
     routes = {}
     for m in re.finditer(r'^- (من .+? إلى .+?):\s*([\d,]+) ريال', section, re.M):
         routes[m.group(1).strip()] = int(m.group(2).replace(',', ''))
+    if include_extra:
+        from app.rate_card import approved_extra
+        for k, v in approved_extra().items():
+            routes.setdefault(k, v)
     return tiers, routes
 
 

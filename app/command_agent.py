@@ -168,6 +168,12 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'days': {'type': 'string'}}}},
     {'name': 'driver_price_request', 'description': 'Collect MARKET prices from registered drivers for a real shipment: ask matching drivers on WhatsApp «بكم تحملها؟» (price request, not an assignment). Use for «اجمع أسعار من السواقين» «اسأل السواقين بكم ينقلون». cargo = what is carried (e.g. حاوية 40 قدم على سطحة 22 طن). vehicle_type optional (سطحة، جوانب، براد، دينا…). limit = max drivers (default 40). Needs the manager confirmation code before sending.',
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'cargo': {'type': 'string'}, 'loading_date': {'type': 'string'}, 'vehicle_type': {'type': 'string'}, 'limit': {'type': 'string'}}, 'required': ['origin', 'destination', 'cargo']}},
+    {'name': 'rate_card', 'description': 'Transport rate card: every approved customer price per lane, plus the lanes still being priced with the drivers\' market prices (lowest/median/count, last 60 days) and a suggested customer price. Use for «جدول الأسعار» «أسعار المسارات» «وش المسارات الناقصة».',
+     'input_schema': {'type': 'object', 'properties': {}}},
+    {'name': 'rate_card_survey', 'description': 'Manager only. Ask the registered drivers for their price on ALL lanes missing from the approved price list (Dammam port → Riyadh/Jubail/Qassim, Jeddah port → Makkah/Madinah/Dammam/Abha, Riyadh → Dammam curtain trailer) with ONE «نفذ» code; each driver is asked about one lane only. Use for «اجمع أسعار المسارات الناقصة» «مسح الأسعار». Results: rate_card / driver_prices.',
+     'input_schema': {'type': 'object', 'properties': {'per_lane': {'type': 'integer'}}}},
+    {'name': 'approve_route_price', 'description': 'Manager only. Approve a CUSTOMER transport price for a lane not in the base price list (e.g. «اعتمد سعر مسار ميناء الدمام إلى الرياض 2800»). It immediately joins quotes, the /price calculator and the customer agent. price in SAR for a truck up to 27 t.',
+     'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'price': {'type': 'string'}}, 'required': ['origin', 'destination', 'price']}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'teach_answer', 'description': 'Teach the CUSTOMER agent an approved answer (learning loop). Use for «جواب 2: …» (gap_number from the morning performance report) or «علّم الوكيل: السؤال … الجواب …». answer = exactly what the manager wrote. Needs the manager confirmation code.',
@@ -730,6 +736,30 @@ def tool_driver_price_request(c, a):
     return (f"جاهز لسؤال {len(drivers)} سائق عن سعرهم:\n" + driver_quotes.preview(req) + f"\nللإرسال اكتب: نفذ {token}")
 
 
+def tool_rate_card(c, a):
+    from app import rate_card
+    return rate_card.card()
+
+
+def tool_rate_card_survey(c, a):
+    from app import rate_card
+    if not _member().get('manager'):
+        return 'مسح الأسعار يطلبه المدير فقط.'
+    per = max(5, min(int(re.sub(r'\D', '', str(a.get('per_lane') or '')) or rate_card.PER_LANE), 30))
+    rows, text = rate_card.survey_preview(None, per)
+    if not rows:
+        return text
+    token = _pending(c, {'tool': 'rate_card_survey', 'per_lane': per})
+    return text + f'\nللإرسال اكتب: نفذ {token}'
+
+
+def tool_approve_route_price(c, a):
+    from app import rate_card
+    if not _member().get('manager'):
+        return 'اعتماد الأسعار للمدير فقط.'
+    return rate_card.approve(a.get('origin'), a.get('destination'), a.get('price'), _member().get('name') or 'المدير')
+
+
 def tool_driver_prices(c, a):
     from app import driver_quotes
     m = re.search(r'(\d+)', str(a.get('ref') or ''))
@@ -1242,6 +1272,9 @@ def _execute_action(c, action, member):
     if action.get('tool') == 'teach_answer':
         from app import agent_learning
         return agent_learning.save(action['question'], action['answer'], member.get('name') or '')
+    if action.get('tool') == 'rate_card_survey':
+        from app import rate_card
+        return rate_card.start_survey(action, member.get('name') or '')
     if action.get('tool') == 'driver_price_request':
         from app import driver_quotes
         return driver_quotes.start(action, member.get('name') or '')

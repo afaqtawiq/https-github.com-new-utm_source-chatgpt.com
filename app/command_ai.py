@@ -280,6 +280,11 @@ def answer_question(question):
     from app.customs_knowledge import KNOWLEDGE
     from app.port_terminals import KNOWLEDGE as _PORT
     KNOWLEDGE = KNOWLEDGE + _PORT
+    try:
+        from app.rate_card import approved_text
+        KNOWLEDGE = KNOWLEDGE + approved_text()
+    except Exception:
+        pass
     key = os.getenv('ANTHROPIC_API_KEY', '')
     if not key:
         return None
