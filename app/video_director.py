@@ -225,7 +225,7 @@ def finished_text(c, job_id, team_video, caption, landscape_url=None):
     chat = transport_desk.manager_chat(c)
     if chat:
         code = transport_desk.pending(c, chat[0], chat[1], {'tool': 'publish_video', 'video_id': team_video}, 48 * 60)
-        lines.append(f'للنشر على فيسبوك وإنستغرام ويوتيوب وتيك توك اكتب: نفذ {code}')
+        lines.append(f'للنشر على كل المنصات المربوطة (فيسبوك، إنستغرام، يوتيوب، تيك توك، لينكدإن، إكس…) اكتب: نفذ {code}')
     return '\n'.join(lines)
 
 
@@ -255,7 +255,8 @@ def sweep():
         if not main:
             _deliver(f'⚠️ اكتمل الفيديو #{jid} لكن ما لقيت الملف النهائي؛ راجع استوديو الإعلانات.')
             continue
-        vid = video_publish.save(bytes(main['payload']), 'video/mp4', plan.get('caption') or '', 'الفيديو السينمائي #' + str(jid))
+        vid = video_publish.save(bytes(main['payload']), 'video/mp4', plan.get('caption') or '', 'الفيديو السينمائي #' + str(jid),
+                                 ai_generated=True)
         landscape = advert_studio.export_url(exports['16:9']['token']) if '16:9' in exports and main['ratio'] != '16:9' else None
         with db() as c:
             c.execute('UPDATE video_director_jobs SET team_video_id=%s WHERE job_id=%s', (vid, jid))

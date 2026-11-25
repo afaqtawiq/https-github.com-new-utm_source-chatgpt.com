@@ -85,10 +85,31 @@ First line = the hook again. 2–3 short lines of value. CTA: «راسلنا و�
 - No prices, durations, guarantees, statistics or government approvals in videos unless the manager provides them for that video.
 - No customer names, plates, documents or faces without written consent.
 - Spending (cinematic) and publishing are two separate «نفذ» approvals by the manager.
-- Facebook/Instagram/YouTube/TikTok publish automatically after «نفذ»; Snapchat, X and LinkedIn are not connected for auto-publishing yet — send the manager the preview link to post there manually.
+- One publish «نفذ» sends the video to every connected platform (see section 11). Never publish without it.
 
 ## 10. Cadence and measurement
 
 - Target: 3 short videos a week (2 free + 1 team clip) + 1 cinematic hero video a month.
 - Best posting windows (Saudi time): 1–3 pm and 8–11 pm; Thursday/Friday evenings strong.
 - Measure per video after 72 h: views, 3-second hold, completion, shares, WhatsApp inquiries that mention the video. Repeat the hooks that win; drop the ones under the account's median.
+
+## 11. Publishing everywhere (one «نفذ»)
+
+After the manager's publish code the agent publishes the same video, with a caption written for each platform:
+
+| Platform | Route | Caption the agent sends |
+|---|---|---|
+| Facebook (page video) + Instagram (Reels) | Meta Business directly | full caption + WhatsApp + price-calculator link |
+| YouTube (Shorts) + TikTok | Zernio | title «آفاق طويق | hook», full caption; AI-generated videos are labelled as AI (YouTube synthetic media, TikTok AI-made) as the platforms require |
+| LinkedIn company page | Zernio (when connected) | full professional caption |
+| X @afaqtql0 | Zernio (when connected; X bills ≈0.015$ per post, a link makes it ≈0.20$) | hook + WhatsApp + 2 hashtags, no links, ≤270 characters |
+| Threads, Pinterest, Bluesky, Telegram | Zernio (when connected) | short hook + WhatsApp + 3 hashtags |
+| Snapchat @afaqtawiq | not automatic yet (Snap has not approved the Zernio app) | the manager posts the preview link manually from my.snapchat.com (Spotlight + Story) |
+
+The manager receives one report: ✅ link per platform, ❌ with the reason, ⚪ not connected with the exact step to connect it.
+
+Publishing skills to apply every time:
+- First line of every caption = the hook; the WhatsApp number in every caption; no prices unless the manager gave them.
+- 9:16 for all short-video platforms; the 16:9 version (cinematic «both») goes to YouTube long form, LinkedIn and the website.
+- After 72 h ask `marketing_report` and note which platform and hook performed best; reuse the winners.
+- Reply to comments through the comment auto-reply where the platform allows it.

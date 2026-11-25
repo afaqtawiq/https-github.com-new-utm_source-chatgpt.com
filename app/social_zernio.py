@@ -179,7 +179,11 @@ def publication_result(data, expected):
         actual.add((p.get('platform'), account_id))
         url = p.get('platformPostUrl') or ''
         u = urlsplit(url)
-        allowed_hosts = {'youtube': {'www.youtube.com', 'youtube.com', 'youtu.be'}, 'tiktok': {'www.tiktok.com', 'tiktok.com'}}
+        allowed_hosts = {'youtube': {'www.youtube.com', 'youtube.com', 'youtu.be'}, 'tiktok': {'www.tiktok.com', 'tiktok.com'},
+                         'twitter': {'x.com', 'twitter.com', 'www.twitter.com'}, 'linkedin': {'www.linkedin.com', 'linkedin.com'},
+                         'threads': {'www.threads.net', 'threads.net', 'www.threads.com', 'threads.com'},
+                         'pinterest': {'www.pinterest.com', 'pinterest.com'}, 'bluesky': {'bsky.app'}, 'telegram': {'t.me'},
+                         'snapchat': {'www.snapchat.com', 'snapchat.com', 'story.snapchat.com'}}
         if u.scheme != 'https' or u.hostname not in allowed_hosts.get(p.get('platform'), set()) or u.username or u.password:
             url = ''
         error = p.get('errorMessage') or p.get('error') or p.get('failureReason') or ''

@@ -91,7 +91,8 @@ DEPARTMENTS = {
                  'وأنتِ أيضًا منتجة الفيديو: قبل أي فيديو افتحي دليل «afaq-video-production» (sales_playbook) ثم اختاري: '
                  'cinematic_video للفيديو الاحترافي/السينمائي/الإعلاني (لقطات مولدة بالذكاء الاصطناعي وتعليق صوتي احترافي — مدفوع، '
                  'المدير يوافق على التكلفة بـ«نفذ»)، وstock_video للفيديو المجاني السريع من مقاطع حقيقية؛ وvideo_status لمتابعة الطلبات. '
-                 'النشر على فيسبوك وإنستغرام ويوتيوب وتيك توك برمز «نفذ» مستقل بعد المعاينة.'),
+                 'النشر برمز «نفذ» مستقل بعد المعاينة يرسل الفيديو لكل المنصات المربوطة (فيسبوك، إنستغرام، يوتيوب، تيك توك، '
+                 'ولينكدإن وإكس وثريدز وغيرها متى ما رُبطت في Zernio) بنص مناسب لكل منصة، وسناب يدوي برابط المعاينة.'),
         'tools': ('sales_playbook', 'find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'cinematic_video', 'stock_video', 'video_status', 'whatsapp_templates', 'send_email',
                   'send_whatsapp')},
     'service': {
