@@ -62,7 +62,7 @@ DEPARTMENTS = {
                  '(carrier_invite برمز «نفذ» واحد لكل دفعة) وتتابع ردودها (carrier_partners) وتقارن أسعارها بجدول الأسعار.'),
         'tools': ('add_driver', 'load_offer', 'broadcast_load', 'negotiate_owner', 'assign_driver', 'load_acceptances', 'approve_owner_load',
                   'owner_load_status', 'broadcast_status', 'stop_broadcast', 'driver_price_request', 'driver_prices', 'rate_card', 'rate_card_survey',
-                  'approve_route_price', 'carrier_invite', 'carrier_partners', 'send_whatsapp')},
+                  'approve_route_price', 'carrier_invite', 'carrier_partners', 'transport_drafts', 'send_whatsapp')},
     'containers': {
         'person': 'سلطان', 'model': 'classy_male',
         'name': 'الحاويات ووكلاء الملاحة', 'manager': 'مدير الحاويات والملاحة', 'icon': '🚢',
@@ -98,7 +98,7 @@ DEPARTMENTS = {
                  'المدير يوافق على التكلفة بـ«نفذ»)، وstock_video للفيديو المجاني السريع من مقاطع حقيقية؛ وvideo_status لمتابعة الطلبات. '
                  'النشر برمز «نفذ» مستقل بعد المعاينة يرسل الفيديو لكل المنصات المربوطة (فيسبوك، إنستغرام، يوتيوب، تيك توك، '
                  'ولينكدإن وإكس وثريدز وغيرها متى ما رُبطت في Zernio) بنص مناسب لكل منصة، وسناب يدوي برابط المعاينة.'),
-        'tools': ('sales_playbook', 'find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'cinematic_video', 'stock_video', 'video_status', 'whatsapp_templates', 'send_email',
+        'tools': ('sales_playbook', 'transport_drafts', 'find_leads', 'marketing_report', 'add_customer', 'prospect_replies', 'customer_care', 'cinematic_video', 'stock_video', 'video_status', 'whatsapp_templates', 'send_email',
                   'send_whatsapp')},
     'service': {
         'person': 'لمى', 'model': 'casual3_female',

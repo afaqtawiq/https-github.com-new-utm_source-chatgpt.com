@@ -251,6 +251,25 @@ async def voice_reply(job, data, jid, lease):
     return (answer, True) if answer else (human_fallback(transcript, history), False)
 
 
+async def transport_quote_shadow(job, text, history):
+    """Pilot (closed, TRANSPORT_QUOTE_PILOT=1): the customer's messages of THIS account+conversation (already scoped and
+    screened by recent_exchanges) → an internal transport draft for Reem / a rate review for Khaled. Shadow only: the reply
+    above is unchanged, nothing is sent, no price changes, no customer text is logged."""
+    try:
+        from app import transport_quote_pilot
+        if not transport_quote_pilot.pilot_enabled():
+            return None
+        messages = [h.get('question') for h in list(history or ()) if h.get('question')] + [text]
+        if not transport_quote_pilot.relevant(messages):
+            return None
+        result = await run_in_threadpool(transport_quote_pilot.process, job['account_id'], job['conversation_id'], job['sender'], messages)
+        print('TRANSPORT_QUOTE_PILOT', result['state'], flush=True)
+        return result
+    except Exception as exc:
+        print('TRANSPORT_QUOTE_PILOT_ERROR', type(exc).__name__, flush=True)
+        return None
+
+
 async def carrier_context(job, data, question, history):
     """Partner detection (owner, 24 Nov 2026): a transport company / fleet owner is a partner, not a shipper.
     Returns the question with a system hint for the reply, and tells the manager once."""
@@ -613,6 +632,7 @@ async def processing(job):
                                     reply_text=natural or human_fallback(natural_text, history),
                                     diagnostics={'model_success': bool(natural), 'model_attempted': True,
                                                  'model_reason': 'natural_conversation', 'gate': data.get('question_reason') or data.get('question_kind')})
+            await transport_quote_shadow(job, natural_text, history)
             await run_in_threadpool(store.prepare_reply, jid, lease)
         return
     if not data.get('question_allowed'):
