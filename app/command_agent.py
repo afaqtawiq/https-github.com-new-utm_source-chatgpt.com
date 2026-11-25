@@ -193,6 +193,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'received': {'type': 'string'}, 'day': {'type': 'string'}, 'hours': {'type': 'number'}, 'count': {'type': 'integer'}}}},
     {'name': 'customer_statement', 'description': 'Customer account statement for a period with payment allocation: closing balance at period end (posted), later movements after the period listed apart (they do not change the closing), remaining to collect today, unposted drafts apart (provisional), which invoice each payment settled (proven allocation only), and payments without a proven allocation listed alone. Sends the PDF to this chat. Read-only, no posting needed. Use for «كشف حساب العميل X لشهر أكتوبر» «كشف عميل مع تخصيص الدفعات». start/end = YYYY-MM-DD (default: last month); currency default SAR; owner = the company account if the customer has more than one.',
      'input_schema': {'type': 'object', 'properties': {'customer': {'type': 'string'}, 'start': {'type': 'string'}, 'end': {'type': 'string'}, 'currency': {'type': 'string'}, 'owner': {'type': 'string'}}, 'required': ['customer']}},
+    {'name': 'saber_certificate', 'description': 'Read the SABER certificate (شهادة سابر / شهادة إرسالية SC) PDF this person sent (last 3 days) straight from its text: certificate number, issue/expiry and validity, conformity body, CR, and every product with HS code, model, trademark, product certificate (PC) number or «not subject to technical regulations», quantity, and the commercial invoice it covers. Use FIRST whenever a SABER certificate is attached or asked about («شهادة سابر» «شهادة الإرسالية» «سابر بروميت»), before any online check; then compare HS codes, quantities and the invoice number with the invoice / packing list / bill of lading.',
+     'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'finance_playbook', 'description': 'Accounting playbooks for Afaq (Saudi VAT for clearance & transport incl. zero-rated international transport and disbursements, ZATCA e-invoicing / Fatoora phase 2, chart of accounts & booking rules, month-end close, receivables & collections policy, 13-week cash flow, shipment profitability, expense & petty-cash controls, bank reconciliation, zakat basics, customer statements). Call it BEFORE answering any accounting, VAT, invoicing, closing or reporting question, and follow it. topic = the question in free words; or name = exact playbook.',
      'input_schema': {'type': 'object', 'properties': {'topic': {'type': 'string'}, 'name': {'type': 'string'}}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
@@ -893,6 +895,17 @@ def tool_customer_statement(c, a):
         return fcs.run(name, start, end, (_clean(a.get('currency'), 3) or 'SAR').upper(), _clean(a.get('owner'), 80) or None, chat=CHAT.get())
     except Exception as exc:  # statement_data raises HTTPException on inconsistent claim details
         return 'تعذر إعداد الكشف: ' + str(getattr(exc, 'detail', None) or exc)[:200]
+
+
+def tool_saber_certificate(c, a):
+    from app import saber_certificate, staff_documents
+    chat = CHAT.get()
+    owner = staff_documents.SENDER.get() or (chat[0] if chat else None)
+    if not owner:
+        return 'أرسل شهادة سابر (PDF) هنا ثم اسأل عنها.'
+    text = saber_certificate.latest_text(owner)
+    return text or ('ما لقيت شهادة سابر PDF بنص مقروء في ملفاتك آخر 3 أيام. إذا كانت صورة/مسح ضوئي، '
+                    'اقرأها بأداة ask_document، أو أرسل ملف PDF الأصلي من منصة سابر.')
 
 
 def tool_finance_playbook(c, a):
