@@ -174,6 +174,10 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'per_lane': {'type': 'integer'}}}},
     {'name': 'approve_route_price', 'description': 'Manager only. Approve a CUSTOMER transport price for a lane not in the base price list (e.g. «اعتمد سعر مسار ميناء الدمام إلى الرياض 2800»). It immediately joins quotes, the /price calculator and the customer agent. price in SAR for a truck up to 27 t.',
      'input_schema': {'type': 'object', 'properties': {'origin': {'type': 'string'}, 'destination': {'type': 'string'}, 'price': {'type': 'string'}}, 'required': ['origin', 'destination', 'price']}},
+    {'name': 'carrier_invite', 'description': 'Manager only. Invite transport COMPANIES from the carrier directory (partners, not customers) to send their truck types, lanes and rates, in the approved partnership template — up to 20 per batch with ONE «نفذ» code; companies contacted by the daily outreach in the last 14 days or that declined are skipped. Use for «ادعُ شركات النقل للشراكة» «اطلب أسعار شركات النقل» «تواصل مع الناقلين».',
+     'input_schema': {'type': 'object', 'properties': {'count': {'type': 'integer'}}}},
+    {'name': 'carrier_partners', 'description': 'Status of the carrier partnership invitations: invited, replied (with their reply / rates), declined, failed. Use for «حالة الناقلين الشركاء» «مين رد من شركات النقل».',
+     'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'driver_prices', 'description': 'Prices the drivers replied with for a price request (lowest/median/highest, each driver) plus the market reference for that route. ref like TQ-5 (latest if omitted). e.g. «أسعار TQ-5» «كم سعّر السواقين».',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}}}},
     {'name': 'teach_answer', 'description': 'Teach the CUSTOMER agent an approved answer (learning loop). Use for «جواب 2: …» (gap_number from the morning performance report) or «علّم الوكيل: السؤال … الجواب …». answer = exactly what the manager wrote. Needs the manager confirmation code.',
@@ -760,6 +764,23 @@ def tool_approve_route_price(c, a):
     return rate_card.approve(a.get('origin'), a.get('destination'), a.get('price'), _member().get('name') or 'المدير')
 
 
+def tool_carrier_invite(c, a):
+    from app import carrier_partners
+    if not _member().get('manager'):
+        return 'دعوة الناقلين للشراكة يطلبها المدير فقط.'
+    count = max(1, min(int(re.sub(r'\D', '', str(a.get('count') or '')) or carrier_partners.BATCH), carrier_partners.BATCH))
+    ids, text = carrier_partners.preview(count)
+    if not ids:
+        return text
+    token = _pending(c, {'tool': 'carrier_invite', 'ids': ids})
+    return text + f'\nللإرسال اكتب: نفذ {token}'
+
+
+def tool_carrier_partners(c, a):
+    from app import carrier_partners
+    return carrier_partners.status_text()
+
+
 def tool_driver_prices(c, a):
     from app import driver_quotes
     m = re.search(r'(\d+)', str(a.get('ref') or ''))
@@ -1272,6 +1293,9 @@ def _execute_action(c, action, member):
     if action.get('tool') == 'teach_answer':
         from app import agent_learning
         return agent_learning.save(action['question'], action['answer'], member.get('name') or '')
+    if action.get('tool') == 'carrier_invite':
+        from app import carrier_partners
+        return carrier_partners.start(action, member.get('name') or '')
     if action.get('tool') == 'rate_card_survey':
         from app import rate_card
         return rate_card.start_survey(action, member.get('name') or '')

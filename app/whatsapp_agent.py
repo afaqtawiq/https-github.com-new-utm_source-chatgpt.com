@@ -255,9 +255,13 @@ async def carrier_context(job, data, question, history):
     """Partner detection (owner, 24 Nov 2026): a transport company / fleet owner is a partner, not a shipper.
     Returns the question with a system hint for the reply, and tells the manager once."""
     try:
-        from app import carrier_leads
+        from app import carrier_leads, carrier_partners
+        invited = await run_in_threadpool(carrier_partners.on_reply, job['sender'], question)
+        if invited is not None and invited != '':
+            from app.owner_briefing import deliver
+            await deliver(invited)
         texts = [h.get('question') for h in list(history or ())] + [question]
-        if not carrier_leads.looks_like_carrier(texts, data.get('sender_name')):
+        if invited == '' and not carrier_leads.looks_like_carrier(texts, data.get('sender_name')):
             return question
         notice = await run_in_threadpool(carrier_leads.note, job['sender'], texts, data.get('sender_name') or '')
         if notice:
