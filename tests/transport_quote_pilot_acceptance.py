@@ -16,7 +16,7 @@ BASE = 'عندي حمولة من جدة إلى الرياض، بضاعة: خشب
 
 
 def run():
-    from app import transport_intake as ti, whatsapp_agent
+    from app import transport_quote_pilot as ti, whatsapp_agent
     from app.prospect_replies import price_table
     from app.storage import db
     ti.init()

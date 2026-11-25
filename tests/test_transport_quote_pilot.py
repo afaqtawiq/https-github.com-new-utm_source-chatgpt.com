@@ -4,7 +4,7 @@ import unittest
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.transport_intake import intake,quote
+from app.transport_quote_pilot import intake,quote
 
 TODAY=date(2026,11,25)
 BASE='عندي حمولة من جدة إلى الرياض، بضاعة: خشب، حاوية ٢٠ قدم، ٢٥ طن، التحميل الخميس، مع رجوع الفارغ، بالرحلة'
@@ -68,6 +68,6 @@ class Integration(unittest.TestCase):
         self.assertEqual(quote(card, [dict(cur, empty_return=False)], TODAY)['state'], X)
 
     def test_relevance_gate(self):
-        from app.transport_intake import relevant
+        from app.transport_quote_pilot import relevant
         self.assertFalse(relevant(['السلام عليكم', 'شكرا']))
         self.assertTrue(relevant(['كم النقل من جدة إلى الرياض']))

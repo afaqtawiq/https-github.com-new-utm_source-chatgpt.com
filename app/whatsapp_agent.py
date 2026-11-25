@@ -256,13 +256,13 @@ async def transport_quote_shadow(job, text, history):
     screened by recent_exchanges) → an internal transport draft for Reem / a rate review for Khaled. Shadow only: the reply
     above is unchanged, nothing is sent, no price changes, no customer text is logged."""
     try:
-        from app import transport_intake
-        if not transport_intake.pilot_enabled():
+        from app import transport_quote_pilot
+        if not transport_quote_pilot.pilot_enabled():
             return None
         messages = [h.get('question') for h in list(history or ()) if h.get('question')] + [text]
-        if not transport_intake.relevant(messages):
+        if not transport_quote_pilot.relevant(messages):
             return None
-        result = await run_in_threadpool(transport_intake.process, job['account_id'], job['conversation_id'], job['sender'], messages)
+        result = await run_in_threadpool(transport_quote_pilot.process, job['account_id'], job['conversation_id'], job['sender'], messages)
         print('TRANSPORT_QUOTE_PILOT', result['state'], flush=True)
         return result
     except Exception as exc:

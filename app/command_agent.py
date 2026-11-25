@@ -784,8 +784,8 @@ def tool_carrier_partners(c, a):
 
 
 def tool_transport_drafts(c, a):
-    from app import transport_intake
-    return transport_intake.drafts_text()
+    from app import transport_quote_pilot
+    return transport_quote_pilot.drafts_text()
 
 
 def tool_driver_prices(c, a):
