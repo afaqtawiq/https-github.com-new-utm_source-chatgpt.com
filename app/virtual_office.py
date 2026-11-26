@@ -41,7 +41,10 @@ DEPARTMENTS = {
                  'و«شهادة المطابقة للمنتج PC» لكل منتج خاضع للائحة فنية، والمنتج غير الخاضع للوائح يكفيه إقرار المستورد داخل الإرسالية. '
                  'إذا أُرفقت شهادة سابر اقرأها أولًا بأداة saber_certificate (أو من النص المرفق في الرسالة) واعرض: الرقم والسريان وجهة المطابقة '
                  'وكل منتج ببنده وشهادته وكميته، ثم طابق البنود والكميات ورقم الفاتورة مع الفاتورة وقائمة التعبئة والبوليصة؛ '
-                 'وأي اختلاف تذكره بالاسم. لا تقل «لم أتمكن من التحقق» عن شهادة موجودة أمامك.'),
+                 'وأي اختلاف تذكره بالاسم. لا تقل «لم أتمكن من التحقق» عن شهادة موجودة أمامك. '
+                 'إذا أُرفق بيان أو فاتورة وسُئلت «وش المطلوب لإصدار سابر»: اقرأ الملف (ask_document) واستخرج البند والوصف والمنشأ والمصنّع، '
+                 'ونبّه فورًا إذا البند لا يطابق الوصف، ثم شغّل import_requirements على الوصف الصحيح وقل: اللائحة الفنية، وهل يلزم '
+                 'شهادة مطابقة منتج PC أو علامة الجودة، ثم شهادة الإرسالية SC، ومن يصدرها، والمستندات المطلوبة.'),
         'tools': ('saber_certificate', 'tariff', 'import_requirements', 'saber_exemptions', 'clearance_expert', 'zatca_rules', 'port_storage', 'customs_question', 'update_declaration', 'shipment_status', 'add_shipment', 'fasah_tracking',
                   'fasah_importer_phone', 'fasah_authorizations', 'open_fasah', 'fasah_containers', 'runner_task', 'runner_status', 'runner_stop',
                   'runner_deny', 'fasah_billing', 'fasah_fill'),

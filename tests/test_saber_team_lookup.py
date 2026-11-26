@@ -191,3 +191,4 @@ def test_ordinary_answer_question_keeps_legacy_route(modules, monkeypatch):
     monkeypatch.setattr(httpx, 'Client', lambda **kw: original_client(transport=httpx.MockTransport(model), **kw))
     assert ai.answer_question('كيف حالك؟') == 'legacy answer'
     assert len(calls) == 1 and 'tools' not in calls[0]
+
