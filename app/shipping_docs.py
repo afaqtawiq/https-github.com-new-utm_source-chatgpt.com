@@ -16,7 +16,10 @@ container detention/demurrage), free_until (YYYY-MM-DD last free day if written)
 depot/yard if written), daily_cost (detention/demurrage per day per container in SAR if written), container_size (20, 40 or
 45 when all containers on the document have the same size), consignee_contact (contact person named for the consignee or
 notify party), consignee_phone, consignee_email (as written for the consignee/notify party), shipper, goods (short
-description), hs_code, pol (port of loading), pod (port of discharge). null when absent."""
+description), hs_code, pol (port of loading), pod (port of discharge), consignee_address (the consignee's full address
+with city and country, as written), notify_party (name, city and country as written), final_destination (Final Place of
+Delivery as written), marks (the Marks and Numbers text as written, including any DEST:/DESTINATION line). The consignee
+is the receiver; the notify party is NOT the importer. null when absent."""
 
 
 def _date(value):
@@ -78,6 +81,10 @@ def register(fields, caption=''):
     for label, key in (('البوليصة', 'bill_no'), ('المستلم', 'consignee'), ('مكان الإرجاع', 'return_place')):
         if fields.get(key):
             lines.append(f'• {label}: {fields[key]}')
+    from app import customs_movement  # import vs transit from the final consignee (owner, 26 Nov 2026)
+    movement = customs_movement.summary_ar(customs_movement.infer(fields), str(fields.get('pod') or '').strip())
+    if movement:
+        lines.append(movement)
     if agent:
         lines.append(f"• الوكيل الملاحي: {agent['name']}" + (f" — بريد التمديد/الغرامات: {contact['email']}" if contact else ' — لا يوجد بريد مسجل له'))
     else:

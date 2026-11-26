@@ -213,8 +213,25 @@ def arrival_message(row):
              f"• من {row.get('pol') or '—'} إلى {row.get('pod') or 'ميناء جدة الإسلامي'}",
              f'• موعد الوصول المتوقع: {_eta(row)}',
              f"• الحاويات ({len(boxes)}): {'، '.join(boxes) if boxes else '—'}",
-             '', 'نتابع الوصول والبيان الجمركي ونبلغكم بكل مرحلة حتى تسليم البضاعة في مستودعكم.']
+             '', _arrival_tail(row)]
     return '\n'.join(lines) + _sign()
+
+
+def _transit(row):
+    """(destination_ar, exit_port) when the file is transit, else None (owner, 26 Nov 2026)."""
+    if (row.get('movement') or '') != 'transit':
+        return None
+    from app import customs_movement as cm
+    code = row.get('destination') or ''
+    return cm.COUNTRIES.get(code, ('خارج السعودية',))[0], cm.EXIT_PORT.get(code, '')
+
+
+def _arrival_tail(row):
+    transit = _transit(row)
+    if transit:
+        return (f'نتابع الوصول وبيان العبور (الترانزيت) ونبلغكم بكل مرحلة حتى خروج الشحنة إلى {transit[0]}'
+                + (f' عبر {transit[1]}' if transit[1] else '') + '.')
+    return 'نتابع الوصول والبيان الجمركي ونبلغكم بكل مرحلة حتى تسليم البضاعة في مستودعكم.'
 
 
 # ------------------------------------------------------------------ 4) declaration print
@@ -399,10 +416,26 @@ def run(query, actor=''):
         s = steps.get(key) or {}
         return s.get('status') not in ('sent', 'done') and not (s.get('status') == 'prepared' and _fresh(s))
 
+    # 0) declaration type: the final consignee decides, not the Saudi port or notify party (owner, 26 Nov 2026)
+    from app.shipment_files import movement_line
+    out.append(movement_line(row))
+    movement = row.get('movement') or ''
+    if movement == 'review':
+        out.append('⛔ أوقفت سير الشحنة حتى يُحسم نوع البيان؛ لم أجهّز أي رسالة للعميل أو الوكيل.')
+        _save(row['id'], log=(actor + ': ' if actor else '') + 'سير الشحنة موقوف: نوع البيان غير محسوم')
+        return '\n'.join(x for x in out if x is not None)
+    transit = _transit(row)
+
     # 1) authorization
-    state, line = authorization(row)
-    out.append('\n1️⃣ تفويض فسح: ' + line)
-    if state == 'unknown':
+    state, line = ('transit', '') if transit else authorization(row)
+    if transit:
+        out.append(f'\n1️⃣ تفويض فسح: الشحنة ترانزيت إلى {transit[0]} — لا أجهّز طلب تفويض استيراد للمرسل إليه. '
+                   'فيصل: حدّد الجهة التي يُقدَّم باسمها بيان العبور والضمان قبل التقديم.')
+    else:
+        out.append('\n1️⃣ تفويض فسح: ' + line)
+    if state == 'transit':
+        pass
+    elif state == 'unknown':
         try:
             from app import fasah_authorizations
             out.append('   ' + fasah_authorizations.answer(row['customer'], actor or 'فيصل').split('\n')[-1])
@@ -425,7 +458,8 @@ def run(query, actor=''):
     if missing and due('documents'):
         code = _prepare(row, 'documents', documents_message(row, missing), 'طلب المستندات الناقصة')
         out.append('   ' + (code or 'لا يوجد رقم/إيميل للعميل.'))
-    out.append('   (فيصل: راجع اشتراطات البند — سابر/الغذاء والدواء — بأداة import_requirements)')
+    out.append('   (فيصل: ' + ('راجع ضوابط العبور للبند والمسار؛ لا تطبق اشتراطات الاستيراد على الترانزيت)' if transit else
+                                'راجع اشتراطات البند — سابر/الغذاء والدواء — بأداة import_requirements)'))
 
     # 3) arrival report
     out.append(f'\n3️⃣ الوصول: {_eta(row)}' + (f" — {row.get('vessel')}" if row.get('vessel') else ''))
@@ -439,7 +473,12 @@ def run(query, actor=''):
 
     # 4) declaration
     dec = steps.get('declaration') or {}
-    if not row.get('declaration_no'):
+    if transit and not row.get('declaration_no'):
+        out.append('\n4️⃣ بيان العبور: لم يُسجل رقمه بعد — فيصل: قدّم بيان عبور (ترانزيت) في فسح بالضمان ومنفذ الخروج'
+                   + (f' ({transit[1]} متوقع)' if transit[1] else '') + '، ثم سجّل رقمه في الملف.')
+    elif transit and (steps.get('declaration_send') or {}).get('status') != 'sent' and dec.get('status') != 'ready':
+        out.append(f"\n4️⃣ بيان العبور {row['declaration_no']}: اطبعه من فسح يدويًا؛ الطباعة التلقائية مخصصة لبيانات الاستيراد.")
+    elif not row.get('declaration_no'):
         out.append('\n4️⃣ البيان الجمركي: لم يُسجل رقمه بعد — فيصل: قدّم البيان في فسح ثم سجّل رقمه في الملف، ويُطبع من فسح ويُجهّز للعميل تلقائيًا.')
     elif dec.get('status') == 'ready' and due('declaration_send'):
         out.append(f"\n4️⃣ البيان {row['declaration_no']}: النسخة جاهزة {dec.get('link')}")
@@ -467,8 +506,13 @@ def run(query, actor=''):
 
     # 6) the rest, by stage
     label, nxt = STAGE_AR.get(row['stage'], (row['stage'], ''))
-    out.append('\n6️⃣ بعدها: سداد الرسوم ← الفسح (إشعار الفسح يُنزل تلقائيًا) ← خالد يسند الشاحنات ← التسليم لمستودع العميل '
-               '← سلطان يرجّع الحاويات فارغة قبل آخر يوم مجاني ← نورة تصدر الفاتورة وتقفل الملف.')
+    if transit:
+        out.append(f'\n6️⃣ بعدها (ترانزيت): الضمان وفسح العبور ← خالد يسند شاحنة مرخّصة للعبور ← الخروج من '
+                   f"{transit[1] or 'منفذ الخروج'} إلى {transit[0]} خلال المدة وبالمسار المحدد ← تسوية الضمان بعد إثبات الخروج "
+                   '← سلطان يتابع إرجاع الحاوية حسب ترتيب الخط ← نورة تصدر الفاتورة وتقفل الملف.')
+    else:
+        out.append('\n6️⃣ بعدها: سداد الرسوم ← الفسح (إشعار الفسح يُنزل تلقائيًا) ← خالد يسند الشاحنات ← التسليم لمستودع العميل '
+                   '← سلطان يرجّع الحاويات فارغة قبل آخر يوم مجاني ← نورة تصدر الفاتورة وتقفل الملف.')
     out.append(f'📍 المرحلة الحالية: {label} — {nxt}')
     _save(row['id'], log=(actor + ': ' if actor else '') + 'تشغيل سير الشحنة')
     return '\n'.join(x for x in out if x is not None)

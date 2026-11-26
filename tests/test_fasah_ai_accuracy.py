@@ -246,3 +246,35 @@ def test_copy_buttons_disabled_only_for_stale_or_unbound_sources(monkeypatch, st
     parser.feed(ai.page(source, {}))
     assert len(parser.copies) == 3  # One header field and two classified items.
     assert all(('disabled' in button) == (state in ('stale', 'unbound')) for button in parser.copies)
+
+
+def run_routed(monkeypatch, routing, transaction=''):
+    items = [{'description': 'wood'}]
+    extracted = {'items': items, 'fields': {'importer': {'value': 'AHEMD IMAM FOR GENERAL TRADING', 'source': 'synthetic.txt'}},
+                 'issues': [], 'routing': routing, 'coverage': {'all_lines_extracted': True, 'total_invoice_lines': 1}}
+    responses = iter([extracted, {'items': [{'index': 0, 'code': WOOD, 'alternatives': []}]}])
+    monkeypatch.setattr(ai, 'ask', lambda *a, **k: next(responses))
+    monkeypatch.setattr(ai.tariff_lookup, 'search_many', lambda *a, **k: [{'code': WOOD, 'duty': '5%'}])
+    monkeypatch.setattr(ai.tariff_lookup, 'as_prompt', lambda entries: entries)
+    source = case()
+    if transaction:
+        source['context'] = {'profile': {'transaction': transaction}}
+    return ai.analyze(source), source
+
+
+QATAR_ROUTING = {'consignee': 'AHEMD IMAM FOR GENERAL TRADING', 'consignee_address': 'MUAITHER DOHA QATAR',
+                 'notify_party': 'AFAQ TAWEEQ CONTRACTING AR RIYAD SAUDI ARABIA', 'port_of_discharge': 'JEDDAH',
+                 'marks_destination': 'QUATR'}
+
+
+def test_foreign_consignee_blocks_import_entry_and_says_transit(monkeypatch):
+    result, _ = run_routed(monkeypatch, QATAR_ROUTING, 'commercial_import')
+    assert result['movement']['movement'] == 'transit'
+    assert 'ترانزيت' in result['coverage']['blockers'][0] and result['coverage']['partial_or_unverified']
+    assert 'importer' not in result['fields']
+
+
+def test_transit_case_recorded_as_transit_reaches_prompt(monkeypatch):
+    result, source = run_routed(monkeypatch, QATAR_ROUTING, 'transit')
+    assert result['coverage']['partial_or_unverified'] is False
+    assert 'عبور (ترانزيت)' in ai.chrome_prompt(source, result)

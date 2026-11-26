@@ -59,14 +59,15 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'which': {'type': 'string'}, 'month': {'type': 'string'}, 'refresh': {'type': 'boolean'}}, 'required': ['party']}},
     {'name': 'billing_gap', 'description': 'Match the declarations seen in FASAH this month with the accounts: how many are recorded and, for EACH unrecorded declaration, why (not a سلة الرحائب declaration / no billing rule, read failed, waiting for «نفذ», never read). Use it when the manager asks why the accounts show fewer declarations than FASAH. month = YYYY-MM (optional).',
      'input_schema': {'type': 'object', 'properties': {'month': {'type': 'string'}}}},
-    {'name': 'shipment_workflow', 'description': 'RUN THE CLEARANCE FLOW of one shipment (سيّر الشحنة) end to end: 1) FASAH authorization of the importer (active/expired/none → prepares the request to the importer with our establishment name and licence 2513), 2) documents check (prepares the request for missing ones), 3) arrival date → arrival report to the customer, 4) prints the declaration from FASAH via the desktop runner → sends it to the customer, 5) delivery order request email to the shipping line, 6) the remaining steps to empty-container return. Every send is prepared with a «نفذ CODE». query = bill/container/customer. Use it whenever the manager asks to process/follow a shipment.',
+    {'name': 'shipment_workflow', 'description': 'RUN THE CLEARANCE FLOW of one shipment (سيّر الشحنة) end to end. The flow first reads the declaration type from the shipment file: a final consignee outside Saudi Arabia means TRANSIT (بيان عبور), never import — the Saudi port of discharge or a Saudi notify party does not make it an import. Import flow: 1) FASAH authorization of the importer (active/expired/none → prepares the request to the importer with our establishment name and licence 2513), 2) documents check (prepares the request for missing ones), 3) arrival date → arrival report to the customer, 4) prints the declaration from FASAH via the desktop runner → sends it to the customer, 5) delivery order request email to the shipping line, 6) the remaining steps to empty-container return. Every send is prepared with a «نفذ CODE». query = bill/container/customer. Use it whenever the manager asks to process/follow a shipment.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
     {'name': 'shipment_file_update', 'description': 'Update a shipment file: stage (booked/arriving/arrived/declared/inspection/duties/released/trucking/delivered/returned/closed or its Arabic label), declaration_no, customer phone/contact_name/email, or a note. query = bill/container/customer.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'stage': {'type': 'string'}, 'declaration_no': {'type': 'string'},
         'phone': {'type': 'string'}, 'contact_name': {'type': 'string'}, 'email': {'type': 'string'}, 'note': {'type': 'string'},
         'broker': {'type': 'string', 'description': 'the clearance office handling it if not us, e.g. «مكتب أبو سعود»'},
         'pod': {'type': 'string', 'description': 'port of discharge, e.g. «ميناء الملك عبدالله»'},
-        'docs_received': {'type': 'string', 'description': 'documents received from the customer, e.g. «الفاتورة وقائمة التعبئة وشهادة المنشأ»'}}, 'required': ['query']}},
+        'docs_received': {'type': 'string', 'description': 'documents received from the customer, e.g. «الفاتورة وقائمة التعبئة وشهادة المنشأ»'},
+        'movement': {'type': 'string', 'description': 'declaration type when staff state it: «استيراد» (into Saudi Arabia) or «ترانزيت إلى قطر» / «عبور إلى الإمارات» (final consignee outside Saudi Arabia)'}}, 'required': ['query']}},
     {'name': 'customs_question', 'description': 'Answer a question about customs procedures, documents or requirements from the approved knowledge.',
      'input_schema': {'type': 'object', 'properties': {'question': {'type': 'string'}}, 'required': ['question']}},
     {'name': 'add_driver', 'description': 'Register a driver for load offers.',
@@ -379,7 +380,7 @@ def tool_shipment_file_update(c, a):
     from app import shipment_files
     return shipment_files.update(a.get('query'), a.get('stage') or '', a.get('declaration_no') or '', a.get('phone') or '',
                                  a.get('contact_name') or '', a.get('email') or '', a.get('note') or '', _member().get('name') or '',
-                                 a.get('docs_received') or '', a.get('broker') or '', a.get('pod') or '')
+                                 a.get('docs_received') or '', a.get('broker') or '', a.get('pod') or '', a.get('movement') or '')
 
 
 def tool_declaration_info(c, a):

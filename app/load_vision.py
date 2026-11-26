@@ -346,7 +346,8 @@ Read ONLY visible facts; use null if unclear. Return one JSON object:
 document_kind: customs_declaration, commercial_invoice, statement, shipping_document, other
 (statement = a list/كشف of SEVERAL declarations or claims; shipping_document = shipping line arrival notice,
 delivery order or bill of lading; then also return container_numbers: list of 4 letters + 7 digits)
-declaration_no (رقم البيان), declaration_date (YYYY-MM-DD), declaration_type: import or export,
+declaration_no (رقم البيان), declaration_date (YYYY-MM-DD), declaration_type: import, export or transit (transit = بيان عبور /
+ترانزيت, or a consignee/final destination outside Saudi Arabia),
 importer_or_exporter (name of the importer/exporter as written), port,
 invoice_no, invoice_total (number, as written, in the invoice currency), invoice_currency,
 invoice_issuer (the foreign supplier/company that issued the invoice, as written),
@@ -394,7 +395,8 @@ def declaration_billing_reply(fields, caption):
     issuer = _text(fields.get('invoice_issuer'), 120)
     party = _text(fields.get('importer_or_exporter'), 160)
     kind = 'export' if str(fields.get('declaration_type') or '').lower().startswith('ex') else 'import'
-    head = ('قرأت البيان ' + (number or 'بدون رقم') + ' (' + ('تصدير' if kind == 'export' else 'استيراد') + ')'
+    transit = str(fields.get('declaration_type') or '').lower().startswith('tr')
+    head = ('قرأت البيان ' + (number or 'بدون رقم') + ' (' + ('ترانزيت' if transit else 'تصدير' if kind == 'export' else 'استيراد') + ')'
             + (' — ' + party if party else '') + (' — فاتورة ' + _text(fields.get('invoice_no'), 60) if fields.get('invoice_no') else '')
             + (' بقيمة ' + str(fields.get('invoice_total')) + ' ' + _text(fields.get('invoice_currency'), 10) if fields.get('invoice_total') else '')
             + (' — صادرة من: ' + issuer if issuer else '')
