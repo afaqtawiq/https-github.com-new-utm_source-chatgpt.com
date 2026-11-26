@@ -93,7 +93,7 @@ def run():
                 'last_event_date': '2026-11-15', 'containers': ['MSCU1234565']}
         sent, delivered = [], []
 
-        async def fake_extract(text, ref):
+        async def fake_extract(text, ref, bl_pod=''):
             assert 'MEDU7788990' in text and ref == 'MEDU7788990'
             return page
 
@@ -110,10 +110,11 @@ def run():
         assert sent == [(('966500000001', 'conv-m'), 'MEDU7788990', b'%PDF-')]
         with db() as c:
             row = c.execute("SELECT * FROM shipment_tracks WHERE ref='MEDU7788990'").fetchone()
-            cr = c.execute("SELECT arrived_on FROM container_returns WHERE container='MSCU1234565'").fetchone()
-        assert row['vessel'] == 'MSC ANNA' and cr['arrived_on'] == dt.date(2026, 12, 5)
+            cr = c.execute("SELECT arrived_on, eta_on FROM container_returns WHERE container='MSCU1234565'").fetchone()
+        # An expected date is not an arrival: it goes to eta_on only (owner review, 26 Nov 2026).
+        assert row['vessel'] == 'MSC ANNA' and cr['arrived_on'] is None and cr['eta_on'] == dt.date(2026, 12, 5)
         # A blocked / captcha page → honest message, nothing saved as a result.
-        async def _blocked(t, r):
+        async def _blocked(t, r, p=''):
             return {'found': False, 'reason': 'captcha'}
         with patch.object(st, 'extract_page', side_effect=_blocked), patch('app.owner_briefing.deliver', side_effect=fake_deliver):
             text = st.after_page(task['id'], 'done')
@@ -273,7 +274,7 @@ def run():
         assert STATE['posts'] == [{'booking_number': 'SHZ8739334', 'carrier': 'SG_CMA'}], STATE['posts']
         with db() as c:
             row = c.execute('SELECT * FROM container_returns WHERE container=%s', (CONT,)).fetchone()
-        assert row['arrived_on'] == dt.date(2026, 12, 2) and row['free_until'] == dt.date(2026, 12, 15) and row['free_until_estimated']
+        assert row['arrived_on'] is None and row['eta_on'] == dt.date(2026, 12, 2) and row['free_until'] is None  # ETA only
 
         # 3) Asked again → no second paid creation.
         asyncio.run(st.track('SHZ8739334'))
@@ -289,13 +290,16 @@ def run():
         asyncio.run(st.refresh(now=later, deliver=deliver))
         assert len(alerts) == 1 and 'تأخر' in alerts[0] and '04/12/2026' in alerts[0], alerts
         with db() as c:
-            assert c.execute('SELECT arrived_on FROM container_returns WHERE container=%s', (CONT,)).fetchone()['arrived_on'] == dt.date(2026, 12, 4)
+            r2 = c.execute('SELECT arrived_on, eta_on FROM container_returns WHERE container=%s', (CONT,)).fetchone()
+            assert r2['arrived_on'] is None and r2['eta_on'] == dt.date(2026, 12, 4)
             c.execute("UPDATE shipment_tracks SET checked_at = checked_at - INTERVAL '5 hours'")
         # 5) Discharged → one arrival alert; then quiet.
         STATE['disc'] = 'ACT'
         asyncio.run(st.refresh(now=later + dt.timedelta(hours=5), deliver=deliver))
         assert len(alerts) == 2 and 'وصلت' in alerts[1], alerts
-        with db() as c:
+        with db() as c:  # the ACTUAL discharge sets the arrival and the (estimated) last free day
+            r3 = c.execute('SELECT arrived_on, free_until, free_until_estimated FROM container_returns WHERE container=%s', (CONT,)).fetchone()
+            assert r3['arrived_on'] == dt.date(2026, 12, 4) and r3['free_until'] == dt.date(2026, 12, 17) and r3['free_until_estimated']
             c.execute("UPDATE shipment_tracks SET checked_at = checked_at - INTERVAL '5 hours'")
         asyncio.run(st.refresh(now=later + dt.timedelta(hours=10), deliver=deliver))
         assert len(alerts) == 2

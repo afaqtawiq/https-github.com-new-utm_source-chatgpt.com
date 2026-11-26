@@ -16,13 +16,13 @@ def test_hapag_bl_reads_the_container_page_then_extracts(monkeypatch):
         urls.append(url)
         return BL_PAGE if 'blno=' in url else CN_PAGE
 
-    async def no_api(code, ref, kind):
+    async def no_api(code, ref, kind, bl_pod=''):
         return None
 
-    async def extract(text, ref):
+    async def extract(text, ref, bl_pod=''):
         assert 'MAERSK ELBA' in text and ref == 'HLCUSGN2610BKGW9'
         return {'found': True, 'vessel': 'MAERSK ELBA', 'voyage': '643W', 'pol': 'HAIPHONG', 'pod': 'JEDDAH',
-                'eta': '2026-12-02', 'arrived': False, 'containers': ['TGBU5736561']}
+                'eta': '2026-12-02', 'discharged': None, 'containers': ['TGBU5736561']}
     monkeypatch.setattr(cta, 'read_page', page)
     monkeypatch.setattr(cta, 'lookup', no_api)
     monkeypatch.setattr(st, 'extract_page', extract)
@@ -42,7 +42,7 @@ def test_no_reader_key_falls_back(monkeypatch):
 
 
 def test_official_api_wins_when_it_has_an_eta(monkeypatch):
-    async def api(code, ref, kind):
+    async def api(code, ref, kind, bl_pod=''):
         assert code == 'CMDU'
         return {'found': True, 'eta': '2026-12-05', 'vessel': 'CMA CGM LORENZACCIO', 'carrier': 'CMA CGM'}
 
@@ -54,24 +54,54 @@ def test_official_api_wins_when_it_has_an_eta(monkeypatch):
     assert fields['eta'] == '2026-12-05' and source == 'الربط الرسمي مع CMA CGM'
 
 
-def test_parse_dcsa_events():
-    ev = [
-        {'eventType': 'TRANSPORT', 'transportEventTypeCode': 'DEPA', 'eventClassifierCode': 'ACT', 'eventDateTime': '2026-11-21T11:46:00Z',
-         'transportCall': {'UNLocationCode': 'MYTPP', 'location': {'locationName': 'Tanjung Pelepas'}, 'exportVoyageNumber': '643W',
-                           'vessel': {'vesselName': 'MAERSK ELBA'}}},
-        {'eventType': 'EQUIPMENT', 'equipmentEventTypeCode': 'LOAD', 'eventClassifierCode': 'ACT', 'eventDateTime': '2026-11-21T01:27:00Z',
-         'equipmentReference': 'TGBU5736561', 'transportCall': {'UNLocationCode': 'MYTPP', 'vessel': {'vesselName': 'MAERSK ELBA'}}},
-        {'eventType': 'TRANSPORT', 'transportEventTypeCode': 'ARRI', 'eventClassifierCode': 'EST', 'eventDateTime': '2026-12-02T20:30:00+03:00',
-         'transportCall': {'UNLocationCode': 'SAJED', 'location': {'locationName': 'Jeddah'}, 'vessel': {'vesselName': 'MAERSK ELBA'}}},
-    ]
-    f = cta.parse_dcsa(ev, 'X')
-    assert f['found'] and f['eta'] == '2026-12-02' and f['pod'] == 'Jeddah' and not f['arrived']
+def ev(kind, code, cls, at, place, equip='', vessel='MAERSK ELBA', voyage=''):
+    e = {'eventClassifierCode': cls, 'eventDateTime': at,
+         'transportCall': {'UNLocationCode': place, 'location': {'locationName': code}, 'exportVoyageNumber': voyage,
+                           'vessel': {'vesselName': vessel}}}
+    if equip:
+        e.update(eventType='EQUIPMENT', equipmentEventTypeCode=kind, equipmentReference=equip)
+    else:
+        e.update(eventType='TRANSPORT', transportEventTypeCode=kind)
+    return e
+
+
+def test_parse_dcsa_planned_is_not_arrival():
+    events = [ev('DEPA', 'Tanjung Pelepas', 'ACT', '2026-11-21T11:46:00Z', 'MYTPP', voyage='643W'),
+              ev('LOAD', 'Tanjung Pelepas', 'ACT', '2026-11-21T01:27:00Z', 'MYTPP', equip='TGBU5736561'),
+              ev('ARRI', 'Jeddah', 'EST', '2026-12-02T20:30:00+03:00', 'SAJED')]
+    f = cta.parse_dcsa(events, 'X', 'JEDDAH, SAUDI ARABIA')
+    assert f['found'] and f['eta'] == '2026-12-02' and f['pod'] == 'Jeddah' and f['discharged'] is None
     assert f['vessel'] == 'MAERSK ELBA' and f['voyage'] == '643W' and f['containers'] == ['TGBU5736561']
-    ev.append({'eventType': 'TRANSPORT', 'transportEventTypeCode': 'ARRI', 'eventClassifierCode': 'ACT',
-               'eventDateTime': '2026-12-03T06:00:00Z', 'transportCall': {'UNLocationCode': 'SAJED', 'location': {'locationName': 'Jeddah'}}})
-    f = cta.parse_dcsa(ev, 'X')
-    assert f['arrived'] and f['eta'] == '2026-12-03'
+    info = st.page_info(f, 'Hapag-Lloyd', 'JEDDAH, SAUDI ARABIA')
+    assert not info['arrived'] and info['discharged'] is None and 'تقديري' in st.reply_text('X', info)
     assert cta.parse_dcsa([], 'X')['found'] is False
+
+
+def test_vessel_at_jeddah_is_not_a_kap_container_discharge():
+    """Fake data from the review: the vessel calls Jeddah, the container is discharged at King Abdullah Port."""
+    events = [ev('ARRI', 'Jeddah', 'ACT', '2026-11-10T06:00:00Z', 'SAJED'),
+              ev('DISC', 'Jeddah', 'ACT', '2026-11-10T09:00:00Z', 'SAJED', equip='OTHR1234567'),   # another box
+              ev('ARRI', 'King Abdullah Port', 'EST', '2026-11-12T08:00:00Z', 'SAKAC'),
+              ev('DISC', 'King Abdullah Port', 'ACT', '2026-11-12T15:00:00Z', 'SAKAC', equip='TGBU5736561')]
+    f = cta.parse_dcsa(events, 'X', 'KING ABDULLAH PORT, SAUDI ARABIA')
+    assert f['pod'] == 'King Abdullah Port' and f['discharged'] == '2026-11-12'
+    info = st.page_info(f, 'Hapag-Lloyd', 'KING ABDULLAH PORT, SAUDI ARABIA')
+    assert info['arrived'] and info['discharged'].date().isoformat() == '2026-11-12'
+    # Same events, the B/L says Jeddah: the KAP discharge of our box is not «arrived at Jeddah».
+    f2 = cta.parse_dcsa(events[:1] + events[2:], 'X', 'Jeddah')
+    assert f2['discharged'] is None
+    # A page reader that names another port than the B/L never counts as arrival.
+    info = st.page_info({'pod': 'Jeddah', 'discharged': '2026-11-10', 'eta': '2026-11-10'}, 'X', 'King Abdullah Port')
+    assert not info['arrived'] and 'ميناء التفريغ في البوليصة' in info['pod_mismatch'] and info['pod'] == 'King Abdullah Port'
+
+
+def test_future_or_missing_discharge_date_is_a_plan():
+    info = st.page_info({'pod': 'Jeddah', 'eta': '2099-01-01', 'discharged': '2099-01-01', 'arrived': True}, 'X', 'Jeddah')
+    assert not info['arrived'] and info['eta'].date().isoformat() == '2099-01-01'
+    info = st.page_info({'pod': 'Jeddah', 'eta': '2026-12-02', 'arrived': True}, 'X', 'Jeddah')  # «arrived» without a date
+    assert not info['arrived']
+    assert st.port_code('JEDDAH, SAUDI ARABIA') == 'SAJED' and st.port_code('ميناء الملك عبدالله') == 'SAKAC'
+    assert st.same_port('Jeddah', '') and not st.same_port('Jeddah', 'Dammam')
 
 
 def test_save_validates_and_encrypts(monkeypatch):

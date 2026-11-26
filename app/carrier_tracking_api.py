@@ -107,11 +107,15 @@ def _iso(v):
         return None
 
 
-def parse_dcsa(events, ref):
-    """DCSA Track & Trace 2.x events → {found, vessel, voyage, pol, etd, pod, eta, arrived, last_event, containers}."""
+def parse_dcsa(events, ref, bl_pod=''):
+    """DCSA Track & Trace 2.x events → {found, vessel, voyage, pol, etd, pod, eta, discharged, containers, last_event}.
+    The port is the B/L port of discharge when known; «discharged» is only the container's ACTUAL discharge (equipment
+    event DISC, classifier ACT) at that port — a vessel arrival there or anywhere else is not an arrival."""
+    from app.shipment_tracking import port_code
     events = [e for e in events if isinstance(e, dict)]
     if not events:
         return {'found': False, 'reason': 'لا توجد أحداث لهذا الرقم عند الخط'}
+
     def when(e):
         return str(e.get('eventDateTime') or e.get('eventCreatedDateTime') or '')
     events.sort(key=when)
@@ -123,23 +127,27 @@ def parse_dcsa(events, ref):
         vessel = tc.get('vessel') if isinstance(tc.get('vessel'), dict) else {}
         calls.append({'code': code, 'name': loc.get('locationName') or code, 'vessel': vessel.get('vesselName') or '',
                       'voyage': tc.get('exportVoyageNumber') or tc.get('importVoyageNumber') or tc.get('carrierExportVoyageNumber') or '',
+                      'equipment': e.get('eventType') == 'EQUIPMENT' or bool(e.get('equipmentEventTypeCode')),
                       'type': e.get('transportEventTypeCode') or e.get('equipmentEventTypeCode') or e.get('shipmentEventTypeCode') or '',
                       'cls': e.get('eventClassifierCode') or '', 'at': when(e), 'equip': e.get('equipmentReference') or ''})
     loads = [c for c in calls if c['type'] in ('LOAD', 'DEPA') and c['code']]
+    discs = [c for c in calls if c['type'] == 'DISC' and c['equipment'] and c['code']]
     arrivals = [c for c in calls if c['type'] in ('ARRI', 'DISC') and c['code']]
-    pod_code = next((c['code'] for c in reversed(arrivals) if c['code'] in JEDDAH), arrivals[-1]['code'] if arrivals else '')
+    want = port_code(bl_pod)
+    pod_code = want or (discs[-1]['code'] if discs else (arrivals[-1]['code'] if arrivals else ''))
+    actual = [c for c in discs if c['code'] == pod_code and c['cls'] == 'ACT']
+    planned = [c for c in arrivals if c['code'] == pod_code and c['cls'] in ('EST', 'PLN')]
     at_pod = [c for c in arrivals if c['code'] == pod_code]
-    actual_pod = [c for c in at_pod if c['cls'] == 'ACT']
-    est_pod = [c for c in at_pod if c['cls'] in ('EST', 'PLN')]
-    pick = (actual_pod or est_pod or at_pod or [None])[-1]
+    pod_name = (at_pod[-1]['name'] if at_pod else '') or bl_pod
     with_vessel = [c for c in calls if c['vessel']]
     acts = [c for c in calls if c['cls'] == 'ACT' and c['type']]
     last = acts[-1] if acts else None
     return {'found': bool(calls), 'carrier': '', 'vessel': (with_vessel[-1]['vessel'] if with_vessel else ''),
             'voyage': next((c['voyage'] for c in reversed(calls) if c['voyage']), ''),
             'pol': loads[0]['name'] if loads else '', 'etd': _iso(loads[0]['at']) if loads else None,
-            'pod': pick['name'] if pick else '', 'eta': _iso(pick['at']) if pick else None,
-            'arrived': bool(actual_pod), 'containers': sorted({c['equip'] for c in calls if c['equip']}),
+            'pod': pod_name, 'eta': _iso(planned[-1]['at']) if planned else (_iso(actual[-1]['at']) if actual else None),
+            'discharged': _iso(actual[-1]['at']) if actual else None,
+            'containers': sorted({c['equip'] for c in calls if c['equip']}),
             'last_event': (f"{last['type']} {last['name']}" if last else ''), 'last_event_date': _iso(last['at']) if last else None}
 
 
@@ -152,17 +160,16 @@ def parse_ship24(data, ref):
     events = sorted((e for e in t.get('events') or [] if isinstance(e, dict)), key=lambda e: str(e.get('occurrenceDatetime') or ''))
     delivery = ship.get('delivery') or {}
     last = events[-1] if events else {}
-    arrived = any(str(e.get('statusMilestone') or '') in ('delivered', 'available_for_pickup') for e in events)
     return {'found': bool(events or delivery.get('estimatedDeliveryDate')), 'vessel': '', 'voyage': '',
             'pol': str((ship.get('recipient') or {}).get('address') or '')[:0], 'etd': None,
             'pod': str(((ship.get('recipient') or {}).get('address') or {}).get('city') or '') if isinstance((ship.get('recipient') or {}).get('address'), dict) else '',
             'eta': _iso(delivery.get('estimatedDeliveryDate')) if delivery.get('estimatedDeliveryDate') else None,
-            'arrived': arrived, 'containers': [],
+            'discharged': None, 'containers': [],  # Ship24 milestones are not a confirmed container discharge
             'last_event': str(last.get('status') or '')[:120] + (' — ' + str(last.get('location')) if last.get('location') else ''),
             'last_event_date': _iso(last.get('occurrenceDatetime')) if last.get('occurrenceDatetime') else None}
 
 
-async def lookup(code, ref, kind):
+async def lookup(code, ref, kind, bl_pod=''):
     """Fields for `ref` from the line's own API (or Ship24), or None when no key is saved for it. Raises ValueError with
     an Arabic reason when the API refuses."""
     if code == 'FIRECRAWL':
@@ -184,7 +191,7 @@ async def lookup(code, ref, kind):
         _raise(r, PROVIDERS[conn['code']]['name'])
         data = r.json()
         events = data if isinstance(data, list) else (data.get('events') or data.get('data') or []) if isinstance(data, dict) else []
-        out = parse_dcsa(events, ref)
+        out = parse_dcsa(events, ref, bl_pod)
         out['carrier'] = PROVIDERS[conn['code']]['name'].split(' (')[0]
         return out
 
@@ -286,12 +293,19 @@ async def settings_test(request: Request):
     if code not in PROVIDERS or not ref:
         return _page(session, 'اكتب رقم بوليصة أو حاوية صحيح.')
     try:
-        got = await lookup(code, ref, kind)
+        if code == 'FIRECRAWL':  # the page reader: run the full tracking read for this reference (line from its prefix)
+            from starlette.concurrency import run_in_threadpool
+            from app.shipment_tracking import api_fields, hints_for
+            hints = await run_in_threadpool(hints_for, ref)
+            got, why = await api_fields(ref, kind, hints.get('carrier') or '', hints)
+            got = got or {'found': False, 'reason': why}
+        else:
+            got = await lookup(code, ref, kind)
         if got is None:
             result = 'لا يوجد مفتاح محفوظ.'
         elif got.get('found'):
-            result = (f"✅ يعمل — {ref}: السفينة {got.get('vessel') or '—'}، الوصول {got.get('eta') or '—'}"
-                      f"{' (وصلت)' if got.get('arrived') else ''}، آخر حدث {got.get('last_event') or '—'}")
+            result = (f"✅ يعمل — {ref}: السفينة {got.get('vessel') or '—'}، الوصول المتوقع {got.get('eta') or '—'}"
+                      f"{'، التفريغ الفعلي ' + got['discharged'] if got.get('discharged') else ''}، آخر حدث {got.get('last_event') or '—'}")
         else:
             result = f"المفتاح مقبول لكن: {got.get('reason')}"
     except ValueError as exc:

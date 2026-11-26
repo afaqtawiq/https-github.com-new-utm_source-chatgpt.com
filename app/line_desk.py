@@ -60,7 +60,7 @@ def init():
     container_returns.init()
     with db() as c:
         for col in ('agent_id BIGINT', 'size TEXT', 'original_free_until DATE', 'returned_on DATE', 'arrived_on DATE',
-                    'fasah_number TEXT', 'free_until_estimated BOOLEAN NOT NULL DEFAULT FALSE'):
+                    'fasah_number TEXT', 'free_until_estimated BOOLEAN NOT NULL DEFAULT FALSE', 'eta_on DATE'):
             c.execute('ALTER TABLE container_returns ADD COLUMN IF NOT EXISTS ' + col)
         c.execute('''CREATE TABLE IF NOT EXISTS line_tariffs(id BIGSERIAL PRIMARY KEY, agent_id BIGINT NOT NULL, size TEXT NOT NULL,
             tiers_json TEXT NOT NULL, note TEXT, created_by TEXT, created_at TIMESTAMPTZ NOT NULL, UNIQUE(agent_id,size))''')
