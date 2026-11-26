@@ -35,6 +35,23 @@ with db() as c:
     out = fq.execute(c, saved['a'], 'المدير', lambda to, s, b: sent.append(to))
 assert len(sent) == 2 and 'أُرسل طلب عرض السعر إلى 2' in out, out
 assert 'MSC' in fq.requests_text()
+# Jeddah → Berbera: nobody in the directory is known for the route → web research, register, send (owner, 26 Nov 2026)
+with db() as c:
+    c.execute("DELETE FROM shipping_agent_contacts WHERE purpose='Sales (من البحث)'")
+    c.execute("DELETE FROM shipping_agents WHERE source LIKE 'بحث في الإنترنت%'")
+    c.execute("DELETE FROM freight_route_agents")
+web = [{'line': 'Horn Line Test', 'agent': 'Horn Agency Jeddah Test', 'email': 'rates@horn-test.example', 'phone': '',
+        'website': 'https://horn-test.example', 'source_url': 'https://horn-test.example/contact', 'evidence': 'Jeddah–Berbera weekly'},
+       {'line': 'MSC', 'agent': 'MSC', 'email': 'berbera@msc-test.example', 'phone': '', 'website': '',
+        'source_url': 'https://msc-test.example/berbera', 'evidence': 'Berbera via Djibouti'}]
+fq.research_route = lambda pol, pod, eq='': (web, 'وجدت خطين')
+text = fq.prepare({'pol': 'جدة', 'pod': 'بربرة', 'size': '40', 'count': '2', 'actor': 'سلطان'}, code)
+emails = saved['a']['emails']
+assert emails[0]['route'] and emails[1]['route'] and {emails[0]['agent'], emails[1]['agent']} == {'Horn Agency Jeddah Test', 'MSC'}, emails[:3]
+assert any(e['to'] == 'berbera@msc-test.example' for e in emails)  # the route contact beats MSC's generic one
+assert len(emails) > 10  # the registered agents are included after the route ones
+assert 'سجلت الجدد في الدليل: Horn Agency Jeddah Test' in text and '🎯' in text, text
+assert 'Horn Agency Jeddah Test' in fq.directory_text('Horn')
 print('OK')
 '''
 

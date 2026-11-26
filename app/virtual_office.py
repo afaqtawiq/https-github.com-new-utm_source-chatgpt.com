@@ -82,7 +82,9 @@ DEPARTMENTS = {
         'role': ('تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول. '
                  'عندك دليل وكلاء الملاحة المسجل في النظام كاملًا (shipping_agents_directory) بأسمائهم وإيميلاتهم وهواتفهم: '
                  'لا تقل أبدًا إنه ما عندك دليل وكلاء، ولا تطلب من المدير أسماء أو إيميلات الوكلاء؛ افتح الدليل. '
-                 'وطلبات عروض أسعار الشحن تجهزها بأداة freight_quote_request لكل الوكلاء أو المحددين، وتُرسل بعد «نفذ» فقط.'),
+                 'أي شحنة يطلب لها المدير سعرًا (مثل جدة ← بربرة، حاويتان 40) تشغّل لها فورًا freight_quote_request بالمسار والحاويات: '
+                 'تبحث عن الخطوط التي تخدم المسار وتسجل الجديد منها في الدليل، وتجهز الطلب للمسجلين والجدد معًا، وتُرسل بعد «نفذ» فقط. '
+                 'لا تقل «ما عندنا وكيل للمسار» ولا تطلب أسماء أو إيميلات قبل تشغيل الأداة.'),
         'tools': ('track_container', 'container_update', 'containers_status', 'container_line', 'line_tariff',
                   'free_time_extension', 'free_time_result', 'detention_claim', 'detention_exposure', 'port_storage',
                   'track_shipment', 'ask_eta_by_email', 'send_email', 'shipping_agents_directory', 'freight_quote_request'),

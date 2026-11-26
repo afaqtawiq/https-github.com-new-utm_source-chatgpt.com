@@ -155,7 +155,7 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details', 'inspect_form']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'party': {'type': 'string'}, 'since': {'type': 'string'}, 'pages': {'type': 'string'}, 'number': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
     {'name': 'shipping_agents_directory', 'description': 'Sultan: the Jeddah SHIPPING AGENTS DIRECTORY registered in the system (39+ lines/agents: CMA CGM, MSC, Maersk, Hapag-Lloyd, COSCO, ONE, Evergreen, OOCL, PIL…) with every contact purpose, email and phone. query = agent name or email part (empty = all names). Use it FIRST whenever someone asks for shipping agents, their emails or contacts — never say there is no agents list.',
      'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}}},
-    {'name': 'freight_quote_request', 'description': 'Sultan: PREPARE an ocean-freight RATE REQUEST email (Arabic + English) to shipping agents from the registered directory, in one batch (max 15), sent from the official mailbox only after the manager confirms with «نفذ». pol = port of loading, pod = port of discharge, size = 20/40/40HC/45, count = number of containers, commodity, ready = cargo ready date, agents = names separated by commas, or «الكل» / empty for all agents with an email. Use for «راسل شركات الشحن واطلب عروض أسعار» «اطلب أسعار شحن من شنغهاي لجدة». action=status lists the requests already sent.',
+    {'name': 'freight_quote_request', 'description': 'Sultan: PREPARE an ocean-freight RATE REQUEST email (Arabic + English) to shipping agents from the registered directory, in one batch (max 15), sent from the official mailbox only after the manager confirms with «نفذ». pol = port of loading, pod = port of discharge, size = 20/40/40HC/45, count = number of containers, commodity, ready = cargo ready date, agents = names separated by commas, or «الكل» / empty for all agents with an email — then it ALSO searches the web for the lines/agents that serve this exact route (e.g. Jeddah → Berbera), adds the ones with a published email to the directory, and puts them first. Never ask the manager for agent names or emails: call this tool directly with the route. Use for «راسل شركات الشحن واطلب عروض أسعار» «اطلب أسعار شحن من شنغهاي لجدة». action=status lists the requests already sent.',
      'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['prepare', 'status']}, 'pol': {'type': 'string'},
         'pod': {'type': 'string'}, 'size': {'type': 'string'}, 'count': {'type': 'string'}, 'commodity': {'type': 'string'},
         'ready': {'type': 'string'}, 'agents': {'type': 'string'}}}},
@@ -1199,7 +1199,7 @@ def tool_freight_quote_request(c, a):
     from app import freight_quotes
     if a.get('action') == 'status':
         return freight_quotes.requests_text()
-    return freight_quotes.prepare(a, lambda action: _pending(c, action))
+    return freight_quotes.prepare(dict(a, actor=_member().get('name') or ''), lambda action: _pending(c, action))
 
 
 def tool_transport_platforms(c, a):

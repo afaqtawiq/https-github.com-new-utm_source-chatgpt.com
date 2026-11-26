@@ -6,14 +6,17 @@
 - تجهيز طلب عرض سعر شحن لعدة وكلاء دفعة واحدة؛ لا يُرسل شيء إلا بعد «نفذ» من المدير، ومن البريد الرسمي.
 """
 import json
+import os
 import re
+
+import httpx
 
 from app.storage import db, utcnow
 
 # أولوية جهة التواصل لطلب عرض سعر (الأقرب للمبيعات والحجز أولًا)
 QUOTE_PURPOSES = ('sales', 'booking', 'export', 'quotation', 'rate', 'customer service', 'customer support', 'general',
                   'contact', 'operations', 'import')
-MAX_BATCH = 15
+MAX_BATCH = 40
 SIZES = {'20': "20' DV", '40': "40' DV", '40hc': "40' HC", '45': "45' HC"}
 
 
@@ -101,19 +104,31 @@ def prepare(args, make_code):
     if missing:
         return 'لطلب عروض الأسعار أحتاج: ' + '، '.join(missing) + '. مثال: «اطلب عروض أسعار شحن من شنغهاي إلى جدة، 2 حاوية 40، أثاث».'
     wanted = [w.strip() for w in re.split(r'[,،/]| و ', req['agents']) if w.strip()] if req['agents'] and req['agents'] not in ('الكل', 'all', 'كلهم') else []
+    init()
+    route = f"{req['pol']} → {req['pod']}".casefold()
+    found, note, added = [], '', []
+    if not wanted and str(args.get('research') or 'yes') != 'no':
+        # Owner (26 Nov 2026): «حتى الما مسجل يبحث عن معلوماته يسجلها ويرسلها».
+        found, note = research_route(req['pol'], req['pod'], f"{req['count']} x {req['size']}")
+        added = register_found(found, route, str(args.get('actor') or ''))
+    serving = route_agent_ids(route)
     agents = []
     for a in _rows():
         if wanted and not any(w.casefold() in a['name'].casefold() for w in wanted):
             continue
         agents.append(a)
+    agents.sort(key=lambda a: (a['id'] not in serving, a['name']))
     emails, skipped = [], []
     for a in agents:
         contact = quote_contact(a['contacts'])
         if not contact:
             skipped.append(a['name'] + (f" ({a['website']})" if a.get('website') else ''))
             continue
+        if a['id'] in serving:  # the contact found for this route beats the generic one
+            contact = next((x for x in a['contacts'] if x.get('email') and 'من البحث' in str(x['purpose'])), contact)
         subject, body = compose(a['name'], req)
-        emails.append({'agent': a['name'], 'to': contact['email'], 'purpose': contact['purpose'], 'subject': subject, 'body': body})
+        emails.append({'agent': a['name'], 'to': contact['email'], 'purpose': contact['purpose'], 'subject': subject, 'body': body,
+                       'route': a['id'] in serving})
     if not emails:
         return ('ما لقيت وكيلًا مسجلًا له بريد بهذه الأسماء.'
                 + (' بدون بريد في الدليل: ' + '، '.join(skipped) + ' — اطلب منهم من موقعهم أو أضف بريدهم في صفحة «وكلاء الملاحة».' if skipped else '')
@@ -122,7 +137,12 @@ def prepare(args, make_code):
     code = make_code({'tool': 'freight_quote_send', 'dept': 'containers', 'request': req, 'emails': batch})
     lines = [f"📨 سلطان: جهزت طلب عرض سعر شحن {req['pol']} ← {req['pod']} — {req['count']} × {req['size']}"
              + (f" — {req['commodity']}" if req.get('commodity') else '') + f' إلى {len(batch)} وكيل:']
-    lines += [f"• {e['agent']} — {e['to']} ({e['purpose']})" for e in batch]
+    if found or note:
+        lines.append(f'🔎 بحثت عن الخطوط التي تخدم المسار: وجدت {len(found)} جهة لها بريد منشور'
+                     + (f'، وسجلت الجدد في الدليل: {"، ".join(added)}' if added else '') + '.' + (f' {note}' if note else ''))
+    lines += [f"• {'🎯 ' if e.get('route') else ''}{e['agent']} — {e['to']} ({e['purpose']})" for e in batch]
+    if any(e.get('route') for e in batch):
+        lines.append('🎯 = يخدم هذا المسار. البريد المأخوذ من الإنترنت منشور في مصدره لكنه غير مجرب؛ يتأكد بالرد.')
     if rest:
         lines.append(f'(وبقي {len(rest)} وكيل؛ حددهم بالاسم في طلب ثانٍ.)')
     if skipped:
@@ -131,7 +151,101 @@ def prepare(args, make_code):
     return '\n'.join(lines)
 
 
+RESEARCH_PROMPT = """You help a Saudi freight office (Afaq Tuwaiq, Jeddah) request ocean-freight quotes.
+Route: {pol} -> {pod}. Equipment: {equipment}. Search the web NOW for the container shipping lines and NVOCCs that
+currently serve this route (direct or via a transhipment hub), and for each one the contact a customer in Saudi Arabia
+should email for a rate: their Saudi agent/office or the line's own sales/booking/quotation email.
+Rules: copy every email and phone EXACTLY as published on the page you cite; never guess or construct an email
+(no info@ guesses); skip a line if no published email is found; prefer the official line or agent website.
+Answer with ONLY this JSON:
+{{"route": "{pol} -> {pod}", "lines": [{{"line": "line or NVOCC name", "agent": "Saudi agent or office name",
+"email": "published email", "phone": "published phone or empty", "website": "official site",
+"source_url": "page where the email is published", "evidence": "short quote/fact that it serves the route"}}],
+"note": "one Arabic sentence about what was found"}}"""
+
+
+def research_route(pol, pod, equipment=''):
+    """Lines/agents serving the route with PUBLISHED emails (Claude web search). Returns (lines, note); never raises."""
+    key = os.getenv('ANTHROPIC_API_KEY', '')
+    if not key:
+        return [], 'البحث في الإنترنت غير مفعّل على الخادم.'
+    model = os.getenv('FREIGHT_RESEARCH_MODEL') or os.getenv('LOAD_VISION_MODEL', 'claude-sonnet-5')
+    prompt = RESEARCH_PROMPT.format(pol=pol, pod=pod, equipment=equipment or 'containers')
+    tools = [{'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 8}]
+    messages = [{'role': 'user', 'content': prompt}]
+    text = ''
+    try:
+        with httpx.Client(timeout=170) as client:
+            for _ in range(4):
+                r = client.post('https://api.anthropic.com/v1/messages',
+                                headers={'x-api-key': key, 'anthropic-version': '2023-06-01'},
+                                json={'model': model, 'max_tokens': 3000, 'tools': tools, 'messages': messages})
+                r.raise_for_status()
+                data = r.json()
+                text = ''.join(b.get('text', '') for b in data.get('content', []) if b.get('type') == 'text')
+                if data.get('stop_reason') != 'pause_turn':
+                    break
+                messages = [messages[0], {'role': 'assistant', 'content': data.get('content', [])}]
+        match = re.search(r'\{.*\}', text, re.S)
+        found = json.loads(match.group(0)) if match else {}
+    except Exception as exc:
+        print('FREIGHT_RESEARCH', type(exc).__name__, str(exc)[:160], flush=True)
+        return [], 'تعذر البحث في الإنترنت الآن.'
+    lines = []
+    for x in found.get('lines') or []:
+        if not isinstance(x, dict):
+            continue
+        email = str(x.get('email') or '').strip().lower()
+        source = str(x.get('source_url') or '').strip()
+        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[a-z]{2,}', email) or not source.startswith('http'):
+            continue  # published email with its source only
+        lines.append({k: str(x.get(k) or '').strip()[:200] for k in ('line', 'agent', 'phone', 'website', 'evidence')}
+                     | {'email': email, 'source_url': source[:300]})
+    return lines[:15], str(found.get('note') or '')[:300]
+
+
+def register_found(lines, route, actor=''):
+    """Add researched agents/contacts to the directory (marked as found on the web, unverified). Returns names added."""
+    added = []
+    now = utcnow()
+    with db() as c:
+        if not c.execute("SELECT to_regclass('shipping_agents') t").fetchone()['t']:
+            return added
+        for x in lines:
+            name = (x.get('agent') or x.get('line') or '').strip()[:120]
+            if not name:
+                continue
+            existing = c.execute("SELECT id FROM shipping_agents WHERE lower(name)=lower(%s)", (name,)).fetchone()
+            if not existing and x.get('line'):
+                existing = c.execute("SELECT id FROM shipping_agents WHERE lower(name)=lower(%s) OR lower(name) LIKE lower(%s) LIMIT 1",
+                                     (x['line'], x['line'].split(' ')[0] + '%')).fetchone()
+            if existing:
+                agent_id = existing['id']
+            else:
+                agent_id = c.execute("""INSERT INTO shipping_agents(name,website,source,notes,created_at,updated_at)
+                    VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
+                                     (name, x.get('website') or None, 'بحث في الإنترنت: ' + x['source_url'],
+                                      f"يخدم {route} — {x.get('evidence') or ''}"[:500], now, now)).fetchone()['id']
+                added.append(name)
+            c.execute("""INSERT INTO shipping_agent_contacts(agent_id,purpose,email,phone,is_verified,created_at,updated_at)
+                VALUES(%s,%s,%s,%s,0,%s,%s) ON CONFLICT(agent_id,email,purpose) DO NOTHING""",
+                      (agent_id, 'Sales (من البحث)', x['email'], x.get('phone') or None, now, now))
+            c.execute("""INSERT INTO freight_route_agents(agent_id,route,source_url,evidence,found_by,created_at)
+                VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(agent_id,route) DO NOTHING""",
+                      (agent_id, route, x['source_url'], (x.get('evidence') or '')[:300], actor[:40], now))
+    return added
+
+
+def route_agent_ids(route):
+    with db() as c:
+        return {r['agent_id'] for r in c.execute('SELECT agent_id FROM freight_route_agents WHERE route=%s', (route,)).fetchall()}
+
+
 def init():
+    with db() as c:
+        c.execute('''CREATE TABLE IF NOT EXISTS freight_route_agents(id BIGSERIAL PRIMARY KEY, agent_id BIGINT NOT NULL, route TEXT NOT NULL,
+            source_url TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', found_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL, UNIQUE(agent_id, route))''')
     with db() as c:
         c.execute('''CREATE TABLE IF NOT EXISTS freight_quote_requests(id BIGSERIAL PRIMARY KEY, agent TEXT NOT NULL, email TEXT NOT NULL,
             pol TEXT NOT NULL, pod TEXT NOT NULL, equipment TEXT NOT NULL, commodity TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
