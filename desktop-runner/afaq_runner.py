@@ -434,6 +434,154 @@ class Task:
         path.write_text('\n'.join(lines), encoding='utf-8')
         return self.upload(path, page.url)
 
+    FILL_SCAN_JS = """() => {
+      const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+      const clean = t => (t || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+      const lab = e => { let t = '';
+        if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.innerText; }
+        if (!t && e.closest('label')) t = e.closest('label').innerText;
+        if (!t) t = e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.getAttribute('title') || '';
+        let p = e.parentElement;
+        for (let i = 0; i < 4 && p && !t; i++) {
+          const c = [...p.querySelectorAll('label,span,div,td,th')].find(x => x.children.length === 0 && !x.contains(e)
+                     && x.innerText && x.innerText.trim().length < 60);
+          if (c) t = c.innerText; p = p.parentElement; }
+        return clean(t); };
+      const out = []; let n = 0;
+      document.querySelectorAll('input,select,textarea,[role=combobox]').forEach(e => {
+        if (!vis(e)) return;
+        const tag = e.tagName.toLowerCase();
+        const type = tag === 'select' ? 'select' : (e.getAttribute('role') === 'combobox' && tag !== 'input' ? 'combobox'
+                     : (e.getAttribute('type') || tag).toLowerCase());
+        if (['hidden', 'password', 'submit', 'button', 'image', 'reset', 'file', 'checkbox', 'radio'].includes(type)) return;
+        const key = 'afaq-' + (n++);
+        e.setAttribute('data-afaq-fill', key);
+        const f = {key, label: lab(e), type, tag, combo: e.getAttribute('role') === 'combobox' || !!e.closest('ng-select,mat-select,.select2,.p-dropdown'),
+                   locked: !!e.disabled || !!e.readOnly, filled: tag === 'select' ? e.selectedIndex > 0 : !!(e.value || '').trim()};
+        if (tag === 'select') f.options = [...e.options].map(x => clean(x.text)).filter(Boolean).slice(0, 300);
+        out.push(f); });
+      return out; }"""
+
+    @staticmethod
+    def _fold(text):
+        text = re.sub('[إأآ]', 'ا', str(text or '').lower()).replace('ة', 'ه').replace('ى', 'ي')
+        return re.sub(r'[^\w\u0600-\u06ff]+', ' ', text).strip()
+
+    def _match(self, label, synonyms):
+        """2 = the field label equals a synonym, 1 = contains one, 0 = no match."""
+        lab = self._fold(label)
+        if not lab:
+            return 0
+        best = 0
+        for word in synonyms:
+            w = self._fold(word)
+            if w and lab == w:
+                return 2
+            if w and (w in lab.split(' ') or (len(w) > 4 and w in lab)):
+                best = 1
+        return best
+
+    def do_fasah_fill(self):
+        """Type the prepared declaration values into the FASAH screen the manager ALREADY opened and signed into.
+        Owner (26 Nov 2026): «الوكيل يدخل البيانات في فسح بدون تقديم البيان».
+        Hard limits: never navigates, never clicks any button or link, never presses Enter, never touches a field that
+        already has a value, a locked field, a password/OTP field or a drop-down it cannot match exactly. Each value is
+        read back after typing. Submitting/approving/paying stays entirely with the broker in FASAH."""
+        pages = [p for p in self.context.pages if allowed(p.url, self.domains, self.loopback) and 'zatca' in p.url]
+        if not pages:
+            self.step('ما لقيت صفحة فسح مفتوحة في متصفح الجهاز. افتح شاشة «بيان جديد» وسجّل دخولك ثم أعد الطلب.', False)
+            return False
+        page = pages[-1]
+        self.keep.add(page)
+        if not self.safe_for_screenshot(page):
+            self.step('الصفحة المفتوحة صفحة دخول؛ سجّل الدخول وافتح «بيان جديد» ثم أعد الطلب.', False)
+            return False
+        start_url = page.url
+        wanted = [f for f in (self.params.get('fields') or []) if str(f.get('value') or '').strip()]
+        scanned = []
+        for frame in page.frames:
+            try:
+                for f in frame.evaluate(self.FILL_SCAN_JS):
+                    scanned.append((frame, f))
+            except Exception:
+                continue
+        if not scanned:
+            self.step('الشاشة المفتوحة لا تحتوي خانات إدخال ظاهرة. افتح شاشة «بيان جديد» ثم أعد الطلب.', False, page=page)
+            return False
+        used, report = set(), []
+        for want in wanted:
+            self.poll()
+            label_ar, value = str(want.get('label') or want.get('key') or ''), str(want['value'])[:500]
+            synonyms = [label_ar] + [str(x) for x in want.get('synonyms') or []]
+            ranked = sorted(((self._match(f['label'], synonyms), i) for i, (_, f) in enumerate(scanned) if i not in used),
+                            reverse=True)
+            ranked = [r for r in ranked if r[0] > 0]
+            if not ranked:
+                report.append(('لم أجد خانتها', label_ar, value))
+                continue
+            if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+                report.append(('أكثر من خانة محتملة — لم أعبئها', label_ar, value))
+                continue
+            index = ranked[0][1]
+            frame, f = scanned[index]
+            used.add(index)
+            if SECRET_FIELD.search(f['label']) or SECRET_FIELD.search(label_ar):
+                report.append(('خانة حساسة — لا أعبئها', label_ar, value))
+                continue
+            if f['locked']:
+                report.append(('الخانة مقفلة في فسح', label_ar, value))
+                continue
+            if f['filled']:
+                report.append(('فيها قيمة مسبقًا — لم أغيّرها', label_ar, value))
+                continue
+            if f['combo'] or f['type'] == 'combobox':
+                report.append(('قائمة اختيار — اخترها يدويًا', label_ar, value))
+                continue
+            box = frame.locator(f'[data-afaq-fill="{f["key"]}"]').first
+            typed = value
+            try:
+                if f['type'] == 'select':
+                    fv = self._fold(value)
+                    exact = [o for o in f.get('options') or [] if self._fold(o) == fv]
+                    if len(exact) != 1:
+                        report.append(('القائمة لا تحتوي خيارًا مطابقًا تمامًا — اخترها يدويًا', label_ar, value))
+                        continue
+                    box.select_option(label=exact[0])
+                    typed = exact[0]
+                    ok = True
+                else:
+                    if f['type'] == 'number':
+                        typed = re.sub(r'[^\d.]', '', value.replace(',', '').replace('٬', '').replace('٫', '.'))
+                    box.fill(typed)  # fill() types the value only: no Enter, no click on any button
+                    got = box.input_value()
+                    ok = got.strip() == typed.strip()
+            except Exception as exc:
+                report.append(('تعذر الإدخال: ' + type(exc).__name__, label_ar, value))
+                continue
+            if page.url != start_url or self.blocked:
+                raise ValueError('تغيّرت صفحة فسح أثناء الإدخال؛ أوقفت المهمة دون أي ضغط.')
+            report.append(('✅ أُدخلت' if ok else 'أُدخلت لكن فسح غيّر القيمة — راجعها', label_ar, typed))
+        filled = sum(1 for r in report if r[0].startswith('✅'))
+        lines = ['إدخال بيانات البيان في فسح — المعاملة: ' + str(self.params.get('case_title') or self.params.get('case_id') or ''),
+                 'لم أضغط أي زر ولم أقدّم البيان. راجع كل خانة ثم قدّم بنفسك.', '']
+        if self.params.get('movement'):
+            lines.append('نوع البيان: ' + str(self.params['movement']))
+        lines += [f'- {label}: {value} — {state}' for state, label, value in report]
+        items = self.params.get('items') or []
+        if items:
+            lines += ['', 'بنود الفاتورة (تُدخل يدويًا في جدول البنود):']
+            lines += [f"{n}. {it.get('description') or ''} | الكمية {it.get('quantity') or '—'} | القيمة {it.get('value') or '—'}"
+                      f" | المنشأ {it.get('origin') or '—'} | البند {it.get('code') or 'غير محسوم'}" for n, it in enumerate(items, 1)]
+        lines += ['', 'هيكل الشاشة (للتحسين لاحقًا — بدون قيم):']
+        lines += [f"- {f['label'] or '(بدون عنوان)'} | {f['type']}" + (' | قائمة' if f['combo'] else '') + (' | مقفل' if f['locked'] else '')
+                  for _, f in scanned[:250]]
+        path = self.dir / 'fasah-fill-report.txt'
+        path.write_text('\n'.join(lines), encoding='utf-8')
+        self.step(f'أدخلت {filled} من {len(wanted)} خانة في شاشة فسح — بدون ضغط أي زر أو تقديم. الباقي في التقرير.',
+                  filled > 0, page=page)
+        return self.upload(path, page.url) and filled > 0
+
     def do_fill_form(self):
         page = self.open(self.params['url'])
         self.wait(page, 2)

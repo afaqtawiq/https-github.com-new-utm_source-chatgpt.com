@@ -341,6 +341,47 @@ def movement_check(routing, recorded=''):
     return found
 
 
+# Likely FASAH screen labels for each prepared value (Arabic first). The work computer fills a field only when exactly one
+# visible empty field matches; anything else is reported for manual entry. Refined from the screen structure it saves.
+FILL_SYNONYMS = {
+    'importer': ['المستورد', 'اسم المستورد', 'importer'],
+    'registration': ['السجل التجاري', 'رقم السجل التجاري', 'commercial registration'],
+    'supplier': ['المورد', 'اسم المورد', 'المصدر', 'اسم المصدر', 'supplier', 'exporter'],
+    'invoice_number': ['رقم الفاتورة', 'invoice number', 'invoice no'],
+    'invoice_date': ['تاريخ الفاتورة', 'invoice date'],
+    'invoice_total': ['قيمة الفاتورة', 'إجمالي الفاتورة', 'اجمالي قيمة الفاتورة', 'invoice value', 'invoice amount', 'invoice total'],
+    'currency': ['العملة', 'عملة الفاتورة', 'currency'],
+    'incoterm': ['شرط التسليم', 'شروط التسليم', 'incoterm', 'delivery terms'],
+    'bill_number': ['رقم البوليصة', 'رقم بوليصة الشحن', 'رقم مستند النقل', 'bill of lading', 'b/l no'],
+    'containers': ['رقم الحاوية', 'أرقام الحاويات', 'container number', 'container no'],
+    'arrival_port': ['منفذ الوصول', 'ميناء الوصول', 'منفذ الدخول', 'port of arrival'],
+    'packages': ['عدد الطرود', 'عدد الطرود الإجمالي', 'number of packages', 'packages'],
+    'gross_weight': ['الوزن القائم', 'الوزن الإجمالي', 'gross weight'],
+    'net_weight': ['الوزن الصافي', 'net weight'],
+    'origin': ['بلد المنشأ', 'دولة المنشأ', 'country of origin'],
+    'description': ['وصف البضاعة', 'وصف السلعة', 'goods description'],
+}
+
+
+def fill_params(case, ai):
+    """(params, None) for the work-computer «fasah_fill» task, or (None, reason). Same gate as the Chrome instructions."""
+    coverage = current_coverage(case, ai)
+    if not ai:
+        return None, 'حلّل المستندات أولًا.'
+    if coverage.get('stale_sources'):
+        return None, STALE_SOURCE_WARNING
+    if coverage.get('partial_or_unverified', True):
+        return None, MODEL_LIMIT_WARNING + ' ' + '؛ '.join(str(x) for x in coverage.get('blockers', [])[:3])
+    fields = [{'key': key, 'label': LABELS.get(key, key), 'value': str(item.get('value') or ''), 'synonyms': FILL_SYNONYMS.get(key, [])}
+              for key, item in (ai.get('fields') or {}).items() if str(item.get('value') or '').strip()]
+    if not fields:
+        return None, 'لا توجد بيانات مستخرجة للإدخال.'
+    moved = ai.get('movement') or {}
+    return {'case_id': case['id'], 'case_title': str(case.get('title') or '')[:120], 'fields': fields,
+            'movement': moved.get('summary') or '',
+            'items': [{k: item.get(k) for k in ('description', 'quantity', 'value', 'origin', 'code')} for item in ai.get('items') or []]}, None
+
+
 def chrome_prompt(case, ai):
     coverage = current_coverage(case, ai)
     if coverage.get('stale_sources'):
@@ -372,7 +413,7 @@ def copy_button(code, disabled=False):
     return '<button type="button" class="btn copy"' + blocked + ' data-v="' + code + '">نسخ البند</button>'
 
 
-def page(case, session, error=''):
+def page(case, session, error='', notice=''):
     esc = html.escape
     ai = (case['context'].get('ai') or {}) if not error else {}
     hidden = ws.token(session) + f'<input type="hidden" name="revision" value="{case["revision"]}">'
@@ -386,6 +427,8 @@ def page(case, session, error=''):
       <a class="btn" href="{FASAH_URL}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">فتح فسح ↗</a></div>'''
     if error:
         body += f'<div class="card warn"><p>{esc(error)}</p></div>'
+    if notice:
+        body += f'<div class="card"><p>{esc(notice)}</p></div>'
     if not ai:
         body += '<div class="card"><p>لم يُحلَّل بعد. ارفع المستندات في صفحة المعاملة ثم اضغط "تحليل المستندات بـ Claude".</p></div>'
         return ws.render('مساعد المخلص', body)
@@ -427,6 +470,18 @@ def page(case, session, error=''):
              '<p class="muted">البنود من جدول التعرفة الخليجية الموحدة (12 رقمًا). المخلص يؤكد البند النهائي، ويتحقق من إذن فسح السلع المقيدة في فسح.</p>'
              '<div class="scroll"><table><tr><th>#</th><th>الوصف</th><th>الكمية</th><th>القيمة</th><th>المنشأ</th><th>البند والرسم</th><th>الاشتراطات</th><th></th></tr>'
              + (items_html or '<tr><td colspan="8">لم تُستخرج بنود.</td></tr>') + '</table></div></div>')
+    fill, fill_error = fill_params(case, ai)
+    body += (f'<div class="card"><h2>🖥 إدخال البيانات في فسح بواسطة جهاز العمل (بدون تقديم)</h2>'
+             '<ol><li>على كمبيوتر العمل: افتح فسح وسجّل دخولك بنفسك، ثم افتح شاشة «بيان جديد» واختر نوع البيان.</li>'
+             '<li>اضغط الزر أدناه: يكتب جهاز العمل القيم في الخانات الفارغة المطابقة فقط. لا يضغط أي زر، ولا يضغط Enter، '
+             'ولا يغيّر خانة فيها قيمة، ولا يقدّم البيان.</li>'
+             '<li>يصلك تقرير بما أُدخل وما يحتاج إدخالًا يدويًا (القوائم المنسدلة وجدول البنود)، مع صورة الشاشة.</li>'
+             '<li>راجع كل خانة في فسح، ثم قدّم البيان بنفسك.</li></ol>')
+    if fill:
+        body += (f'<form method="post" action="/fasah-workspace/{case["id"]}/assistant/fill">{hidden}'
+                 f'<button class="btn">🖥 أدخل {len(fill["fields"])} خانة في فسح الآن (بدون تقديم)</button></form></div>')
+    else:
+        body += f'<p class="muted">غير متاح الآن: {esc(fill_error)}</p></div>'
     prompt = esc(chrome_prompt(case, ai))
     launch_disabled = 'disabled' if coverage.get('partial_or_unverified', True) else ''
     body += f'''<div class="card"><h2>🤖 الإدخال في فسح بواسطة Claude in Chrome</h2>
@@ -471,6 +526,51 @@ async def run_analysis(case_id: int, request: Request):
     case['context']['ai'] = result
     ws.persist(case, session, form.get('revision'), 'fasah_ai_analyzed')
     return RedirectResponse(f'/fasah-workspace/{case_id}/assistant', 303)
+
+
+def fill_by_reference(reference, actor=''):
+    """Manager on WhatsApp: «أدخل بيانات معاملة X في فسح» — latest analysed workspace draft whose id or title matches."""
+    from app.storage import rows
+    ref = str(reference or '').strip()
+    if not ref:
+        return 'اذكر رقم المعاملة أو اسمها في مساحة فسح.'
+    if re.fullmatch(r'(?:آخر|اخر|الأخيرة|الاخيرة|latest|last)(?:\s+معامل[ةه])?', ref, re.I):
+        found = rows('SELECT * FROM fasah_workspace_drafts WHERE context_json LIKE ? ORDER BY updated_at DESC LIMIT 1', ('%"analyzed_at"%',))
+    else:
+        found = rows('SELECT * FROM fasah_workspace_drafts WHERE (CAST(id AS TEXT)=? OR title ILIKE ?) ORDER BY updated_at DESC LIMIT 5',
+                     (ref.lstrip('#'), '%' + ref + '%'))
+    if not found:
+        return f'ما لقيت معاملة «{ref}» في مساحة فسح. ارفع المستندات هناك وحلّلها أولًا.'
+    case = found[0]
+    case['fields'] = json.loads(case['fields_json'])
+    case['documents'] = json.loads(case['documents_json'])
+    case['context'] = json.loads(case.get('context_json') or '{}')
+    params, error = fill_params(case, case['context'].get('ai') or {})
+    head = f"المعاملة #{case['id']} «{case['title']}»" + (f' (ووجدت {len(found) - 1} غيرها بنفس الاسم؛ اخترت الأحدث)' if len(found) > 1 else '')
+    if error:
+        return head + ': غير جاهزة للإدخال — ' + error
+    from app import agent_runner
+    tid, message = agent_runner.create_task('fasah_fill', params, actor or 'واتساب')
+    return (head + '\n' + message + '\nقبلها على كمبيوتر العمل: افتح فسح وسجّل دخولك وافتح شاشة «بيان جديد». '
+            'الجهاز يكتب في الخانات فقط ولا يضغط أي زر ولا يقدّم البيان.') if tid else head + ': ' + message
+
+
+@router.post('/fasah-workspace/{case_id}/assistant/fill')
+async def fill_in_fasah(case_id: int, request: Request):
+    session = ws.authorized(request)
+    case = ws.get_draft(case_id, session)
+    form = await request.form()
+    ws.check_csrf(session, form.get('csrf'))
+    if str(case['revision']) != str(form.get('revision')):
+        raise HTTPException(409, 'حدّث الصفحة قبل الإدخال.')
+    params, error = fill_params(case, case['context'].get('ai') or {})
+    if error:
+        return page(case, session, error)
+    from app import agent_runner
+    tid, message = agent_runner.create_task('fasah_fill', params, str(session.get('name') or session.get('email') or 'مساحة فسح'))
+    if not tid:
+        return page(case, session, message)
+    return page(case, session, notice=message.replace('\n', ' — '))
 
 
 _original_panel = view.document_panel

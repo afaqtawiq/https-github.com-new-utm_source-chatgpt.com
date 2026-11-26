@@ -153,6 +153,8 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'which': {'type': 'string', 'enum': ['import', 'export']}}}},
     {'name': 'runner_task', 'description': 'Manager only. Create a task for the WORK COMPUTER browser: download_test (first trial), read_page (url), download_file (url), fill_form (url + fields [{label,value}] + optional submit_label; submitting waits for the manager approval), fasah_declarations (which import/export, party = importer/exporter name filter e.g. «سلة», since YYYY-MM-DD, pages 1-20 — read-only list; new unbilled سلة الرحائب declarations are then prepared for billing with a confirmation code), fasah_details (number — read one declaration invoice and fees), inspect_form (describe the FASAH screen the manager already opened, e.g. «بيان جديد»: fields, types, drop-down options, buttons — read-only, no typing or clicking; use for «اقرأ شاشة البيان الجديد في فسح» «افحص خانات البيان»). Allowed sites only; never passwords/OTP.',
      'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details', 'inspect_form']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'party': {'type': 'string'}, 'since': {'type': 'string'}, 'pages': {'type': 'string'}, 'number': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
+    {'name': 'fasah_fill', 'description': 'Manager only. ENTER the prepared declaration data INTO FASAH WITHOUT SUBMITTING: the work computer types the analysed values of a FASAH-workspace case into the empty matching fields of the «بيان جديد» screen the manager already opened and signed into. It never clicks any button, never presses Enter, never changes a filled field and never submits/approves/pays; drop-downs and the items table are reported for manual entry, with a screenshot. case = workspace case number or title, or «آخر» for the latest analysed case. Use for «أدخل بيانات البيان في فسح» «عبّي البيان في فسح بدون تقديم» «دخل بيانات معاملة X في فسح».',
+     'input_schema': {'type': 'object', 'properties': {'case': {'type': 'string'}}, 'required': ['case']}},
     {'name': 'fasah_tracking', 'description': 'Live status of open FASAH declarations read by the work computer every 2 hours (under review, waiting duties, inspection, released). Optional filter (number or importer name). e.g. «حالة البيانات في فسح» «وش وضع بيانات سلة».',
      'input_schema': {'type': 'object', 'properties': {'filter': {'type': 'string'}}}},
     {'name': 'fasah_authorizations', 'description': 'When do the importers\' broker authorizations (تفاويض) in FASAH expire. Optional company name (e.g. «بروميت»). Answers from the last read of the FASAH authorizations list; if older than a day the work computer reads it again (read-only) and the result is sent when ready. e.g. «تفويض شركة بروميت متى ينتهي» «التفاويض اللي قربت تنتهي».',
@@ -1171,6 +1173,13 @@ def tool_runner_task(c, a):
     return agent_runner.create_task(a.get('kind'), {'url': a.get('url'), 'which': a.get('which'), 'fields': a.get('fields'),
                                                     'submit_label': a.get('submit_label'), 'party': a.get('party'), 'since': a.get('since'),
                                                     'pages': a.get('pages'), 'number': a.get('number')}, _member().get('name') or '')[1]
+
+
+def tool_fasah_fill(c, a):
+    if not _member().get('manager'):
+        return 'إدخال البيانات في فسح من جهاز العمل للمدير فقط.'
+    from app import fasah_ai
+    return fasah_ai.fill_by_reference(a.get('case'), _member().get('name') or '')
 
 
 def tool_fasah_authorizations(c, a):
