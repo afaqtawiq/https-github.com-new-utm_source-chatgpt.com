@@ -64,19 +64,33 @@ DEPARTMENTS = {
                  'بعينها فقط إذا طلب. اقرأ السعر كاملًا (٥،٣٠٠ = 5,300). '
                  'وأنت مسؤول جدول أسعار المسارات (rate_card): تجمع أسعار السائقين للمسارات الناقصة (rate_card_survey برمز «نفذ» واحد)، '
                  'وتعرض على المالك الوسيط والسعر المقترح، والمالك وحده يعتمد سعر العميل (approve_route_price). '
+                 'وتسجّل المؤسسة في منصات النقل (transport_platforms / platform_signup): أي دعوة تسجيل تصل تُحفظ تلقائيًا، والتسجيل بأمر المدير فقط، '
+                 'وجهاز العمل يعبئ البيانات ويرفع المستندات والمدير يكتب كلمة المرور ويضغط الإرسال بنفسه. '
                  'وتبني شبكة الناقلين الشركاء: شركات النقل شركاء وليست عملاء؛ تدعوها لإرسال أنواع شاحناتها ومساراتها وأسعارها '
                  '(carrier_invite برمز «نفذ» واحد لكل دفعة) وتتابع ردودها (carrier_partners) وتقارن أسعارها بجدول الأسعار.'),
         'tools': ('add_driver', 'load_offer', 'broadcast_load', 'negotiate_owner', 'assign_driver', 'load_acceptances', 'approve_owner_load',
                   'owner_load_status', 'broadcast_status', 'stop_broadcast', 'driver_price_request', 'driver_prices', 'rate_card', 'rate_card_survey',
-                  'approve_route_price', 'carrier_invite', 'carrier_partners', 'send_whatsapp')},
+                  'approve_route_price', 'carrier_invite', 'carrier_partners', 'send_whatsapp',
+                  'transport_platforms', 'platform_signup', 'company_profile'),
+        'actions': (('🌐 منصات النقل وحالة التسجيل', 'وش وضع منصات النقل؟'),
+                    ('📝 سجّل في كل المنصات الجديدة', 'سجّل في كل المنصات الجديدة'),
+                    ('🏢 بيانات المؤسسة للتسجيل', 'اعرض بيانات المؤسسة المستخدمة في التسجيل بالمنصات'))},
     'containers': {
         'person': 'سلطان', 'model': 'classy_male',
         'name': 'الحاويات ووكلاء الملاحة', 'manager': 'مدير الحاويات والملاحة', 'icon': '🚢',
         'aliases': ('الحاويات', 'الملاحة', 'وكلاء الملاحة', 'الغرامات', 'الشحن البحري'),
-        'role': 'تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول.',
+        'role': ('تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول. '
+                 'عندك دليل وكلاء الملاحة المسجل في النظام كاملًا (shipping_agents_directory) بأسمائهم وإيميلاتهم وهواتفهم: '
+                 'لا تقل أبدًا إنه ما عندك دليل وكلاء، ولا تطلب من المدير أسماء أو إيميلات الوكلاء؛ افتح الدليل. '
+                 'أي شحنة يطلب لها المدير سعرًا (مثل جدة ← بربرة، حاويتان 40) تشغّل لها فورًا freight_quote_request بالمسار والحاويات: '
+                 'تبحث عن الخطوط التي تخدم المسار وتسجل الجديد منها في الدليل، وتجهز الطلب للمسجلين والجدد معًا، وتُرسل بعد «نفذ» فقط. '
+                 'لا تقل «ما عندنا وكيل للمسار» ولا تطلب أسماء أو إيميلات قبل تشغيل الأداة.'),
         'tools': ('track_container', 'container_update', 'containers_status', 'container_line', 'line_tariff',
                   'free_time_extension', 'free_time_result', 'detention_claim', 'detention_exposure', 'port_storage',
-                  'track_shipment', 'ask_eta_by_email', 'send_email')},
+                  'track_shipment', 'ask_eta_by_email', 'send_email', 'shipping_agents_directory', 'freight_quote_request'),
+        'actions': (('📇 دليل وكلاء الملاحة', 'اعرض دليل وكلاء الملاحة المسجلين'),
+                    ('📨 اطلب عروض أسعار شحن', 'اطلب عروض أسعار شحن من وكلاء الملاحة'),
+                    ('📋 طلبات الأسعار المرسلة', 'وش طلبات عروض الأسعار اللي أرسلناها؟'))},
     'finance': {
         'person': 'نورة', 'model': 'suit_female',
         'name': 'المالية والحسابات', 'manager': 'المدير المالي', 'icon': '💰',

@@ -45,6 +45,7 @@ KINDS = {
     'fasah_authorizations': 'قراءة قائمة تفاويض المخلص في فسح (المستورد وتاريخ الانتهاء) — قراءة فقط',
     'inspect_form': 'وصف شاشة فسح المفتوحة (الخانات وأنواعها والأزرار) — قراءة فقط بدون تعبئة أو ضغط',
     'fasah_fill': 'إدخال بيانات البيان في شاشة فسح المفتوحة — بدون ضغط أي زر وبدون تقديم البيان',
+    'platform_signup': 'تعبئة نموذج التسجيل في منصة نقل ورفع مستندات المؤسسة — بدون كلمة مرور وبدون إرسال',
 }
 FILE_TYPES = {'application/pdf', 'text/csv', 'text/plain', 'image/png', 'image/jpeg',
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
@@ -61,7 +62,12 @@ TRACKING_DOMAINS = ('msc.com', 'maersk.com', 'cma-cgm.com', 'hapag-lloyd.com', '
 
 def allowed_domains():
     own = [d.strip().lower() for d in os.getenv('RUNNER_ALLOWED_DOMAINS', DEFAULT_DOMAINS).split(',') if d.strip()]
-    return own + [d for d in TRACKING_DOMAINS if d not in own]
+    try:  # transport platforms the manager approved for registration (owner, 26 Nov 2026)
+        from app.transport_platforms import approved_domains
+        platforms = approved_domains()
+    except Exception:
+        platforms = []
+    return own + [d for d in TRACKING_DOMAINS if d not in own] + [d for d in platforms if d not in own]
 
 
 def domain_allowed(url):
@@ -181,7 +187,7 @@ def create_task(kind, params, actor=''):
     if kind not in KINDS:
         return None, 'نوع المهمة غير مدعوم. المتاح: ' + '، '.join(KINDS.values())
     params = {k: v for k, v in (params or {}).items() if v not in (None, '', [])}
-    if kind in ('read_page', 'download_file', 'fill_form') and not domain_allowed(params.get('url')):
+    if kind in ('read_page', 'download_file', 'fill_form', 'platform_signup') and not domain_allowed(params.get('url')):
         return None, 'الموقع غير مسموح. المواقع المسموحة: ' + '، '.join(allowed_domains())
     if kind == 'fill_form':
         fields = params.get('fields')
@@ -212,6 +218,17 @@ def create_task(kind, params, actor=''):
         params['fields'] = clean
         params['items'] = [{k: str(it.get(k) or '')[:300] for k in ('description', 'quantity', 'value', 'origin', 'code')}
                            for it in (params.get('items') or []) if isinstance(it, dict)][:30]
+    if kind == 'platform_signup':
+        # Typing and file attaching only: the runner never types a password, never ticks the declaration, never clicks.
+        params.pop('submit_label', None)
+        fields = params.get('fields')
+        if not isinstance(fields, list) or not fields or len(fields) > 30:
+            return None, 'لا توجد بيانات للتسجيل.'
+        for f in fields:
+            if re.search(r'(password|كلمة\s*(ال)?(مرور|سر)|otp|رمز\s*(ال)?تحقق|cvv|iban|ايبان|بطاقة)', str((f or {}).get('label') or ''), re.I):
+                return None, 'لا أكتب كلمات المرور أو رموز التحقق أو بيانات البطاقات والحسابات البنكية.'
+        params['documents'] = [d for d in (params.get('documents') or []) if isinstance(d, dict)
+                               and re.fullmatch(r'[0-9a-f-]{36}', str(d.get('doc_id') or ''))][:6]
     if kind == 'fasah_authorizations':
         params['pages'] = max(1, min(int(re.sub(r'\D', '', str(params.get('pages') or '10')) or 10), 30))
     if kind in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
@@ -391,6 +408,28 @@ async def request_approval(tid: int, request: Request):
     return {'approval_id': aid}
 
 
+@router.get('/api/runner/tasks/{tid}/document/{doc_id}')
+def task_document(tid: int, doc_id: str, request: Request):
+    """A company document the manager's «platform_signup» task needs to attach — only ids listed in that running task."""
+    device = device_for(request)
+    with db() as c:
+        task = own_task(c, device, tid)
+    if task['kind'] != 'platform_signup' or task['status'] != 'running':
+        raise HTTPException(403, 'not allowed')
+    listed = {str(d.get('doc_id')) for d in json.loads(task['params_json'] or '{}').get('documents') or []}
+    if doc_id not in listed:
+        raise HTTPException(403, 'not allowed')
+    from app import transport_platforms
+    row = transport_platforms.document_bytes(doc_id)
+    if not row:
+        raise HTTPException(404, 'missing')
+    data = bytes(row['content'])
+    ext = {'application/pdf': '.pdf', 'image/png': '.png', 'image/jpeg': '.jpg'}.get(row['media_type'], '')
+    name = re.sub(r'[^\w\-؀-ۿ ]', '_', str(row['name']))[:80] + ext
+    return {'name': name, 'mime': row['media_type'], 'data_b64': base64.b64encode(data).decode(),
+            'sha256': hashlib.sha256(data).hexdigest()}
+
+
 @router.post('/api/runner/tasks/{tid}/file')
 async def upload(tid: int, request: Request):
     device = device_for(request)
@@ -440,7 +479,7 @@ async def finish(tid: int, request: Request):
             status = 'stopped'
         if status == 'done':
             verified = c.execute('SELECT COUNT(*) n FROM runner_files WHERE task_id=%s AND verified', (tid,)).fetchone()['n']
-            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'read_page', 'inspect_form', 'fasah_fill') and not verified:
+            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'read_page', 'inspect_form', 'fasah_fill', 'platform_signup') and not verified:
                 status = 'failed'  # never «done» without a verified result
         c.execute('UPDATE runner_tasks SET status=%s,result_json=%s,finished_at=%s WHERE id=%s',
                   (status, json.dumps(body.get('result') or {}, ensure_ascii=False)[:20000], utcnow(), tid))
@@ -479,6 +518,12 @@ async def finish(tid: int, request: Request):
     if status == 'done' and task['kind'] in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
         import threading
         threading.Thread(target=after_fasah, args=(tid,), daemon=True).start()
+    if task['kind'] == 'platform_signup':
+        try:
+            from app import transport_platforms
+            transport_platforms.after_task(tid, status == 'done')
+        except Exception as exc:
+            print('PLATFORM_SIGNUP_AFTER', type(exc).__name__, str(exc)[:120], flush=True)
     if status == 'done' and task['kind'] == 'fasah_authorizations':
         import threading
         threading.Thread(target=after_authorizations, args=(tid,), daemon=True).start()

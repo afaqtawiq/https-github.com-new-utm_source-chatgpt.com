@@ -166,6 +166,13 @@ def accept_inbound(payload):
             'question_reason':decision.reason,'attachments':snapshots,
             'attachment_count':len(attachments),'quoted_reference_present':quote_present,
             'quoted_platform_message_id':quoted_id}
+    try:  # an invitation to register on a transport platform → Khaled (owner, 26 Nov 2026)
+        from app.transport_platforms import detect
+        invite = detect(message.get('text'))
+        if invite:
+            data['platform_invite'] = invite
+    except Exception as exc:
+        print('PLATFORM_INVITE_DETECT', type(exc).__name__, str(exc)[:120], flush=True)
     sender_info = message.get('sender') if isinstance(message.get('sender'), dict) else {}
     name = sender_info.get('name') or sender_info.get('displayName') or message.get('senderName') or ''
     if isinstance(name, str) and name.strip():
@@ -339,6 +346,16 @@ async def processing(job):
     if job['account_id'] != z.account_id() or not enabled(settings,job['sender']):
         await run_in_threadpool(store.prepare_reply,jid,lease,terminal_status='blocked',diagnostics={'reason':'scope_changed'})
         return
+    if data.get('platform_invite'):
+        try:  # recorded once per platform; the manager decides whether to register (nothing is sent to the sender)
+            from app import transport_platforms
+            notice = await run_in_threadpool(transport_platforms.record, data['platform_invite'], job['sender'],
+                                             data.get('conversation_text') or '')
+            if notice:
+                from app.owner_briefing import deliver
+                await deliver(notice)
+        except Exception as exc:
+            print('PLATFORM_INVITE_RECORD', type(exc).__name__, str(exc)[:120], flush=True)
     if not data.get('attachments') and data.get('question_allowed') and data.get('question') and 'AFT' not in str(data['question']).upper():
         def implicit():
             try:

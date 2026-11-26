@@ -441,13 +441,16 @@ class Task:
       const lab = e => { let t = '';
         if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.innerText; }
         if (!t && e.closest('label')) t = e.closest('label').innerText;
-        if (!t) t = e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.getAttribute('title') || '';
+        if (!t) t = e.getAttribute('aria-label') || '';
         let p = e.parentElement;
         for (let i = 0; i < 4 && p && !t; i++) {
-          const c = [...p.querySelectorAll('label,span,div,td,th')].find(x => x.children.length === 0 && !x.contains(e)
+          // A label beside the field inside the same group (the common «form-group» layout), before any leaf text.
+          const l = [...p.querySelectorAll('label')].find(x => !x.contains(e) && x.innerText && x.innerText.trim().length < 60);
+          const c = l || [...p.querySelectorAll('span,div,td,th')].find(x => x.children.length === 0 && !x.contains(e)
                      && x.innerText && x.innerText.trim().length < 60);
           if (c) t = c.innerText; p = p.parentElement; }
-        return clean(t); };
+        if (!t) t = e.getAttribute('title') || e.getAttribute('placeholder') || '';
+        return clean(t).replace(/\\s*\\*\\s*$/, ''); };
       const out = []; let n = 0;
       document.querySelectorAll('input,select,textarea,[role=combobox]').forEach(e => {
         if (!vis(e)) return;
@@ -581,6 +584,126 @@ class Task:
         self.step(f'أدخلت {filled} من {len(wanted)} خانة في شاشة فسح — بدون ضغط أي زر أو تقديم. الباقي في التقرير.',
                   filled > 0, page=page)
         return self.upload(path, page.url) and filled > 0
+
+    FILE_SCAN_JS = """() => {
+      const clean = t => (t || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+      const out = []; let n = 0;
+      document.querySelectorAll('input[type=file]').forEach(e => {
+        let t = '';
+        if (e.id) { const l = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (l) t = l.innerText; }
+        let p = e.parentElement;
+        for (let i = 0; i < 4 && p && !t; i++) {
+          const l = p.querySelector('label'); if (l && !l.contains(e)) t = l.innerText;
+          if (!t) { const c = p.querySelector('[class*=title],[class*=label]'); if (c && !c.contains(e)) t = c.innerText; }
+          p = p.parentElement; }
+        const key = 'afaq-file-' + (n++);
+        e.setAttribute('data-afaq-file', key);
+        out.push({key, label: clean(t || e.getAttribute('aria-label') || e.name || ''), accept: e.accept || '',
+                  filled: !!(e.files && e.files.length)}); });
+      return out; }"""
+
+    def do_platform_signup(self):
+        """Owner (26 Nov 2026): «عايز خالد يسجل في المنصات». Opens the transport platform's registration page, types the
+        company details and attaches the company documents from the archive. Never types a password, never ticks a
+        declaration, never clicks any button or link: the manager types the password and submits in this window."""
+        page = self.open(self.params['url'])
+        self.keep.add(page)
+        self.wait(page, 3)
+        scanned = [(f, x) for f in page.frames for x in self._scan(f)]
+        company = [w for want in self.params.get('fields') or [] if want.get('key') not in ('username', 'email', 'phone')
+                   for w in [str(want.get('label') or '')] + [str(x) for x in want.get('synonyms') or []]]
+        if not any(self._match(x['label'], company) for _, x in scanned):
+            # A sign-in page: go to its «register» link on the same allowed site by address (no click).
+            href = page.evaluate("""() => { const a = [...document.querySelectorAll('a[href]')].find(x =>
+                /إنشاء حساب|انشاء حساب|حساب جديد|تسجيل جديد|^\\s*تسجيل\\s*$|register|sign ?up|create account/i.test(x.innerText || '')
+                && !/الدخول|دخول|log ?in|sign ?in/i.test(x.innerText || ''));
+                return a ? a.href : ''; }""")
+            if href and allowed(href, self.domains, self.loopback):
+                page.goto(href, wait_until='domcontentloaded', timeout=60000)
+                self.wait(page, 3)
+                scanned = [(f, x) for f in page.frames for x in self._scan(f)]
+        start_url = page.url
+        report, used = [], set()
+        for want in self.params.get('fields') or []:
+            self.poll()
+            label, value = str(want.get('label') or ''), str(want.get('value') or '')
+            synonyms = [label] + [str(x) for x in want.get('synonyms') or []]
+            ranked = sorted(((self._match(x['label'], synonyms), i) for i, (_, x) in enumerate(scanned) if i not in used), reverse=True)
+            ranked = [r for r in ranked if r[0] > 0]
+            if not ranked:
+                report.append(('لا توجد خانة له في هذه المنصة', label, value))
+                continue
+            if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+                report.append(('أكثر من خانة محتملة — لم أعبئها', label, value))
+                continue
+            frame, field = scanned[ranked[0][1]]
+            used.add(ranked[0][1])
+            if SECRET_FIELD.search(field['label']) or field['type'] == 'password':
+                report.append(('خانة سرية — لا أعبئها', label, value))
+                continue
+            if field['locked'] or field['filled'] or field['combo'] or field['type'] in ('select', 'combobox'):
+                report.append(('قائمة أو خانة معبأة/مقفلة — راجعها بنفسك', label, value))
+                continue
+            box = frame.locator(f'[data-afaq-fill="{field["key"]}"]').first
+            try:
+                box.fill(value)  # typing only: no Enter, no click
+                ok = box.input_value().strip() == value.strip()
+            except Exception as exc:
+                report.append(('تعذر الإدخال: ' + type(exc).__name__, label, value))
+                continue
+            report.append(('✅ أُدخلت' if ok else 'أُدخلت لكن المنصة غيّرتها — راجعها', label, value))
+        files = [(f, x) for f in page.frames for x in self._files(f)]
+        attached = set()
+        for doc in self.params.get('documents') or []:
+            self.poll()
+            synonyms = [str(x) for x in doc.get('synonyms') or []]
+            ranked = sorted(((self._match(x['label'], synonyms), i) for i, (_, x) in enumerate(files) if i not in attached), reverse=True)
+            ranked = [r for r in ranked if r[0] > 0]
+            title = synonyms[0] if synonyms else str(doc.get('label') or '')
+            if not ranked:
+                report.append(('لا توجد خانة رفع له في هذه المنصة', title, doc.get('label') or ''))
+                continue
+            frame, slot = files[ranked[0][1]]
+            attached.add(ranked[0][1])
+            if slot['filled']:
+                report.append(('مرفق مسبقًا — لم أغيّره', title, doc.get('label') or ''))
+                continue
+            got = self.api.get(f"/api/runner/tasks/{self.id}/document/{doc['doc_id']}")
+            data = base64.b64decode(got['data_b64'])
+            if hashlib.sha256(data).hexdigest() != got.get('sha256'):
+                raise ValueError('ملف المستند لم يصل سليمًا؛ أوقفت المهمة.')
+            frame.locator(f'[data-afaq-file="{slot["key"]}"]').first.set_input_files(
+                files=[{'name': got['name'], 'mimeType': got['mime'], 'buffer': data}])
+            size = len(data) / 1024 / 1024
+            report.append(('✅ أُرفق' + (f' (حجمه {size:.1f} ميجابايت — إن رفضته المنصة فصغّره)' if size > 2 else ''), title, got['name']))
+        if page.url != start_url or self.blocked:
+            raise ValueError('تغيّرت صفحة المنصة أثناء التعبئة؛ أوقفت المهمة دون أي ضغط.')
+        filled = sum(1 for r in report if r[0].startswith('✅'))
+        lines = ['التسجيل في منصة: ' + str(self.params.get('platform') or page.url),
+                 'لم أكتب كلمة المرور، ولم أضع علامة الإقرار، ولم أضغط أي زر.', '',
+                 'المطلوب منك في نافذة جهاز العمل:', '1) اكتب كلمة المرور وتأكيدها (احفظها عندك).',
+                 '2) راجع البيانات واضغط «متابعة» إن وُجدت.', '3) تأكد من المستندات المرفقة، وضع علامة الإقرار إن كانت البيانات صحيحة.',
+                 '4) اضغط «إرسال طلب التسجيل» بنفسك، ثم اكتب للوكيل: «تم التسجيل في ' + str(self.params.get('platform') or '') + '».', '']
+        lines += [f'- {label}: {value} — {state}' for state, label, value in report]
+        lines += ['', 'هيكل الصفحة (بدون قيم):'] + [f"- {x['label'] or '(بدون عنوان)'} | {x['type']}" for _, x in scanned[:120]]
+        lines += [f"- رفع: {x['label'] or '(بدون عنوان)'}" for _, x in files[:20]]
+        path = self.dir / 'platform-signup-report.txt'
+        path.write_text('\n'.join(lines), encoding='utf-8')
+        self.step(f'عبأت {filled} من بيانات التسجيل والمستندات — بدون كلمة مرور وبدون إرسال. أكمل أنت في نافذة جهاز العمل.',
+                  filled > 0, page=page)
+        return self.upload(path, page.url) and filled > 0
+
+    def _scan(self, frame):
+        try:
+            return frame.evaluate(self.FILL_SCAN_JS)
+        except Exception:
+            return []
+
+    def _files(self, frame):
+        try:
+            return frame.evaluate(self.FILE_SCAN_JS)
+        except Exception:
+            return []
 
     def do_fill_form(self):
         page = self.open(self.params['url'])
