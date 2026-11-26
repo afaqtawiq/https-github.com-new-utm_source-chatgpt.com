@@ -44,6 +44,7 @@ KINDS = {
     'fasah_release_notice': 'تنزيل إشعار الفسح أو طباعة البيان PDF من فسح — قراءة فقط',
     'fasah_authorizations': 'قراءة قائمة تفاويض المخلص في فسح (المستورد وتاريخ الانتهاء) — قراءة فقط',
     'inspect_form': 'وصف شاشة فسح المفتوحة (الخانات وأنواعها والأزرار) — قراءة فقط بدون تعبئة أو ضغط',
+    'fasah_fill': 'إدخال بيانات البيان في شاشة فسح المفتوحة — بدون ضغط أي زر وبدون تقديم البيان',
 }
 FILE_TYPES = {'application/pdf', 'text/csv', 'text/plain', 'image/png', 'image/jpeg',
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
@@ -190,6 +191,27 @@ def create_task(kind, params, actor=''):
             label = str((f or {}).get('label') or '')
             if re.search(r'(password|كلمة\s*(ال)?(مرور|سر)|otp|رمز\s*(ال)?تحقق|cvv|iban|ايبان|بطاقة)', label, re.I):
                 return None, 'لا أعبئ كلمات المرور أو رموز التحقق أو بيانات البطاقات والحسابات البنكية.'
+    if kind == 'fasah_fill':
+        # Owner (26 Nov 2026): typing only — the runner never clicks a button, so no submit label is ever accepted.
+        params.pop('submit_label', None)
+        params.pop('url', None)
+        fields = params.get('fields')
+        if not isinstance(fields, list) or not fields or len(fields) > 40:
+            return None, 'لا توجد بيانات جاهزة للإدخال في فسح.'
+        clean = []
+        for f in fields:
+            f = f if isinstance(f, dict) else {}
+            label, value = str(f.get('label') or '')[:80], str(f.get('value') or '')[:500]
+            if re.search(r'(password|كلمة\s*(ال)?(مرور|سر)|otp|رمز\s*(ال)?تحقق|cvv|iban|ايبان|بطاقة)', label, re.I):
+                return None, 'لا أعبئ كلمات المرور أو رموز التحقق أو بيانات البطاقات والحسابات البنكية.'
+            if label and value.strip():
+                clean.append({'key': str(f.get('key') or '')[:40], 'label': label, 'value': value,
+                              'synonyms': [str(x)[:60] for x in (f.get('synonyms') or [])][:12]})
+        if not clean:
+            return None, 'لا توجد قيم للإدخال.'
+        params['fields'] = clean
+        params['items'] = [{k: str(it.get(k) or '')[:300] for k in ('description', 'quantity', 'value', 'origin', 'code')}
+                           for it in (params.get('items') or []) if isinstance(it, dict)][:30]
     if kind == 'fasah_authorizations':
         params['pages'] = max(1, min(int(re.sub(r'\D', '', str(params.get('pages') or '10')) or 10), 30))
     if kind in ('fasah_declarations', 'fasah_details', 'fasah_release_notice'):
@@ -394,9 +416,13 @@ async def upload(tid: int, request: Request):
             VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(task_id,sha256) DO NOTHING RETURNING id''',
                         (tid, re.sub(r'[^\w.\-؀-ۿ ]', '_', str(body.get('name') or 'file'))[:120], mime, len(data), digest,
                          bool(body.get('verified')), data, utcnow())).fetchone()
-    if task['kind'] == 'inspect_form' and mime == 'text/plain':
+    if task['kind'] in ('inspect_form', 'fasah_fill') and mime == 'text/plain':
         # Structure only (labels, types, options — never values): kept in the log so the filling can be built from it.
-        for line in data.decode('utf-8', 'replace').splitlines()[:400]:
+        lines = data.decode('utf-8', 'replace').splitlines()
+        if task['kind'] == 'fasah_fill':  # the fill report holds declaration values: log only the screen structure part
+            marks = [i for i, line in enumerate(lines) if line.startswith('هيكل الشاشة')]
+            lines = lines[marks[0]:] if marks else []
+        for line in lines[:400]:
             print('RUNNER_FORM', tid, line[:400], flush=True)
     return {'id': row['id'] if row else None, 'duplicate': row is None, 'sha256': digest}
 
@@ -414,7 +440,7 @@ async def finish(tid: int, request: Request):
             status = 'stopped'
         if status == 'done':
             verified = c.execute('SELECT COUNT(*) n FROM runner_files WHERE task_id=%s AND verified', (tid,)).fetchone()['n']
-            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'read_page', 'inspect_form') and not verified:
+            if task['kind'] in ('download_test', 'download_file', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'read_page', 'inspect_form', 'fasah_fill') and not verified:
                 status = 'failed'  # never «done» without a verified result
         c.execute('UPDATE runner_tasks SET status=%s,result_json=%s,finished_at=%s WHERE id=%s',
                   (status, json.dumps(body.get('result') or {}, ensure_ascii=False)[:20000], utcnow(), tid))

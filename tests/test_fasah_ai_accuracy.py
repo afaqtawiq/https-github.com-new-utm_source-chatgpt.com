@@ -278,3 +278,29 @@ def test_transit_case_recorded_as_transit_reaches_prompt(monkeypatch):
     result, source = run_routed(monkeypatch, QATAR_ROUTING, 'transit')
     assert result['coverage']['partial_or_unverified'] is False
     assert 'عبور (ترانزيت)' in ai.chrome_prompt(source, result)
+
+
+def test_fill_params_follow_the_same_gate_as_the_chrome_instructions(monkeypatch):
+    result, source = run_routed(monkeypatch, QATAR_ROUTING, 'transit')
+    source['id'], source['title'] = 5, 'ETG0138695'
+    params, error = ai.fill_params(source, result)
+    assert error is None and params['case_id'] == 5
+    assert {f['key'] for f in params['fields']} == {'importer'}
+    assert 'المستورد' in params['fields'][0]['synonyms'] and 'ترانزيت' in params['movement']
+    assert 'submit_label' not in params and 'url' not in params
+    blocked, _ = run_routed(monkeypatch, QATAR_ROUTING, 'commercial_import')
+    params, error = ai.fill_params(source, blocked)
+    assert params is None and error
+
+
+def test_assistant_page_offers_typing_only_fill_button(monkeypatch):
+    result, source = run_routed(monkeypatch, QATAR_ROUTING, 'transit')
+    source.update(id=5, title='ETG0138695', revision=1)
+    source['context']['ai'] = result
+    html = ai.page(source, {'csrf': 'x'})
+    assert '/fasah-workspace/5/assistant/fill' in html and 'بدون تقديم' in html and 'لا يضغط أي زر' in html
+    blocked, source2 = run_routed(monkeypatch, QATAR_ROUTING, 'commercial_import')
+    source2.update(id=6, title='x', revision=1)
+    source2['context']['ai'] = blocked
+    html = ai.page(source2, {'csrf': 'x'})
+    assert '/assistant/fill' not in html and 'غير متاح الآن' in html

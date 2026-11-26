@@ -95,3 +95,43 @@ def test_transit_bill_runs_transit_flow():
     out = subprocess.run([sys.executable, '-c', TRANSIT_SCRIPT], capture_output=True, text=True, env=os.environ,
                          cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     assert out.stdout.strip().endswith('OK'), out.stdout + out.stderr
+
+
+FILL_SCRIPT = r'''
+import json
+from app import fasah_ai as ai, agent_runner as ar
+from app.storage import db, one, utcnow
+ar.init()
+user = one('SELECT id FROM users ORDER BY id LIMIT 1')
+case = {'title': 'اختبار إدخال فسح ETG', 'fields': {}, 'documents': [{'name': 'inv.txt', 'kind': 'invoice', 'pages': [{'page': 1, 'text': 'INV-77'}]}],
+        'context': {'profile': {'transaction': 'transit'}}}
+answers = iter([{'items': [{'description': 'coffee'}], 'fields': {'invoice_number': {'value': 'INV-77', 'source': 'inv.txt'}}, 'issues': [],
+                'routing': {'consignee_address': 'DOHA QATAR'}, 'coverage': {'all_lines_extracted': True, 'total_invoice_lines': 1}},
+               {'items': [{'index': 0, 'code': '090111000000', 'alternatives': []}]}])
+ai.ask = lambda *a, **k: next(answers)
+ai.tariff_lookup.search_many = lambda *a, **k: [{'code': '090111000000', 'duty': '0%'}]
+ai.tariff_lookup.as_prompt = lambda e: e
+case['context']['ai'] = ai.analyze(case)
+assert case['context']['ai']['coverage']['partial_or_unverified'] is False, case['context']['ai']['coverage']['blockers']
+with db() as c:
+    c.execute('DELETE FROM runner_tasks WHERE kind=%s', ('fasah_fill',))
+    did = c.execute("""INSERT INTO fasah_workspace_drafts(created_by,title,fields_json,documents_json,context_json,created_at,updated_at)
+        VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id""", (user['id'], case['title'], '{}', json.dumps(case['documents'], ensure_ascii=False),
+        json.dumps(case['context'], ensure_ascii=False), utcnow(), utcnow())).fetchone()['id']
+text = ai.fill_by_reference('آخر', 'المدير')
+assert 'أنشأت المهمة' in text and 'لا يضغط أي زر' in text, text
+with db() as c:
+    row = c.execute("SELECT * FROM runner_tasks WHERE kind='fasah_fill' ORDER BY id DESC LIMIT 1").fetchone()
+p = json.loads(row['params_json'])
+assert p['case_id'] == did and p['fields'][0]['value'] == 'INV-77' and 'submit_label' not in p and 'url' not in p, p
+assert 'ترانزيت' in p['movement'] and p['items'][0]['code']
+assert 'ما لقيت معاملة' in ai.fill_by_reference('غير-موجودة-xyz')
+print('OK')
+'''
+
+
+@db_only
+def test_fasah_fill_task_from_workspace_case():
+    out = subprocess.run([sys.executable, '-c', FILL_SCRIPT], capture_output=True, text=True, env=os.environ,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert out.stdout.strip().endswith('OK'), out.stdout + out.stderr
