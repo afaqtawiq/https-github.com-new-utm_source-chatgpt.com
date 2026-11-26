@@ -131,7 +131,7 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'party': {'type': 'string'}, 'month': {'type': 'string'}, 'group': {'type': 'string'}}, 'required': ['party']}},
     {'name': 'office_report', 'description': 'Virtual office: live numbers of every department (clearance, transport, containers & shipping lines, finance, sales & marketing, customer service, administration) or of one department. Use for «تقرير الأقسام», «وضع المكتب», «أرقام قسم النقل». To talk to a department manager the owner writes «مدير المالية: …».',
      'input_schema': {'type': 'object', 'properties': {'department': {'type': 'string'}}}},
-    {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines (ShipsGo when connected, otherwise the WORK COMPUTER opens the line public tracking page; the result is sent as a PDF report on WhatsApp): vessel, loading port and date, ETA / actual discharge at the destination port, last event; it tries EVERY way: ShipsGo, public sources on the server (the line tracking page, the line schedules, the vessel port calls — works for draft B/Ls through the vessel and voyage), then the work computer. Pass vessel and voyage (and containers) when known from the document — read them with ask_document first if a file was sent. A vessel and voyage alone can be tracked too; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
+    {'name': 'track_shipment', 'description': 'LIVE tracking of a sea shipment by bill of lading (بوليصة) or container number through the shipping lines (the line\'s own tracking page read by the server — not blocked, works for Hapag-Lloyd incl. transshipment to the second vessel —, the free official line connection, ShipsGo when connected, otherwise the WORK COMPUTER; the result is sent as a PDF report on WhatsApp): vessel, loading port and date, ETA / actual discharge at the destination port, last event; it tries EVERY way: ShipsGo, public sources on the server (the line tracking page, the line schedules, the vessel port calls — works for draft B/Ls through the vessel and voyage), then the work computer. Pass vessel and voyage (and containers) when known from the document — read them with ask_document first if a file was sent. A vessel and voyage alone can be tracked too; updates the container desk arrival date and keeps following it (alerts when the ETA moves or the containers are discharged). Use for «تتبع البوليصة SHZ8739334», «متى توصل الشحنة/الباخرة», «وين الحاوية CMAU1234567», «تاريخ وصول البوليصة». carrier = shipping line name if known (CMA CGM, MSC, Maersk…). With no ref, list = shipments being tracked.',
      'input_schema': {'type': 'object', 'properties': {'ref': {'type': 'string'}, 'carrier': {'type': 'string'}, 'vessel': {'type': 'string'},
                                                        'voyage': {'type': 'string'}, 'containers': {'type': 'array', 'items': {'type': 'string'}},
                                                        'list': {'type': 'boolean'}}}},
@@ -390,7 +390,32 @@ def tool_zatca_rules(c, a):
 def tool_shipment_file(c, a):
     from app import shipment_files
     q = str(a.get('query') or '').strip()
-    return shipment_files.board_text() if q.lower() in ('اللوحة', 'لوحة', 'board', 'الكل', 'all') else shipment_files.lookup_text(q)
+    if q.lower() in ('اللوحة', 'لوحة', 'board', 'الكل', 'all'):
+        return shipment_files.board_text()
+    text = shipment_files.lookup_text(q)
+    # A file with no arrival date gets live tracking right away (owner, 26 Nov 2026: Sultan showed «الوصول غير معروف»
+    # for HLCUSGN2610BKGW9 instead of tracking it). Not again within 6 hours of the last check.
+    try:
+        found = shipment_files.find(q)
+        if len(found) == 1 and found[0].get('bill_no') and found[0].get('stage') not in ('arrived', 'released', 'delivered', 'closed'):
+            f = found[0]
+            recent = c.execute('''SELECT eta FROM shipment_tracks WHERE ref=%s AND checked_at > NOW() - INTERVAL '6 hours' ''',
+                               (f['bill_no'],)).fetchone() if c.execute("SELECT to_regclass('shipment_tracks') t").fetchone()['t'] else None
+            if not f.get('eta') or not recent:
+                from app import shipment_tracking, transport_desk
+                boxes = []
+                try:
+                    boxes = json.loads(f.get('containers') or '[]')
+                except ValueError:
+                    pass
+                live = transport_desk.run_async(lambda: shipment_tracking.track(
+                    f['bill_no'], f.get('shipping_line') or '', _member().get('name') or '', chat=CHAT.get(),
+                    vessel=f.get('vessel') or '', voyage=f.get('voyage') or '', containers=boxes[:10]), timeout=240)
+                if live:
+                    text += '\n\n— تتبع مباشر الآن —\n' + live
+    except Exception as exc:
+        print('SHIPMENT_FILE_TRACK_NOW', type(exc).__name__, str(exc)[:160], flush=True)
+    return text
 
 
 def tool_shipment_file_update(c, a):
