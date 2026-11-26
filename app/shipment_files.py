@@ -48,6 +48,9 @@ def init():
             notes TEXT NOT NULL DEFAULT '', history TEXT NOT NULL DEFAULT '[]', created_at TIMESTAMPTZ NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL)''')
         c.execute("ALTER TABLE shipment_files ADD COLUMN IF NOT EXISTS broker TEXT NOT NULL DEFAULT ''")
+        # import / transit / review — from the final consignee, not the port or notify party (owner, 26 Nov 2026)
+        c.execute("ALTER TABLE shipment_files ADD COLUMN IF NOT EXISTS movement TEXT NOT NULL DEFAULT ''")
+        c.execute("ALTER TABLE shipment_files ADD COLUMN IF NOT EXISTS destination TEXT NOT NULL DEFAULT ''")
         c.execute('''CREATE TABLE IF NOT EXISTS shipment_file_docs(id BIGSERIAL PRIMARY KEY, bill_no TEXT NOT NULL,
             filename TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '', data BYTEA NOT NULL,
             sha TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, UNIQUE(bill_no, sha))''')
@@ -129,12 +132,17 @@ def upsert_from_document(fields, source='مستند ملاحي'):
             'hs_code': _clean(fields.get('hs_code'), 20), 'shipping_line': _clean(fields.get('shipping_line'), 60),
             'vessel': _clean(fields.get('vessel'), 60), 'voyage': _clean(fields.get('voyage'), 20),
             'pol': _clean(fields.get('pol'), 60), 'pod': _clean(fields.get('pod'), 60)}
+    from app import customs_movement
+    moved = customs_movement.infer(fields)
+    data['movement'], data['destination'] = moved['movement'], moved['destination']
     eta = _eta(fields.get('eta'))
     now = utcnow()
     with db() as c:
         row = c.execute('SELECT * FROM shipment_files WHERE bill_no=%s', (bill,)).fetchone()
         if row:
             sets = {k: v for k, v in data.items() if v and not row.get(k)}
+            if data['movement'] and row.get('movement') and data['movement'] != row['movement']:
+                sets['movement'] = 'review'  # a later document disagrees: never keep a silent import/transit guess
             old = json.loads(row['containers'] or '[]')
             merged = old + [b for b in boxes if b not in old]
             c.execute('UPDATE shipment_files SET ' + ''.join(f'{k}=%s,' for k in sets) +
@@ -142,11 +150,12 @@ def upsert_from_document(fields, source='مستند ملاحي'):
                       tuple(sets.values()) + (json.dumps(merged), eta, _log(row, f'تحديث من {source}'), now, row['id']))
         else:
             c.execute('''INSERT INTO shipment_files(bill_no,customer,contact_name,phone,email,shipper,goods,hs_code,shipping_line,
-                vessel,voyage,pol,pod,eta,containers,history,created_at,updated_at)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                vessel,voyage,pol,pod,movement,destination,eta,containers,history,created_at,updated_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                       (bill, data['customer'], data['contact_name'], data['phone'], data['email'], data['shipper'],
                        data['goods'], data['hs_code'], data['shipping_line'], data['vessel'], data['voyage'], data['pol'],
-                       data['pod'], eta, json.dumps(boxes), _log(None, f'فُتح الملف من {source}'), now, now))
+                       data['pod'], data['movement'], data['destination'], eta, json.dumps(boxes),
+                       _log(None, f'فُتح الملف من {source}'), now, now))
             _start_flow(bill)
         return c.execute('SELECT * FROM shipment_files WHERE bill_no=%s', (bill,)).fetchone()
 
@@ -303,6 +312,20 @@ def backfill():
     return made
 
 
+def movement_line(r):
+    from app import customs_movement as cm
+    movement = r.get('movement') or ''
+    if movement == 'transit':
+        code = r.get('destination') or ''
+        return cm.summary_ar({'movement': 'transit', 'destination_ar': cm.COUNTRIES.get(code, ('خارج السعودية',))[0],
+                              'exit_port': cm.EXIT_PORT.get(code, '')}, r.get('pod') or '')
+    if movement == 'import':
+        return cm.summary_ar({'movement': 'import'})
+    if movement == 'review':
+        return ('⚠️ نوع البيان غير محسوم (المستندات متعارضة) — حدّده: «حدّث ملف الشحنة ' + r['bill_no'] + ' ترانزيت» أو «استيراد».')
+    return '🛃 نوع البيان: لم يُحدد من المستندات (استيراد أم ترانزيت؟)'
+
+
 def card(r):
     label, nxt = STAGE_AR.get(r['stage'], (r['stage'], ''))
     boxes = json.loads(r['containers'] or '[]')
@@ -316,6 +339,7 @@ def card(r):
              (f" — {r['pol']} ← {r['pod']}" if r.get('pol') or r.get('pod') else ''),
              f'🕒 الوصول: {eta}',
              f"🧱 الحاويات ({len(boxes)}): " + ('، '.join(boxes) if boxes else '—'),
+             movement_line(r),
              (f"🧾 البيان: {r['declaration_no']}" if r.get('declaration_no') else '🧾 البيان: لم يُسجل بعد'),
              (f"🏢 المخلص/المكتب المفوّض: {r['broker']}" if r.get('broker') else ''),
              ('📎 المستندات المحفوظة: ' + (documents_text(r['bill_no']) or 'لا يوجد — ارفع البوليصة ليحفظها الملف')),
@@ -333,7 +357,8 @@ def lookup_text(query):
     return head + '\n\n'.join(card(r) for r in rows[:3])
 
 
-def update(query, stage='', declaration_no='', phone='', contact_name='', email='', note='', actor='', docs_received='', broker='', pod=''):
+def update(query, stage='', declaration_no='', phone='', contact_name='', email='', note='', actor='', docs_received='', broker='', pod='',
+           movement=''):
     rows = find(query)
     if not rows:
         return f'ما لقيت ملف شحنة لـ«{query}».'
@@ -370,6 +395,16 @@ def update(query, stage='', declaration_no='', phone='', contact_name='', email=
     if pod:
         sets['pod'] = _clean(pod, 60)
         changes.append('ميناء الوصول: ' + sets['pod'])
+    if movement:
+        from app import customs_movement as cm
+        kind = cm.normalize(movement)
+        if kind:
+            sets['movement'] = kind
+            if kind == 'transit':
+                sets['destination'] = cm.country_of(movement) or (r.get('destination') if r.get('destination') != 'SA' else '') or ''
+            else:
+                sets['destination'] = 'SA'
+            changes.append('نوع البيان: ' + cm.LABEL[kind])
     if docs_received:
         from app import shipment_workflow as sw
         sw.init()
@@ -380,12 +415,14 @@ def update(query, stage='', declaration_no='', phone='', contact_name='', email=
             sets['docs'] = json.dumps(have + got)
             changes.append('استلام ' + '، '.join(sw.DOC_AR[k] for k in got))
     if not sets:
-        return 'ما فيه تغيير واضح. حدد المرحلة أو رقم البيان أو جوال العميل أو المستندات المستلمة أو ملاحظة.'
+        return 'ما فيه تغيير واضح. حدد المرحلة أو رقم البيان أو نوع البيان (استيراد/ترانزيت) أو جوال العميل أو المستندات المستلمة أو ملاحظة.'
     with db() as c:
         c.execute('UPDATE shipment_files SET ' + ''.join(f'{k}=%s,' for k in sets) + 'history=%s,updated_at=%s WHERE id=%s',
                   tuple(sets.values()) + (_log(r, (actor + ': ' if actor else '') + '، '.join(changes)), utcnow(), r['id']))
         r = c.execute('SELECT * FROM shipment_files WHERE id=%s', (r['id'],)).fetchone()
-    if declaration_no:
+    if declaration_no and r.get('movement') == 'transit':
+        extra = '\n\n🖨 بيان عبور: اطبعه من فسح يدويًا؛ الطباعة التلقائية مخصصة لبيانات الاستيراد.'
+    elif declaration_no:
         try:
             from app import shipment_workflow
             extra = '\n\n🖨 ' + shipment_workflow.request_declaration_print(r, actor or 'فيصل').split('\n')[0]

@@ -59,3 +59,39 @@ def test_workflow_run():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     r = subprocess.run([sys.executable, '-c', SCRIPT], cwd=root, capture_output=True, text=True, timeout=90)
     assert r.stdout.strip().endswith('OK'), r.stderr[-3000:] + r.stdout[-1500:]
+
+
+TRANSIT_SCRIPT = r'''
+from app import shipment_files as sf, shipment_workflow as sw
+from app.storage import db
+sf._start_flow = lambda bill: None  # no background run/notification in the test
+sf.init(); sw.init()
+with db() as c:
+    c.execute("DELETE FROM shipment_files WHERE bill_no IN ('ETG0138695','TRN-REVIEW-1')")
+bl = {'document_kind': 'shipping_document', 'bill_no': 'ETG0138695', 'shipping_line': 'CMA CGM', 'vessel': 'CMA CGM COLUMBIA',
+      'consignee': 'AHEMD IMAM FOR GENERAL TRADING', 'consignee_address': 'MUAITHER PLOT NO-53 DOHA QATAR',
+      'notify_party': 'AFAQ TAWEEQ CONTRACTING AR RIYAD SAUDI ARABIA', 'marks': 'DEST: QUATR', 'pol': 'DJIBOUTI', 'pod': 'JEDDAH',
+      'container_numbers': ['TCNU8381090']}
+row = sf.upsert_from_document(bl)
+assert (row['movement'], row['destination']) == ('transit', 'QA'), row
+assert 'ترانزيت' in sf.card(row) and 'منفذ سلوى' in sf.card(row)
+text = sw.run('ETG0138695', 'test')
+assert 'لا أجهّز طلب تفويض استيراد' in text and 'بيان عبور' in text and 'منفذ سلوى' in text, text
+assert 'التسليم لمستودع العميل' not in text and 'import_requirements' not in text, text
+assert 'خروج الشحنة إلى قطر' in sw.arrival_message(sf.find('ETG0138695')[0])
+# a later document pointing to Saudi Arabia must not silently flip it: the file goes to review and the flow stops
+sf.upsert_from_document(dict(bl, consignee='X TRADING', consignee_address='RIYADH SAUDI ARABIA', marks='', notify_party=''))
+assert sf.find('ETG0138695')[0]['movement'] == 'review'
+assert 'أوقفت سير الشحنة' in sw.run('ETG0138695', 'test')
+# staff settle it
+assert 'نوع البيان: ترانزيت' in sf.update('ETG0138695', movement='ترانزيت إلى قطر', actor='test')
+assert sf.find('ETG0138695')[0]['movement'] == 'transit'
+print('OK')
+'''
+
+
+@db_only
+def test_transit_bill_runs_transit_flow():
+    out = subprocess.run([sys.executable, '-c', TRANSIT_SCRIPT], capture_output=True, text=True, env=os.environ,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert out.stdout.strip().endswith('OK'), out.stdout + out.stderr
