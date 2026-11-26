@@ -153,6 +153,15 @@ TOOLS = [
      'input_schema': {'type': 'object', 'properties': {'which': {'type': 'string', 'enum': ['import', 'export']}}}},
     {'name': 'runner_task', 'description': 'Manager only. Create a task for the WORK COMPUTER browser: download_test (first trial), read_page (url), download_file (url), fill_form (url + fields [{label,value}] + optional submit_label; submitting waits for the manager approval), fasah_declarations (which import/export, party = importer/exporter name filter e.g. «سلة», since YYYY-MM-DD, pages 1-20 — read-only list; new unbilled سلة الرحائب declarations are then prepared for billing with a confirmation code), fasah_details (number — read one declaration invoice and fees), inspect_form (describe the FASAH screen the manager already opened, e.g. «بيان جديد»: fields, types, drop-down options, buttons — read-only, no typing or clicking; use for «اقرأ شاشة البيان الجديد في فسح» «افحص خانات البيان»). Allowed sites only; never passwords/OTP.',
      'input_schema': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details', 'inspect_form']}, 'url': {'type': 'string'}, 'which': {'type': 'string'}, 'party': {'type': 'string'}, 'since': {'type': 'string'}, 'pages': {'type': 'string'}, 'number': {'type': 'string'}, 'fields': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'value': {'type': 'string'}}}}, 'submit_label': {'type': 'string'}}, 'required': ['kind']}},
+    {'name': 'transport_platforms', 'description': 'Khaled: the TRANSPORT PLATFORMS list (منصات النقل) — every platform that invited us to register (detected automatically from WhatsApp invitations with a sign-up link) or that the manager added, with its status (new invitation / filling / waiting for the manager password and submit / submitted / active). action=list (default), add (url = platform link), status (query = platform, status = submitted / active / skipped — e.g. «تم التسجيل في منصة X» → submitted, «تفعّل حسابنا في X» → active, «تجاهل منصة X» → skipped).',
+     'input_schema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['list', 'add', 'status']}, 'url': {'type': 'string'},
+        'query': {'type': 'string'}, 'status': {'type': 'string', 'enum': ['submitted', 'active', 'skipped']}}}},
+    {'name': 'platform_signup', 'description': 'Manager only. REGISTER the company on a transport platform: «سجّل في منصة X» / «سجل في كل المنصات». The work computer opens the platform registration page, types the saved company details (legal name, CR, VAT, email, phone, address, username) and attaches the company documents from the archive (CR, VAT certificate, national address). It NEVER types a password, never ticks the declaration and never clicks submit: the manager finishes that in the work-computer window. query = platform domain/name/link, or «الكل» for every new invitation.',
+     'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
+    {'name': 'company_profile', 'description': 'Show or update the company details used to register on platforms (legal_name, short_name, email, phone, address, city, cr_number = 10 digits, vat_number = 15 digits starting and ending with 3, username). Updating is manager only. e.g. «بيانات المؤسسة: السجل التجاري 4030123456، الرقم الضريبي 300012345600003».',
+     'input_schema': {'type': 'object', 'properties': {'legal_name': {'type': 'string'}, 'short_name': {'type': 'string'}, 'email': {'type': 'string'},
+        'phone': {'type': 'string'}, 'address': {'type': 'string'}, 'city': {'type': 'string'}, 'cr_number': {'type': 'string'},
+        'vat_number': {'type': 'string'}, 'username': {'type': 'string'}}}},
     {'name': 'fasah_fill', 'description': 'Manager only. ENTER the prepared declaration data INTO FASAH WITHOUT SUBMITTING: the work computer types the analysed values of a FASAH-workspace case into the empty matching fields of the «بيان جديد» screen the manager already opened and signed into. It never clicks any button, never presses Enter, never changes a filled field and never submits/approves/pays; drop-downs and the items table are reported for manual entry, with a screenshot. case = workspace case number or title, or «آخر» for the latest analysed case. Use for «أدخل بيانات البيان في فسح» «عبّي البيان في فسح بدون تقديم» «دخل بيانات معاملة X في فسح».',
      'input_schema': {'type': 'object', 'properties': {'case': {'type': 'string'}}, 'required': ['case']}},
     {'name': 'fasah_tracking', 'description': 'Live status of open FASAH declarations read by the work computer every 2 hours (under review, waiting duties, inspection, released). Optional filter (number or importer name). e.g. «حالة البيانات في فسح» «وش وضع بيانات سلة».',
@@ -1173,6 +1182,45 @@ def tool_runner_task(c, a):
     return agent_runner.create_task(a.get('kind'), {'url': a.get('url'), 'which': a.get('which'), 'fields': a.get('fields'),
                                                     'submit_label': a.get('submit_label'), 'party': a.get('party'), 'since': a.get('since'),
                                                     'pages': a.get('pages'), 'number': a.get('number')}, _member().get('name') or '')[1]
+
+
+def tool_transport_platforms(c, a):
+    from app import transport_platforms as tp
+    action = a.get('action') or 'list'
+    if action == 'add':
+        if not _member().get('manager'):
+            return 'إضافة المنصات للمدير فقط.'
+        row = tp.add(a.get('url'), _member().get('name') or '')
+        return (f"✅ أضفت منصة {row['domain']}. للتسجيل اكتب: «سجّل في منصة {row['domain']}».") if row else 'أرسل رابط المنصة كاملًا.'
+    if action == 'status':
+        if not _member().get('manager'):
+            return 'تحديث حالة المنصات للمدير فقط.'
+        return tp.mark(a.get('query'), a.get('status') or '', _member().get('name') or '')
+    return tp.status_text()
+
+
+def tool_platform_signup(c, a):
+    if not _member().get('manager'):
+        return 'التسجيل في المنصات بأمر المدير فقط.'
+    from app import transport_platforms as tp
+    query = str(a.get('query') or '').strip()
+    if query in ('الكل', 'كل المنصات', 'all', 'جميع المنصات'):
+        tp.init()
+        with tp.db() as cc:
+            rows = cc.execute("SELECT domain FROM transport_platforms WHERE status='new' ORDER BY id").fetchall()
+        if not rows:
+            return 'لا توجد دعوات جديدة. ' + tp.status_text()
+        return '\n\n'.join(tp.signup(r['domain'], _member().get('name') or '') for r in rows[:5]) + (
+            f'\n\n(بدأت بأول 5 من {len(rows)}؛ الباقي بعدها.)' if len(rows) > 5 else '')
+    return tp.signup(query, _member().get('name') or '')
+
+
+def tool_company_profile(c, a):
+    from app import transport_platforms as tp
+    values = {k: v for k, v in a.items() if k in tp.PROFILE and v}
+    if values and not _member().get('manager'):
+        return 'تعديل بيانات المؤسسة للمدير فقط.'
+    return tp.set_profile(values, _member().get('name') or '') if values else tp.profile_text()
 
 
 def tool_fasah_fill(c, a):

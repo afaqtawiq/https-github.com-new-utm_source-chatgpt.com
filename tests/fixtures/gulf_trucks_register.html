@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="ar"><body class="rtl" dir="rtl">
+<!-- Structure of https://app.gulf-transports.com/register/?lang=ar as published on 26 Nov 2026 (styles removed). -->
+<h1>إنشاء حساب جديد</h1>
+<form method="post" action="https://app.gulf-transports.com/register/?lang=ar" enctype="multipart/form-data" id="regForm" novalidate
+      onsubmit="window.__submitted=true; return false;">
+<div id="step1">
+<div class="type-toggle"><div class="type-btn active" id="company-btn" onclick="window.__clicked=true">شركة</div>
+<div class="type-btn" id="individual-btn" onclick="window.__clicked=true">فرد</div></div>
+<div class="form-group"><label>الاسم المختصر للحساب <span class="req">*</span></label>
+<input type="text" name="display_name" id="display_name" value="" placeholder="مثال: gulf-trading" required></div>
+<div class="form-group"><label>الاسم الكامل / الاسم القانوني <span class="req">*</span></label>
+<input type="text" name="full_name" id="full_name" value="" placeholder="مثال: شركة الخليج للتجارة والمقاولات" required></div>
+<div class="form-row">
+<div class="form-group"><label>البريد الإلكتروني <span class="req">*</span></label>
+<input type="email" name="email" id="s1_email" value="" placeholder="مثال: info@company.com" required></div>
+<div class="form-group"><label>رقم الهاتف <span class="req">*</span></label>
+<input type="text" name="phone" id="s1_phone" value="" placeholder="مثال: 0501234567" required></div></div>
+<div class="form-group"><label>العنوان</label><input type="text" name="address" value="" placeholder="مثال: الرياض، طريق الملك فهد"></div>
+<div id="company-fields"><div class="form-row">
+<div class="form-group"><label>رقم السجل التجاري <span class="req" id="cr-req">*</span></label>
+<input type="text" id="cr_number" name="cr_number" value="" placeholder="مثال: 1010123456" required></div>
+<div class="form-group"><label>رقم ضريبة القيمة المضافة <span class="req" id="vat-req">*</span></label>
+<input type="text" id="vat_number" name="vat_number" value="" placeholder="مثال: 300012345600003" required></div></div></div>
+<div class="form-group"><label>اسم المستخدم لتسجيل الدخول <span class="req">*</span></label>
+<input type="text" name="username" id="s1_username" value="" autocomplete="new-username" placeholder="مثال: mohammed.ali" required></div>
+<div class="form-row">
+<div class="form-group"><label>كلمة المرور <span class="req">*</span></label>
+<input type="password" name="password" id="s1_password" autocomplete="new-password" required></div>
+<div class="form-group"><label>تأكيد كلمة المرور <span class="req">*</span></label>
+<input type="password" name="password2" id="s1_password2" required></div></div>
+<button type="button" class="btn-continue" id="continueBtn" onclick="window.__clicked=true">متابعة</button>
+</div>
+<div id="step2" style="display:none;"><div id="docs-section">
+<div class="form-group"><label>سجل تجاري <span class="req">*</span></label>
+<div class="file-upload-area" id="cr-doc-area"><input type="file" name="cr_document" id="cr_document" accept=".pdf,.jpg,.jpeg,.png" required>
+<div class="file-upload-title">ارفع السجل التجاري</div></div></div>
+<div class="form-group"><label>شهادة ضريبة القيمة المضافة <span class="req">*</span></label>
+<div class="file-upload-area" id="vat-cert-area"><input type="file" name="vat_certificate" id="vat_certificate" accept=".pdf,.jpg,.jpeg,.png" required>
+<div class="file-upload-title">ارفع شهادة ضريبة القيمة المضافة</div></div></div>
+<div class="form-group"><label>العنوان الوطني <span class="req">*</span></label>
+<div class="file-upload-area" id="nat-addr-area"><input type="file" name="national_address_doc" id="national_address_doc" accept=".pdf,.jpg,.jpeg,.png" required>
+<div class="file-upload-title">ارفع وثيقة العنوان الوطني</div></div></div></div>
+<div class="form-group"><label><input type="checkbox" name="acknowledgment" id="acknowledgment" required>
+<span>أقر بأن جميع المعلومات والبيانات التي أدخلتها صحيحة ودقيقة.</span></label></div>
+<button type="submit" class="btn-submit" onclick="window.__clicked=true">إرسال طلب التسجيل</button>
+<button type="button" class="btn-back" id="backBtn" onclick="window.__clicked=true">العودة للتعديل</button>
+</div></form>
+<div class="login-link">لديك حساب؟ <a href="https://app.gulf-transports.com/?lang=ar">تسجيل الدخول</a></div>
+<script>document.addEventListener('keydown', e => { if (e.key === 'Enter') window.__enter = true; });</script>
+</body></html>

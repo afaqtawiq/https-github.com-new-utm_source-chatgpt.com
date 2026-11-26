@@ -28,7 +28,7 @@ def test_create_task_refusals_before_any_storage():
 
 
 def test_only_known_kinds():
-    assert set(ar.KINDS) == {'download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'inspect_form', 'fasah_fill'}
+    assert set(ar.KINDS) == {'download_test', 'read_page', 'download_file', 'fill_form', 'fasah_declarations', 'fasah_details', 'fasah_release_notice', 'fasah_authorizations', 'inspect_form', 'fasah_fill', 'platform_signup'}
     assert 'application/x-msdownload' not in ar.FILE_TYPES
 
 
@@ -43,3 +43,14 @@ def test_fasah_fill_is_typing_only_and_refuses_secrets_before_storage():
     assert ar.create_task('fasah_fill', {'fields': []})[0] is None
     assert ar.create_task('fasah_fill', {'fields': [{'label': 'رقم الفاتورة', 'value': '  '}]})[0] is None
     assert 'بدون تقديم' in ar.KINDS['fasah_fill']
+
+
+def test_platform_signup_refusals_before_storage():
+    # a site the manager did not approve is never opened
+    assert ar.create_task('platform_signup', {'url': 'https://unknown-platform.example.com/register',
+                                              'fields': [{'label': 'الاسم', 'value': 'x'}]})[0] is None
+    with patch.dict(os.environ, {'RUNNER_ALLOWED_DOMAINS': 'app.gulf-transports.com'}):
+        tid, msg = ar.create_task('platform_signup', {'url': 'https://app.gulf-transports.com/register/',
+                                                      'fields': [{'label': 'كلمة المرور', 'value': 'x'}]})
+        assert tid is None and 'كلمات المرور' in msg
+        assert ar.create_task('platform_signup', {'url': 'https://app.gulf-transports.com/register/', 'fields': []})[0] is None

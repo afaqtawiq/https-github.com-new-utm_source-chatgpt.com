@@ -64,11 +64,17 @@ DEPARTMENTS = {
                  'بعينها فقط إذا طلب. اقرأ السعر كاملًا (٥،٣٠٠ = 5,300). '
                  'وأنت مسؤول جدول أسعار المسارات (rate_card): تجمع أسعار السائقين للمسارات الناقصة (rate_card_survey برمز «نفذ» واحد)، '
                  'وتعرض على المالك الوسيط والسعر المقترح، والمالك وحده يعتمد سعر العميل (approve_route_price). '
+                 'وتسجّل المؤسسة في منصات النقل (transport_platforms / platform_signup): أي دعوة تسجيل تصل تُحفظ تلقائيًا، والتسجيل بأمر المدير فقط، '
+                 'وجهاز العمل يعبئ البيانات ويرفع المستندات والمدير يكتب كلمة المرور ويضغط الإرسال بنفسه. '
                  'وتبني شبكة الناقلين الشركاء: شركات النقل شركاء وليست عملاء؛ تدعوها لإرسال أنواع شاحناتها ومساراتها وأسعارها '
                  '(carrier_invite برمز «نفذ» واحد لكل دفعة) وتتابع ردودها (carrier_partners) وتقارن أسعارها بجدول الأسعار.'),
         'tools': ('add_driver', 'load_offer', 'broadcast_load', 'negotiate_owner', 'assign_driver', 'load_acceptances', 'approve_owner_load',
                   'owner_load_status', 'broadcast_status', 'stop_broadcast', 'driver_price_request', 'driver_prices', 'rate_card', 'rate_card_survey',
-                  'approve_route_price', 'carrier_invite', 'carrier_partners', 'send_whatsapp')},
+                  'approve_route_price', 'carrier_invite', 'carrier_partners', 'send_whatsapp',
+                  'transport_platforms', 'platform_signup', 'company_profile'),
+        'actions': (('🌐 منصات النقل وحالة التسجيل', 'وش وضع منصات النقل؟'),
+                    ('📝 سجّل في كل المنصات الجديدة', 'سجّل في كل المنصات الجديدة'),
+                    ('🏢 بيانات المؤسسة للتسجيل', 'اعرض بيانات المؤسسة المستخدمة في التسجيل بالمنصات'))},
     'containers': {
         'person': 'سلطان', 'model': 'classy_male',
         'name': 'الحاويات ووكلاء الملاحة', 'manager': 'مدير الحاويات والملاحة', 'icon': '🚢',
