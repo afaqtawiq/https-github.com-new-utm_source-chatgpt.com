@@ -1687,7 +1687,12 @@ def run_agent(c, raw):
         return None
     # Do not allow the team model to guess product conformity from static text.
     # Actions mentioning SABER retain the existing tool and confirmation route.
-    if command_ai.is_saber_information_question(raw):
+    # Owner, 25-26 Nov 2026: Faisal answered «لم أتمكن من التحقق من نتيجة سابر» to an attached SABER certificate and to a
+    # declaration asking what SABER needs — the shortcut bypassed his tools and the file. It stays only for a bare
+    # question with no department, no office desk and no attached file.
+    dept_prefixed = re.match(r'^\s*(?:يا\s+)?(?:(?:مدير|مديرة|قسم|إدارة|ادارة|اداره)\s|[^:：\n]{2,30}[:：])', str(raw or ''))
+    attached = '[أرفق' in str(raw or '') or '[هذه شهادة سابر' in str(raw or '')
+    if not OFFICE.get() and not dept_prefixed and not attached and command_ai.is_saber_information_question(raw):
         return command_ai.answer_saber_question(raw)
     if not OFFICE.get() and re.match(r'^\s*(?:يا\s+)?(?:(?:مدير|مديرة|قسم|إدارة|ادارة|اداره)\s|[^:：\n]{2,30}[:：])', str(raw or '')):
         # Virtual office: «مدير المالية: …» goes to that department manager (its tools, its role, its memory).
