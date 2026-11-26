@@ -79,10 +79,16 @@ DEPARTMENTS = {
         'person': 'سلطان', 'model': 'classy_male',
         'name': 'الحاويات ووكلاء الملاحة', 'manager': 'مدير الحاويات والملاحة', 'icon': '🚢',
         'aliases': ('الحاويات', 'الملاحة', 'وكلاء الملاحة', 'الغرامات', 'الشحن البحري'),
-        'role': 'تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول.',
+        'role': ('تتابع الحاويات حتى إرجاعها فارغة، أيام السماح وطلبات التمديد والغرامات وأرضيات الميناء، وتتبع البواليص ومواعيد الوصول. '
+                 'عندك دليل وكلاء الملاحة المسجل في النظام كاملًا (shipping_agents_directory) بأسمائهم وإيميلاتهم وهواتفهم: '
+                 'لا تقل أبدًا إنه ما عندك دليل وكلاء، ولا تطلب من المدير أسماء أو إيميلات الوكلاء؛ افتح الدليل. '
+                 'وطلبات عروض أسعار الشحن تجهزها بأداة freight_quote_request لكل الوكلاء أو المحددين، وتُرسل بعد «نفذ» فقط.'),
         'tools': ('track_container', 'container_update', 'containers_status', 'container_line', 'line_tariff',
                   'free_time_extension', 'free_time_result', 'detention_claim', 'detention_exposure', 'port_storage',
-                  'track_shipment', 'ask_eta_by_email', 'send_email')},
+                  'track_shipment', 'ask_eta_by_email', 'send_email', 'shipping_agents_directory', 'freight_quote_request'),
+        'actions': (('📇 دليل وكلاء الملاحة', 'اعرض دليل وكلاء الملاحة المسجلين'),
+                    ('📨 اطلب عروض أسعار شحن', 'اطلب عروض أسعار شحن من وكلاء الملاحة'),
+                    ('📋 طلبات الأسعار المرسلة', 'وش طلبات عروض الأسعار اللي أرسلناها؟'))},
     'finance': {
         'person': 'نورة', 'model': 'suit_female',
         'name': 'المالية والحسابات', 'manager': 'المدير المالي', 'icon': '💰',
