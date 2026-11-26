@@ -128,6 +128,8 @@ app.include_router(saber_workflow_router)
 app.include_router(social_content_router)
 app.include_router(social_publishing_router)
 app.include_router(media_settings_router)
+from app.carrier_tracking_api import router as carrier_tracking_router
+app.include_router(carrier_tracking_router)
 app.include_router(runway_settings_router)
 app.include_router(runway_studio_router)
 register_runway_worker(app)

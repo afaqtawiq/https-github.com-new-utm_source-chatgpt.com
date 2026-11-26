@@ -356,8 +356,9 @@ CARRIER_PAGES = {
     'MAEU': ('Maersk', 'https://www.maersk.com/tracking/{ref}', 'https://www.maersk.com/tracking/{ref}'),
     'CMDU': ('CMA CGM', 'https://www.cma-cgm.com/ebusiness/tracking/search?SearchBy=BL&Reference={ref}',
              'https://www.cma-cgm.com/ebusiness/tracking/search?SearchBy=Container&Reference={ref}'),
-    'HLCU': ('Hapag-Lloyd', 'https://www.hapag-lloyd.com/en/online-business/track/track-by-booking-solution.html?blno={ref}',
-             'https://www.hapag-lloyd.com/en/online-business/track/track-by-container-solution.html?container={ref}'),
+    # The legacy pages take the reference in the address and print every planned/actual move (the new app does not).
+    'HLCU': ('Hapag-Lloyd', 'https://www.hapag-lloyd.com/en/online-business/track/track-by-booking-solution-legacy.html?blno={ref}',
+             'https://www.hapag-lloyd.com/en/online-business/track/track-by-container-solution-legacy.html?container={ref}'),
     'COSU': ('COSCO', 'https://elines.coscoshipping.com/ebusiness/cargoTracking?trackingType=BILLOFLADING&number={ref}',
              'https://elines.coscoshipping.com/ebusiness/cargoTracking?trackingType=CONTAINER&number={ref}'),
     'OOLU': ('OOCL', 'https://elines.coscoshipping.com/ebusiness/cargoTracking?trackingType=BILLOFLADING&number={ref}',
@@ -793,6 +794,71 @@ async def ais_track(clean, kind, carrier, actor, chat, auto, hints, fields):
     return text
 
 
+CONTAINER_RE = re.compile(r'\b([A-Z]{4})\s?(\d{7})\b')
+
+
+async def api_fields(ref, kind, carrier, hints=None):
+    """(fields, source) from the line's free official API, else its tracking page read through Firecrawl.
+    (None, reason) when neither is set up or nothing was found."""
+    from app import carrier_tracking_api as cta
+    scac = carrier_for(ref, kind, carrier or (hints or {}).get('carrier') or '')
+    if not scac:
+        return None, 'الخط غير معروف'
+    name = CARRIER_PAGES[scac][0]
+    try:
+        got = await cta.lookup(scac, ref, kind)
+        if got and got.get('found') and got.get('eta'):
+            return dict(got, carrier=got.get('carrier') or name), f'الربط الرسمي مع {name}'
+    except (ValueError, httpx.HTTPError) as exc:
+        print('TRACKING_API', ref, type(exc).__name__, str(exc)[:160], flush=True)
+    _, bl_url, cn_url = CARRIER_PAGES[scac]
+    url = (cn_url if kind == 'container' else bl_url).format(ref=ref)
+    text = await cta.read_page(url)
+    if text is None:
+        return None, 'لا يوجد مفتاح قارئ الصفحات'
+    if kind == 'bl' and scac == 'HLCU':
+        # The B/L page only lists the containers; their own page carries the vessels and the ETA.
+        boxes = [a + b for a, b in CONTAINER_RE.findall(text)] or list((hints or {}).get('containers') or [])
+        if boxes:
+            more = await cta.read_page(cn_url.format(ref=boxes[0]))
+            text = (text + '\n\n' + (more or ''))[:60000]
+    fields = await extract_page(text, ref)
+    if not fields.get('found'):
+        return None, f"صفحة {name} لم تعرض نتيجة" + (f" ({fields.get('reason')})" if fields.get('reason') else '')
+    return dict(fields, carrier=fields.get('carrier') or name), f'موقع {name}'
+
+
+async def api_track(clean, kind, carrier, actor, chat, auto, hints):
+    """Reply text from api_fields, or None to fall back to the other ways."""
+    from starlette.concurrency import run_in_threadpool
+    try:
+        fields, source = await api_fields(clean, kind, carrier, hints)
+    except (ValueError, httpx.HTTPError) as exc:
+        print('TRACKING_READER', clean, type(exc).__name__, str(exc)[:160], flush=True)
+        return '🔎 ' + str(exc) if isinstance(exc, ValueError) else None
+    if not fields:
+        print('TRACKING_READER_EMPTY', clean, source, flush=True)
+        return None
+    info = page_info(fields, carrier or hints.get('carrier') or '')
+    _TOUCHED.pop(clean, None)
+    await run_in_threadpool(_save, clean, kind, info['carrier'], info, None, None, actor, auto, 'api', hints)
+    touched = _TOUCHED.pop(clean, 0)
+    text = reply_text(clean, info).replace('أتابعها كل 4 ساعات وأبلغك إذا تغير الموعد يومًا أو أكثر، وعند التفريغ.',
+                                          'أتابعها مرتين يوميًا وأبلغك إذا تغير الموعد يومًا أو أكثر، وعند التفريغ.')
+    text += f'\n• المصدر: {source}.'
+    if touched:
+        text += f'\n• حدّثت تاريخ النزول وآخر يوم مجاني لـ{touched} حاوية في مكتب الحاويات.'
+    target = chat if chat and chat[0] and chat[1] else (await run_in_threadpool(_owner_chat) if auto else None)
+    if target:
+        try:
+            from app import tracking_pdf
+            if await tracking_pdf.send(target, clean, info, source):
+                text += '\n📎 أرسلت تقرير التتبع ملف PDF.'
+        except Exception as exc:
+            print('TRACKING_PDF', clean, type(exc).__name__, str(exc)[:160], flush=True)
+    return text
+
+
 def vessel_ref(vessel, voyage=''):
     name = re.sub(r'[^A-Z0-9]+', '-', f'{vessel} {voyage}'.upper()).strip('-')
     return ('VSL-' + name)[:60] if vessel else ''
@@ -813,6 +879,10 @@ async def track(ref, carrier='', actor='', auto=False, chat=None, vessel='', voy
             return ''
         hints = await run_in_threadpool(hints_for, clean, {'vessel': vessel, 'voyage': voyage, 'carrier': carrier,
                                                            'containers': list(containers or [])})
+        if kind != 'vessel':
+            text = await api_track(clean, kind, carrier, actor, chat, auto, hints)
+            if text:
+                return text
         if research_enabled():
             text = await web_track(clean, kind, carrier, actor, chat, auto, hints)
             if text:
@@ -906,7 +976,7 @@ def change_alerts(row, info):
 def due_web(now):
     init()
     with db() as c:
-        return c.execute('''SELECT * FROM shipment_tracks WHERE source='web' AND provider_id IS NULL
+        return c.execute('''SELECT * FROM shipment_tracks WHERE source IN ('web','api') AND provider_id IS NULL
             AND (NOT arrived OR checked_at < eta + INTERVAL '2 days') AND created_at > %s
             AND (checked_at IS NULL OR checked_at < %s) ORDER BY checked_at NULLS FIRST LIMIT 15''',
                          (now - dt.timedelta(days=60), now - dt.timedelta(hours=12))).fetchall()
@@ -915,8 +985,6 @@ def due_web(now):
 async def refresh_web(now=None, deliver=None):
     """Re-check public-source tracks twice a day; alert on ETA change / discharge."""
     from starlette.concurrency import run_in_threadpool
-    if not research_enabled():
-        return []
     if deliver is None:
         from app.owner_briefing import deliver
     now = now or utcnow()
@@ -927,7 +995,11 @@ async def refresh_web(now=None, deliver=None):
         except ValueError:
             hints = {}
         try:
-            fields = await research(row['ref'], row['ref_type'], row['carrier'], hints)
+            fields = None
+            if row.get('source') == 'api':
+                fields, _ = await api_fields(row['ref'], row['ref_type'], row['carrier'], hints)
+            if not fields and research_enabled():
+                fields = await research(row['ref'], row['ref_type'], row['carrier'], hints)
         except Exception as exc:
             await run_in_threadpool(_mark_error, row['id'], type(exc).__name__)
             continue
@@ -936,7 +1008,8 @@ async def refresh_web(now=None, deliver=None):
             continue
         info = page_info(fields, row['carrier'] or '')
         alerts = change_alerts(row, info)
-        await run_in_threadpool(_save, row['ref'], row['ref_type'], row['carrier'], info, None, None, '', False, 'web', hints)
+        await run_in_threadpool(_save, row['ref'], row['ref_type'], row['carrier'], info, None, None, '', False,
+                                row.get('source') or 'web', hints)
         if alerts:
             await run_in_threadpool(_notified, row['id'], info)
             for text in alerts:
