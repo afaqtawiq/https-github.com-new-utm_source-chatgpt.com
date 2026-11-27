@@ -201,7 +201,7 @@ jobs:
       - run: python tests/carrier_partners_acceptance.py
         env:
           AFAAQ_TEST_DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
-      - run: python -m pytest tests/test_document_totals.py tests/test_advance_reconcile.py tests/test_zernio_background_jobs.py tests/test_saber_certificate.py tests/test_tracking_reader.py tests/test_saber_route_manager.py -q
+      - run: python -m pytest tests/test_document_totals.py tests/test_advance_reconcile.py tests/test_zernio_background_jobs.py tests/test_saber_certificate.py tests/test_tracking_reader.py tests/test_saber_route_manager.py tests/test_office_inbox.py -q
         env:
           DATABASE_URL: postgresql://postgres:local-ci-only@localhost:5432/afaaq_test
       - run: python tests/finance_desk_acceptance.py
