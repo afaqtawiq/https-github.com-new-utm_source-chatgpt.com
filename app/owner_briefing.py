@@ -182,6 +182,12 @@ def briefing_text(today=None):
              '• البوستر اليومي: ' + {'done': 'نُشر ✅', 'partial': 'نُشر جزئيًا ⚠️', 'failed': 'فشل ❌'}.get(data['poster'] or '', 'لم يُنشر')]
     if data['broken']:
         lines += ['', '⚠️ روابط معطلة الآن: ' + fmt(data['broken']) + ' — راجع رسائل التنبيه.']
+    if today.weekday() == 6:  # Sunday: the weekly scorecard of the virtual office (owner, 27 Nov 2026)
+        try:
+            from app import office_scorecard
+            lines += ['', office_scorecard.text(7)]
+        except Exception as exc:
+            print('OFFICE_SCORECARD', type(exc).__name__, str(exc)[:120], flush=True)
     return '\n'.join(lines)
 
 
