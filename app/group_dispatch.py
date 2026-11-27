@@ -53,7 +53,7 @@ def pending(now=None):
     """Bursts (same sender, same group) with an important unanswered message, older than WAIT_MINUTES, last 2 days."""
     now = now or utcnow()
     with db() as c:
-        heads = c.execute('''SELECT * FROM whatsapp_group_messages WHERE important AND answered_at IS NULL AND dispatched_at IS NULL
+        heads = c.execute('''SELECT * FROM whatsapp_group_messages WHERE important AND dispatched_at IS NULL
             AND received_at > %s AND received_at <= %s ORDER BY received_at LIMIT 6''',
                           (now - dt.timedelta(days=2), now - dt.timedelta(minutes=WAIT_MINUTES))).fetchall()
         out, seen = [], set()
@@ -111,7 +111,9 @@ def dispatch(burst):
     blob = text + ' ' + json.dumps(docs, ensure_ascii=False)
     key = route(blob)
     person = virtual_office.DEPARTMENTS[key].get('person') or key
-    request = (f'طلب وصل في قروب «{group}» من {who} ولم يرد عليه أحد من آفاق:\n«{text or "(مرفقات بدون نص)"}»'
+    answered = all(m['answered_at'] is not None for m in burst)
+    request = (f'طلب وصل في قروب «{group}» من {who}' + (' (رد عليه أحد من الفريق في القروب)' if answered else ' ولم يرد عليه أحد من آفاق')
+               + f':\n«{text or "(مرفقات بدون نص)"}»'
                + (f'\nالمرفقات: {files}' if files else '')
                + (('\nما قرأته من المستندات:\n' + json.dumps(docs, ensure_ascii=False)[:2500]) if docs else '')
                + '\n\nالمطلوب منك: ' + ASK[key]
@@ -135,13 +137,22 @@ def run_round():
     try:
         init()
         n = 0
+        from app import office_inbox
         for burst in pending():
+            if office_inbox.runs_today() >= office_inbox.daily_cap():
+                print('GROUP_DISPATCH_CAP', office_inbox.daily_cap(), flush=True)
+                break
+            unanswered = any(m['answered_at'] is None for m in burst)
             text = dispatch(burst)
-            try:
-                from app.owner_briefing import deliver
-                asyncio.run(deliver(text))
-            except Exception as exc:
-                print('GROUP_DISPATCH_DELIVER', type(exc).__name__, str(exc)[:120], flush=True)
+            print('GROUP_DISPATCHED', burst[-1]['conversation_id'][:12], len(burst), unanswered, flush=True)
+            # The owner hears about it when nobody from Afaq answered in the group or a «نفذ» code waits for him;
+            # otherwise the work is in the department's history in the office.
+            if unanswered or office_inbox.CODE.search(text):
+                try:
+                    from app.owner_briefing import deliver
+                    asyncio.run(deliver(text))
+                except Exception as exc:
+                    print('GROUP_DISPATCH_DELIVER', type(exc).__name__, str(exc)[:120], flush=True)
             n += 1
         return n
     except Exception as exc:

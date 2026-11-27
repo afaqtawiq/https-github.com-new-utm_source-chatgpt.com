@@ -461,6 +461,11 @@ async def tick(now=None, deliver=None):
             group_dispatch.kick()
     except Exception as exc:
         print('GROUP_WATCH_TICK', type(exc).__name__, str(exc)[:160], flush=True)
+    try:
+        from app import office_inbox  # and every customer request from the private chats (owner, 27 Nov 2026)
+        office_inbox.kick()
+    except Exception as exc:
+        print('GROUP_WATCH_TICK', type(exc).__name__, str(exc)[:160], flush=True)
     return sent
 
 

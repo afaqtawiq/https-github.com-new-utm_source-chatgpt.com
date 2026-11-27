@@ -199,6 +199,11 @@ def accept_inbound(payload):
         job = store.enqueue(c, **who, payload=data)
         c.execute("INSERT INTO zernio_reply_events(event_id,conversation_id,state) VALUES(%s,%s,'agent_queued') ON CONFLICT DO NOTHING",
                   (who['event_id'],who['conversation_id']))
+    # Every customer request also goes to the virtual office (owner, 27 Nov 2026); never affects the reply above.
+    from app import office_inbox
+    office_inbox.keep(who['account_id'], who['conversation_id'], who['message_id'], who['sender'], data.get('sender_name') or '',
+                      data.get('conversation_text') or (data.get('question') if data.get('question_allowed') else '') or '',
+                      len(attachments))
     return {'ok':True,'queued':True,'job_id':job['id'],'automatic_retry_of_send':False}
 
 
